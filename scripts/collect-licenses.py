@@ -16,6 +16,8 @@ import tempfile
 import tomllib
 from urllib.parse import quote, urlsplit, urlunsplit
 
+from external_paths import external_path as checked_external_path
+
 ROOT = Path(__file__).resolve().parents[1]
 NOTICE = "THIRD-PARTY-NOTICES.txt"
 INVENTORY = "THIRD-PARTY-LICENSES.json"
@@ -44,16 +46,7 @@ def command(*args, env=None):
 
 
 def external_path(path):
-    """Reject relative paths and both lexical and symlink-resolved checkouts."""
-    path = Path(path)
-    if not path.is_absolute():
-        raise ValueError(f"Use an absolute external path: {path}")
-    resolved = path.resolve()
-    for candidate in (path, resolved):
-        for parent in (candidate, *candidate.parents):
-            if (parent / ".git").exists() or parent == ROOT:
-                raise ValueError(f"Output is inside a repository: {path}")
-    return resolved
+    return checked_external_path(path, root=ROOT)
 
 
 def new_directory(path):

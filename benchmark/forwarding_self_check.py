@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import time
@@ -173,7 +174,7 @@ class Controls(unittest.TestCase):
             root = Path(directory)
             repository = root / "recipe"
             repository.mkdir()
-            (repository / ".git").mkdir()
+            subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
             alias = root / "alias"
             alias.symlink_to(repository, target_is_directory=True)
             outside = root / "outside"

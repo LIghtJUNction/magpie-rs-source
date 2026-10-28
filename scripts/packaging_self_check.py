@@ -37,7 +37,7 @@ class Controls(unittest.TestCase):
         repository = self.root / "recipe"
         source = repository / "generated" / "source"
         source.mkdir(parents=True)
-        (repository / ".git").mkdir()
+        subprocess.run(["git", "init", "--quiet", str(repository)], check=True)
         (source / ".git").write_text("gitdir: elsewhere")
         alias = self.root / "alias"
         alias.symlink_to(repository, target_is_directory=True)
@@ -263,6 +263,8 @@ class Controls(unittest.TestCase):
         for path in (source, source / "apps/desktop"):
             (path / "Cargo.lock").write_text("synthetic lock")
         shutil.copyfile(licenses.__file__, source / "scripts/collect-licenses.py")
+        shutil.copyfile(Path(licenses.__file__).with_name("external_paths.py"),
+                        source / "scripts/external_paths.py")
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
         cargo = bin_dir / "cargo"

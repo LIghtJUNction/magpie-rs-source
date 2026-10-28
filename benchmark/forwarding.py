@@ -30,6 +30,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+from external_paths import external_path
+
 EVENT_BYTES = 16 * 1024
 PERIOD = 0.1
 ROUND_INTERVAL = 0.05
@@ -742,11 +745,10 @@ def parse_options():
         parser.error("--binary must name an executable file")
     options.binary = options.binary.resolve()
     supplied_output = options.output
-    options.output = options.output.resolve()
-    for candidate in (supplied_output, options.output):
-        for parent in (candidate, *candidate.parents):
-            if (parent / ".git").exists() or parent == ROOT:
-                parser.error("--output must be outside every repository")
+    try:
+        options.output = external_path(supplied_output, root=ROOT)
+    except ValueError as error:
+        parser.error(str(error))
     if options.output.exists() or supplied_output.is_symlink():
         parser.error("--output must be a new exclusive path")
     for name, lower, upper in (

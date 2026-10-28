@@ -1,0 +1,24 @@
+{
+  "date": "2026-10-29",
+  "base_commit": "812756d81253c3a798d328bd99fb6209fa37270c",
+  "sha256": {
+    "benchmark/forwarding.py": "e9347bf97522bab3fc673e6cc28ac7dfaabd06638a8b2f5f307764b645ee5c62",
+    "benchmark/forwarding_self_check.py": "f5a5048a2036b263608abc913ebfd6cdcc20a5d2052d7627fedae10b7a50d1b0",
+    "scripts/collect-licenses.py": "2b194b7c7fff0e9094b3a16804a86d269acb637ffecdd509bb11069504efe0a4",
+    "scripts/packaging_self_check.py": "519842090aa9633f59cba3de68e871e698f0757c6c987524c26bafbc732df8e1",
+    "scripts/external_paths.py": "dd8249fea92ab727516624edf565a30d4d52aad23979ef8de07d325f445b5238",
+    "scripts/external_paths_self_check.py": "8569fa5e5270cb6c5dc39de43e8bb82170d36c9015ef1a6a6aa408947e8fcf24"
+  },
+  "local_linux_results": {
+    "git_version": "2.56.0",
+    "shared_path_tests": 14,
+    "packaging_tests": 13,
+    "benchmark_tests": 8,
+    "scope": "synthetic temporary repositories; external cache path checked read-only"
+  },
+  "limitations": [
+    "Windows, macOS, older Git not tested",
+    "pre-check to later I/O ancestor replacement race remains",
+    "no cross-platform package execution"
+  ]
+}
