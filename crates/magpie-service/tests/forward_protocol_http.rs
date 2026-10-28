@@ -1112,3 +1112,28 @@ async fn request_event_and_reply_limits_fail_without_exposing_payloads() {
         counters_settle(&http, address, 0, 1, 0).await;
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn omitted_protocol_rejects_new_entrypoints_without_contacting_upstream() {
+    let http = client();
+    let fixture = Fixture::start(Reply::json(response_body(Protocol::OpenAiChat))).await;
+    let (_server, address) = ServerProcess::start(config(fixture.address, None));
+    for protocol in [Protocol::AnthropicMessages, Protocol::Gemini] {
+        let response = send(
+            &http,
+            address,
+            protocol,
+            false,
+            request_body(protocol, false),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            501,
+            "legacy config must reject {protocol:?}"
+        );
+        let body = response.text().await.expect("error response");
+        assert!(body.contains("endpoint_not_implemented"));
+    }
+    assert_eq!(fixture.requests.load(Ordering::SeqCst), 0);
+}

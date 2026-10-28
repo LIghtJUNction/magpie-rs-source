@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-29",
+  "tested_source_base": "241388874b0b7051c5e441daa0b2f725192c2c86",
+  "input_sha256": {
+    "crates/magpie-service/src/forward.rs": "f6abd68ac60f55dc224d8b8da01d36511ae1ac628097d7e34ec5e3d0ad482b10",
+    "crates/magpie-service/tests/forward_protocol_http.rs": "142b60d6294f988cbd7f86d08d65cba82b93bb6bd095e19706fb66eb661d98ae"
+  },
+  "failing_before": "new regression rejected expected 501, received 502 for unconfigured Anthropic endpoint; first_loop 25/26 with test_09 failure",
+  "passing_after": {
+    "focused_regression": 1,
+    "service_all_targets": 55,
+    "service_clippy": "passed",
+    "first_loop_tcp_synthetic": 26,
+    "binary_sha256": "4c04761ba517b3d82b4ed492950d2bcd7f78a811d270ebdb3a0f93b176a11a3a"
+  },
+  "scope": "Linux loopback synthetic provider; prebuilt debug binary; one run of first_loop",
+  "limitations": [
+    "separately reported nondeterministic first-SSE-header boundary is not proven fixed",
+    "external accounts and TLS not tested",
+    "complete product parity not established"
+  ]
+}

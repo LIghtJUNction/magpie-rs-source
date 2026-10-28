@@ -501,8 +501,7 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
     let client = route
         .as_ref()
         .map_or(Protocol::OpenAiChat, |route| route.protocol);
-    let typed_errors = state.config.upstream_protocol.is_some()
-        || matches!(client, Protocol::AnthropicMessages | Protocol::Gemini);
+    let typed_errors = state.config.upstream_protocol.is_some();
     let error = |status: StatusCode, code: &'static str| {
         if typed_errors {
             let category = match code {
@@ -585,6 +584,11 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
     let Some(route) = route else {
         return error(StatusCode::NOT_IMPLEMENTED, "endpoint_not_implemented");
     };
+    if state.config.upstream_protocol.is_none()
+        && matches!(client, Protocol::AnthropicMessages | Protocol::Gemini)
+    {
+        return error(StatusCode::NOT_IMPLEMENTED, "endpoint_not_implemented");
+    }
     if headers.contains_key(header::CONTENT_ENCODING)
         || !headers
             .get(header::CONTENT_TYPE)
