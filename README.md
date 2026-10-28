@@ -6,7 +6,8 @@ status window. The full product contract remains under active implementation. Th
 
 ## Install
 
-Download the matching package and SHA-256 checksums from
+Packaging is prepared but AUR packages and release assets have not been
+published yet. After publication, download matching packages and checksums from
 [magpie-rs Releases](https://github.com/LIghtJUNction/magpie-rs/releases).
 On Arch Linux use `paru -S magpie-rs-bin`, or build from source with
 `paru -S magpie-rs-git`. Both packages conflict with the original Magpie
