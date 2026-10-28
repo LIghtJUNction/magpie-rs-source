@@ -1,7 +1,7 @@
 //! Render the production MagpieWindow into textures using isolated synthetic data.
 //!
 //! Build with --features visual-test --example render_preview, then run with
-//! --output /absolute/new/directory [--locale en|zh-CN|zh-TW|ja|de] [--all].
+//! --output /absolute/new/directory [--locale en|zh-CN|zh-TW|ja|de] [--all] [--size WIDTHxHEIGHT].
 //! The default baseline is the real Agents scene, light theme, at 900x560.
 //! --all includes Codex details and Settings at 900/360/440x560 in both themes.
 //! Each scene saves a 1x PNG, the native texture and a manifest. No OS window opens.
@@ -116,8 +116,7 @@ use theme::Appearance;
 const GPUI_REVISION: &str = "37faef81f74fc1bb08be9939c4cffc8ede6ced2f";
 const FIXTURE_CONFIG: &str = "model = \"fixture/preview-model\"\n\
     model_provider = \"fixture\"\nmodel_reasoning_effort = \"high\"\n";
-const WIDTHS: [u32; 3] = [900, 360, 440];
-const HEIGHT: u32 = 560;
+const VIEWPORTS: [(u32, u32); 3] = [(900, 560), (360, 560), (440, 560)];
 
 #[derive(Clone, Copy)]
 enum Scene {
@@ -141,6 +140,7 @@ struct Options {
     locale: Locale,
     locale_name: String,
     all: bool,
+    viewport: Option<(u32, u32)>,
     worker: bool,
 }
 
@@ -152,6 +152,7 @@ fn options() -> Result<Option<Options>> {
     let mut output = None;
     let mut locale_name = "zh-CN".to_owned();
     let mut all = false;
+    let mut viewport = None;
     let mut worker = false;
     let mut arguments = env::args_os().skip(1);
     while let Some(argument) = arguments.next() {
@@ -169,6 +170,23 @@ fn options() -> Result<Option<Options>> {
                     .and_then(|value| value.into_string().ok())
                     .ok_or_else(|| invalid("--locale needs a language tag"))?;
             }
+            Some("--size") if viewport.is_none() => {
+                let value = arguments
+                    .next()
+                    .and_then(|v| v.into_string().ok())
+                    .ok_or_else(|| invalid("--size needs WIDTHxHEIGHT"))?;
+                let (width, height) = value
+                    .split_once('x')
+                    .ok_or_else(|| invalid("--size needs WIDTHxHEIGHT"))?;
+                let width = width.parse::<u32>().map_err(|_| invalid("invalid width"))?;
+                let height = height
+                    .parse::<u32>()
+                    .map_err(|_| invalid("invalid height"))?;
+                if !(240..=1920).contains(&width) || !(240..=1080).contains(&height) {
+                    return Err(invalid("--size must be within 240x240 and 1920x1080").into());
+                }
+                viewport = Some((width, height));
+            }
             Some("--all") => all = true,
             Some("--isolated-worker") => worker = true,
             Some("--help" | "-h") => {
@@ -176,6 +194,7 @@ fn options() -> Result<Option<Options>> {
                     "render_preview --output ABS_NEW_DIRECTORY [--locale en|zh-CN|zh-TW|ja|de] [--all]\n\
                      Default: Agents, light theme, 900x560; one 1x PNG, native texture and manifest.json.\n\
                      --all: 18 scenes across Agents/Codex/Settings, both themes and three widths.\n\
+                     --size: render one custom viewport; combine with --all for six scene/theme pairs.\n\
                      Uses an isolated child, real GPUI scene rendering and system fonts."
                 );
                 return Ok(None);
@@ -200,6 +219,7 @@ fn options() -> Result<Option<Options>> {
         locale,
         locale_name,
         all,
+        viewport,
         worker,
     }))
 }
@@ -291,6 +311,9 @@ fn isolated(options: &Options) -> Result<ExitCode> {
     if options.all {
         command.arg("--all");
     }
+    if let Some((width, height)) = options.viewport {
+        command.args(["--size", &format!("{width}x{height}")]);
+    }
     for name in [
         "WGPU_BACKEND",
         "WGPU_ADAPTER_NAME",
@@ -358,7 +381,11 @@ fn render(options: &Options) -> Result<()> {
         Arc::new(assets::Assets),
         gpui_platform::current_headless_renderer,
     );
-    let widths: &[u32] = if options.all { &WIDTHS } else { &[900] };
+    let viewports: &[(u32, u32)] = match &options.viewport {
+        Some(viewport) => std::slice::from_ref(viewport),
+        None if options.all => &VIEWPORTS,
+        None => &[(900, 560)],
+    };
     let themes: &[(&str, Appearance)] = if options.all {
         &[("light", Appearance::Light), ("dark", Appearance::Dark)]
     } else {
@@ -370,9 +397,9 @@ fn render(options: &Options) -> Result<()> {
         &[Scene::Agents]
     };
     let mut records = Vec::new();
-    for &width in widths {
+    for &(width, height) in viewports {
         for &(theme_name, appearance) in themes {
-            let handle = cx.open_window(size(px(width as f32), px(HEIGHT as f32)), |_, cx| {
+            let handle = cx.open_window(size(px(width as f32), px(height as f32)), |_, cx| {
                 cx.new(ui::MagpieWindow::new)
             })?;
             // Production discovery sees only the empty synthetic PATH and HOME.
@@ -393,12 +420,12 @@ fn render(options: &Options) -> Result<()> {
                 let density = native_width / width;
                 if !(1..=4).contains(&density)
                     || native_width != width * density
-                    || native_height != HEIGHT * density
+                    || native_height != height * density
                 {
                     return Err(invalid("unexpected headless texture dimensions").into());
                 }
                 let stem = format!(
-                    "{}-{}-{theme_name}-{width}x{HEIGHT}",
+                    "{}-{}-{theme_name}-{width}x{height}",
                     scene.name(),
                     options.locale_name
                 );
@@ -410,7 +437,7 @@ fn render(options: &Options) -> Result<()> {
                 if density != 1 {
                     let mut samples = image.clone().into_flat_samples();
                     samples.samples.clear();
-                    for y in 0..HEIGHT {
+                    for y in 0..height {
                         for x in 0..width {
                             let mut channels = [0_u32; 4];
                             for dy in 0..density {
@@ -427,7 +454,7 @@ fn render(options: &Options) -> Result<()> {
                         }
                     }
                     samples.layout.width = width;
-                    samples.layout.height = HEIGHT;
+                    samples.layout.height = height;
                     samples.layout.height_stride = width as usize * 4;
                     image = samples.try_into_buffer().map_err(|(error, _)| {
                         invalid(format!("normalizing preview pixels: {error}"))
@@ -439,7 +466,7 @@ fn render(options: &Options) -> Result<()> {
                 println!("{}", output.join(&filename).display());
                 records.push(json!({
                     "scene": scene.name(), "locale": options.locale_name, "theme": theme_name,
-                    "logical_width": width, "logical_height": HEIGHT,
+                    "logical_width": width, "logical_height": height,
                     "png": filename, "png_width": image.width(), "png_height": image.height(),
                     "native_png": native_name, "native_width": native_width,
                     "native_height": native_height, "native_density": density,

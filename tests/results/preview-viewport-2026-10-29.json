@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-29",
+  "tested_source_base": "2ae5b9a1cfaff04325642e9f288f5debfd8c9577",
+  "renderer_sha256": "42461d456b026459486008cd38d74bf8e909df932884eae588b0398e0240abbd",
+  "wide_1440x900": {
+    "scene_count": 1
+  },
+  "narrow_360x760": {
+    "scene_count": 6,
+    "themes": [
+      "light",
+      "dark"
+    ]
+  },
+  "out_of_bounds_200x760": "rejected with exit 1 before output creation",
+  "scope": "Linux offscreen real GPUI Scene, native text system and synthetic fixture; source base still contains the rejected r2 UI",
+  "not_checked": [
+    "new Pro r3 UI",
+    "OS window input",
+    "user visual acceptance",
+    "other platforms"
+  ]
+}
