@@ -148,15 +148,39 @@ fn render_original_agent_text(command: legacy_agent_display::TextCommand) -> Res
 
     let discovery = agents::discover_installed_agents_report()
         .map_err(|_| "agent_discovery_incomplete: PATH cannot be inspected".to_owned())?;
-    let directory = agents::codex_config_path()
-        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+    let config_path = agents::codex_config_path();
+    let directory = config_path
+        .as_deref()
+        .and_then(std::path::Path::parent)
         .map_or(Ok(CodexDirectory::NotChecked), |path| {
-            legacy_agent_display::inspect_codex_directory(&path)
+            legacy_agent_display::inspect_codex_directory(path)
         })
         .map_err(|_| {
             "agent_discovery_incomplete: Codex directory cannot be inspected".to_owned()
         })?;
-    match legacy_agent_display::render(command, &discovery.report, &directory) {
+    // Observation 39 covers Linux with absent Claude/Gemini state and an
+    // absent/empty Codex directory. Existing state or inspection uncertainty
+    // retains the preceding renderer/fallback, including configured Codex.
+    let candidate_home = env::var_os("HOME").map(std::path::PathBuf::from);
+    let candidate_path = config_path.as_deref().filter(|path| {
+        observed_candidate_environment()
+            && candidate_home.as_deref().is_some_and(|home| {
+                path.parent().is_some_and(|codex_home| {
+                    legacy_agent_display::inspect_empty_candidate_state(home, codex_home)
+                        .unwrap_or(false)
+                })
+            })
+    });
+    let output = match candidate_path {
+        Some(path) => legacy_agent_display::render_unconfigured_candidates(
+            command,
+            &discovery.report,
+            &directory,
+            path,
+        ),
+        None => legacy_agent_display::render(command, &discovery.report, &directory),
+    };
+    match output {
         Ok(output) if output.exit_code == 0 => {
             print!("{}", output.stdout);
             Ok(true)
@@ -169,10 +193,25 @@ fn render_original_agent_text(command: legacy_agent_display::TextCommand) -> Res
         }
         Ok(_) => Err("agent_discovery_incomplete: unexpected listing result".to_owned()),
         Err(
-            DisplayError::UnobservedCandidate { .. } | DisplayError::UnverifiedCandidate { .. },
+            DisplayError::UnobservedCandidate { .. }
+            | DisplayError::UnverifiedCandidate { .. }
+            | DisplayError::UnobservedCombination,
         ) => Ok(false),
         Err(error) => Err(format!("agent_discovery_incomplete: {error}")),
     }
+}
+
+fn observed_candidate_environment() -> bool {
+    cfg!(target_os = "linux")
+        && env::var_os("CODEX_HOME").is_some_and(|path| std::path::Path::new(&path).is_absolute())
+        && !env::vars_os().any(|(key, _)| {
+            key.to_str().is_some_and(|key| {
+                key != "CODEX_HOME"
+                    && ["CLAUDE", "CODEX", "GEMINI", "ANTHROPIC", "GOOGLE", "OPENAI"]
+                        .iter()
+                        .any(|prefix| key.starts_with(prefix))
+            })
+        })
 }
 
 fn print_discovered_agents() -> bool {

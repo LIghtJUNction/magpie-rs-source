@@ -1,2 +1,3 @@
 # These captured CLI outputs intentionally contain significant trailing spaces.
 crates/magpie-cli/tests/fixtures/legacy_agent_display/*.stdout whitespace=-blank-at-eol
+crates/magpie-cli/tests/fixtures/legacy_agent_candidates/*.stdout whitespace=-blank-at-eol

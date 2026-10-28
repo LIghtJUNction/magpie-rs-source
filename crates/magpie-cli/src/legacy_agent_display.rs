@@ -1,12 +1,12 @@
 //! The observed Magpie 0.1.1948 `agents`/`ls` text slice, not a discovery adapter.
 //!
-//! Evidence: 36-original-cli-behavior.md, observations 15, 16, 43 and 44.
-//! Only the no-candidate and directory-only Codex cases have original evidence.
-//! Other positive candidates return an explicit out-of-scope error. Incomplete
-//! discovery is never converted into the original empty-`ls` response.
+//! Evidence: 36-original-cli-behavior.md and 39-original-cli-candidate-behavior.md.
+//! The latter adds single Claude/Codex/Gemini candidates and the all-three set
+//! without settings. Unobserved combinations/configurations stay out of scope.
+//! Incomplete discovery is never converted into the original empty-`ls` response.
 //!
 //! Callers supply a core report and an explicitly inspected Codex directory;
-//! there is no environment lookup, account/config read, execution or printing.
+//! there is no environment lookup, account/config content read or execution.
 //! `not detected` means no positive evidence, including unimplemented rules,
 //! not proof that all 68 products were checked or are absent.
 //! Directory evidence does not attest that the directory is empty. Existing
@@ -144,6 +144,8 @@ pub enum DisplayError {
     UnobservedCandidate { agent_id: &'static str },
     /// A matching filename cannot establish the candidate's product identity.
     UnverifiedCandidate { agent_id: &'static str },
+    /// Original bytes were not observed for this combination of candidates/state.
+    UnobservedCombination,
     /// A path cannot be safely represented as one absolute UTF-8 terminal value.
     UnrepresentableConfigPath,
 }
@@ -163,6 +165,9 @@ impl fmt::Display for DisplayError {
             ),
             Self::UnverifiedCandidate { agent_id } => {
                 write!(formatter, "candidate identity for {agent_id} is unverified")
+            }
+            Self::UnobservedCombination => {
+                formatter.write_str("candidate combination is outside the observed CLI slice")
             }
             Self::UnrepresentableConfigPath => {
                 formatter.write_str("config path cannot be represented safely in the text listing")
@@ -203,6 +208,38 @@ pub fn inspect_codex_directory(home: &Path) -> io::Result<CodexDirectory> {
     }
 }
 
+/// Checks the empty state used by observation 39, without reading file contents.
+///
+/// Claude/Gemini state directories must be absent. Codex may be absent or a
+/// direct empty directory. Any existing state, including an account or unrelated
+/// file, keeps the caller on its previous display path.
+///
+/// # Errors
+/// Rejects relative paths and unsafe Codex directories, and propagates lookup
+/// errors. An inspection failure must not establish an empty candidate state.
+pub fn inspect_empty_candidate_state(home: &Path, codex_home: &Path) -> io::Result<bool> {
+    if !home.is_absolute() || !codex_home.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "candidate state requires explicit absolute home directories",
+        ));
+    }
+    for directory in [home.join(".claude"), home.join(".gemini")] {
+        match fs::symlink_metadata(directory) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Ok(_) => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    }
+    match inspect_codex_directory(codex_home)? {
+        CodexDirectory::Missing => Ok(true),
+        CodexDirectory::Present { .. } => {
+            Ok(fs::read_dir(codex_home)?.next().transpose()?.is_none())
+        }
+        CodexDirectory::NotChecked => Ok(false),
+    }
+}
+
 /// Renders only the two observed no-executable states without any filesystem I/O.
 ///
 /// A directory-only Codex row reports `CLI not found` only after a reliable
@@ -217,6 +254,33 @@ pub fn render(
     command: TextCommand,
     report: &DiscoveryReport,
     codex_directory: &CodexDirectory,
+) -> Result<TextOutput, DisplayError> {
+    render_observed(command, report, codex_directory, None)
+}
+
+/// Renders observation 39's candidates after an empty-state inspection succeeds.
+///
+/// The caller must first establish [`inspect_empty_candidate_state`] for the
+/// same explicit HOME/CODEX_HOME. The config path remains available even when
+/// CODEX_HOME does not exist. This renderer itself performs no filesystem I/O.
+///
+/// # Errors
+/// Rejects incomplete discovery, unobserved candidate combinations and unsafe
+/// config paths. Actual settings remain the caller's existing display behavior.
+pub fn render_unconfigured_candidates(
+    command: TextCommand,
+    report: &DiscoveryReport,
+    codex_directory: &CodexDirectory,
+    codex_config_path: &Path,
+) -> Result<TextOutput, DisplayError> {
+    render_observed(command, report, codex_directory, Some(codex_config_path))
+}
+
+fn render_observed(
+    command: TextCommand,
+    report: &DiscoveryReport,
+    codex_directory: &CodexDirectory,
+    candidate_config_path: Option<&Path>,
 ) -> Result<TextOutput, DisplayError> {
     if report.agents.len() != ORIGINAL_ORDER.len()
         || ORIGINAL_ORDER.iter().any(|id| {
@@ -238,13 +302,28 @@ pub fn render(
     }
     let mut unchecked_agent_ids = Vec::new();
     let mut unobserved = None;
+    let mut candidates = Vec::new();
     for agent in &report.agents {
         match &agent.detection {
             Detection::NotFoundOnPath => {}
             Detection::NotChecked(NotCheckedReason::UnknownRule) => {
                 unchecked_agent_ids.push(agent.definition.id);
             }
-            Detection::ExecutableFound(evidence) | Detection::EditorHostFound(evidence) => {
+            Detection::ExecutableFound(evidence) => {
+                if evidence.earlier_uncertainty {
+                    return Err(DisplayError::IncompleteDiscovery);
+                }
+                if candidate_config_path.is_some()
+                    && matches!(agent.definition.id, "claude" | "codex" | "gemini")
+                {
+                    candidates.push(agent.definition.id);
+                } else {
+                    unobserved.get_or_insert(DisplayError::UnobservedCandidate {
+                        agent_id: agent.definition.id,
+                    });
+                }
+            }
+            Detection::EditorHostFound(evidence) => {
                 if evidence.earlier_uncertainty {
                     return Err(DisplayError::IncompleteDiscovery);
                 }
@@ -268,22 +347,33 @@ pub fn render(
     if let Some(error) = unobserved {
         return Err(error);
     }
-    let config_path = match codex_directory {
-        CodexDirectory::Missing => None,
-        CodexDirectory::Present { config_path } => {
-            if !report.agents.iter().any(|agent| {
-                agent.definition.id == "codex" && agent.detection == Detection::NotFoundOnPath
-            }) {
-                return Err(DisplayError::IncompleteDiscovery);
+    candidates.sort_unstable();
+    if !candidates.is_empty()
+        && (!matches!(
+            candidates.as_slice(),
+            ["claude"] | ["codex"] | ["gemini"] | ["claude", "codex", "gemini"]
+        ) || (matches!(codex_directory, CodexDirectory::Present { .. })
+            && !candidates.contains(&"codex")))
+    {
+        return Err(DisplayError::UnobservedCombination);
+    }
+    let config_path = if candidates.contains(&"codex") {
+        Some(config_path_text(
+            candidate_config_path.ok_or(DisplayError::UnrepresentableConfigPath)?,
+        )?)
+    } else {
+        match codex_directory {
+            CodexDirectory::Missing => None,
+            CodexDirectory::Present { config_path } => {
+                if !report.agents.iter().any(|agent| {
+                    agent.definition.id == "codex" && agent.detection == Detection::NotFoundOnPath
+                }) {
+                    return Err(DisplayError::IncompleteDiscovery);
+                }
+                Some(config_path_text(config_path)?)
             }
-            let path = config_path
-                .to_str()
-                .filter(|path| !path.chars().any(char::is_control))
-                .filter(|_| config_path.is_absolute())
-                .ok_or(DisplayError::UnrepresentableConfigPath)?;
-            Some(path)
+            CodexDirectory::NotChecked => return Err(DisplayError::IncompleteDiscovery),
         }
-        CodexDirectory::NotChecked => return Err(DisplayError::IncompleteDiscovery),
     };
     let mut rows = Vec::new();
     for id in ORIGINAL_ORDER {
@@ -293,17 +383,20 @@ pub fn render(
             .find(|agent| agent.definition.id == id)
             .map(|agent| agent.definition)
             .ok_or(DisplayError::CatalogMismatch)?;
-        let detail = (id == "codex").then_some(config_path).flatten();
+        let (state, detail) = if candidates.contains(&id) {
+            match id {
+                "claude" => ("—  ·  effort —", Some("~/.claude/settings.json")),
+                "codex" => ("—  ·  effort —", config_path),
+                "gemini" => ("auth —  ·  —", Some("~/.gemini/settings.json")),
+                _ => return Err(DisplayError::UnobservedCombination),
+            }
+        } else if id == "codex" && config_path.is_some() {
+            ("CLI not found", config_path)
+        } else {
+            ("not detected", None)
+        };
         if command == TextCommand::Agents || detail.is_some() {
-            rows.push((
-                display_name(definition),
-                if detail.is_some() {
-                    "CLI not found"
-                } else {
-                    "not detected"
-                },
-                detail.unwrap_or(""),
-            ));
+            rows.push((display_name(definition), state, detail.unwrap_or("")));
         }
     }
     if rows.is_empty() {
@@ -319,7 +412,11 @@ pub fn render(
         .map(|row| row.0.chars().count())
         .max()
         .unwrap_or(0);
-    let state_width = rows.iter().map(|row| row.1.len()).max().unwrap_or(0);
+    let state_width = rows
+        .iter()
+        .map(|row| row.1.chars().count())
+        .max()
+        .unwrap_or(0);
     let mut stdout = String::new();
     for (name, state, detail) in rows {
         stdout.push_str(&format!(
@@ -332,6 +429,13 @@ pub fn render(
         exit_code: 0,
         unchecked_agent_ids,
     })
+}
+
+fn config_path_text(path: &Path) -> Result<&str, DisplayError> {
+    path.to_str()
+        .filter(|text| !text.chars().any(char::is_control))
+        .filter(|_| path.is_absolute())
+        .ok_or(DisplayError::UnrepresentableConfigPath)
 }
 
 fn display_name(definition: &AgentDefinition) -> &'static str {

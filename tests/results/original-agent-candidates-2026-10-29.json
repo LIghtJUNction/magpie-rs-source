@@ -1,0 +1,47 @@
+{
+  "date": "2026-10-29",
+  "base_commit": "dd35372e5e603b32aa670f5ce7f29b6a6346d8bb",
+  "input_sha256": {
+    ".gitattributes": "2b56fd994163f7c6e74f59ee3513e4db16c0c07f21783813e91cee6bc96c296a",
+    "crates/magpie-cli/src/legacy_agent_display.rs": "272de50bd33ba4e9752c1875be8a643f555d9a5d2a7764e96c688cd186e28d41",
+    "crates/magpie-cli/src/main.rs": "7136d507e763871da828ccf0e95ddfb754d743e9ae36044c3f0289b3b7cfd85c",
+    "crates/magpie-cli/tests/legacy_agent_display.rs": "fd1ae34658eb5a7e41c727e1f7d59beb112e7c767fa975b07de28253cf191937",
+    "crates/magpie-cli/tests/legacy_agent_candidates.rs": "1a431c47d146f6a24eb235d2395b5b2e51286561b45726db2db63f72b4526465",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates/README.md": "3e8c8ea230c95dd77d8c25890e3a65a92cb246d1898be52fc3e6a7b381f55e61",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates/all-three-agents.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates/all-three-agents.stdout": "40f695d6158688332fb1075bd648c35bbf6e35ae82feb01eac684631c834407c",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates/all-three-ls.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates/all-three-ls.stdout": "41b980a9f90a3e1b01520d5b6257d1339a26b3040d5faed9c88a2c39bbf75927",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates/claude-only-agents.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates/claude-only-agents.stdout": "e91aa9865d6f314eda7996caf3c9c526add997f4ea82e4b0bd06043a3d6436c4",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates/claude-only-ls.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates/claude-only-ls.stdout": "f9351c63315912c811da5bdcfd0f983fbaa0391a3b99f433cb5c076e2e1cf345",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates/codex-only-agents.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates/codex-only-agents.stdout": "4b612b1da9d3a5ccd39b3603d8927999aeb4b51c55cbca6276b50349bca86311",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates/codex-only-ls.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates/codex-only-ls.stdout": "962e722102caea103b6750ad379d6af3a5cba262c406510b98435071896ff772",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates/control-empty-agents.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates/control-empty-agents.stdout": "8e01e78fb86e3fb8cd2493aeecccde601b3d898c3a9d2e1fd1589b97b854fa0f",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates/control-empty-ls.stderr": "622c0d989a6bf9be2f9d0329b60ab390114c83951484a132b05b796cae36edf0",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates/control-empty-ls.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates/gemini-only-agents.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates/gemini-only-agents.stdout": "f8fc901ff64cf45b6ff1230db6af4be2ceacd698cfaf4fe73c491e22c23b68d8",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates/gemini-only-ls.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates/gemini-only-ls.stdout": "a7c981ecaec253f00851cd0747a8ce8317ac26c5764ff388adfab11d8a72ab91",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates/manifest.json": "8e2af78f67a4f804f2b3125e39590e0172d1a16236b0fc80b96255885bfd31f8"
+  },
+  "original_evidence_sha256": "56230fee55d965bea0e4b8653b7298f199e8dc35e14dc696763ca3e01c824be6",
+  "observations": "isolated original 0.1.1948 with synthetic executable candidates, CLI byte output",
+  "verification": {
+    "cli_tests_passed": 36,
+    "isolated_helper_ignored": 1,
+    "fmt": "passed",
+    "clippy": "passed",
+    "baseline_comparisons": 245
+  },
+  "limits": [
+    "new display branch limited to observed Linux synthetic empty-state conditions",
+    "real accounts, existing agent configuration semantics, two-candidate combinations, GUI and other platforms not established",
+    "comparison is to previous Rust behavior, not full original parity"
+  ]
+}

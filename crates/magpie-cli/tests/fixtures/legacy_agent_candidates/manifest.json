@@ -1,0 +1,352 @@
+{
+  "evidence_document": "39-original-cli-candidate-behavior.md",
+  "evidence_document_sha256": "56230fee55d965bea0e4b8653b7298f199e8dc35e14dc696763ca3e01c824be6",
+  "original_version": "0.1.1948",
+  "original_binary_sha256": "9aa760cbac67f375a810fcf15b9adf04edcb2cc7de64a9ebb0963da15c1d3eb7",
+  "runs": [
+    {
+      "run_number": 4,
+      "scenario": "control-empty",
+      "fixture_variant": "absent-codex-dir",
+      "fake_programs": [],
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "stdout_sha256": "8e01e78fb86e3fb8cd2493aeecccde601b3d898c3a9d2e1fd1589b97b854fa0f",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "output_bytes": {
+        "stdout": 2924,
+        "stderr": 0
+      },
+      "stdout_file": "control-empty-agents.stdout",
+      "stderr_file": "control-empty-agents.stderr"
+    },
+    {
+      "run_number": 5,
+      "scenario": "control-empty",
+      "fixture_variant": "absent-codex-dir",
+      "fake_programs": [],
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 1,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stderr_sha256": "622c0d989a6bf9be2f9d0329b60ab390114c83951484a132b05b796cae36edf0",
+      "output_bytes": {
+        "stdout": 0,
+        "stderr": 50
+      },
+      "stdout_file": "control-empty-ls.stdout",
+      "stderr_file": "control-empty-ls.stderr"
+    },
+    {
+      "run_number": 6,
+      "scenario": "claude-only",
+      "fixture_variant": "absent-codex-dir",
+      "fake_programs": [
+        "claude"
+      ],
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "stdout_sha256": "e91aa9865d6f314eda7996caf3c9c526add997f4ea82e4b0bd06043a3d6436c4",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "output_bytes": {
+        "stdout": 3088,
+        "stderr": 0
+      },
+      "stdout_file": "claude-only-agents.stdout",
+      "stderr_file": "claude-only-agents.stderr"
+    },
+    {
+      "run_number": 7,
+      "scenario": "claude-only",
+      "fixture_variant": "absent-codex-dir",
+      "fake_programs": [
+        "claude"
+      ],
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 0,
+      "stdout_sha256": "f9351c63315912c811da5bdcfd0f983fbaa0391a3b99f433cb5c076e2e1cf345",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "output_bytes": {
+        "stdout": 60,
+        "stderr": 0
+      },
+      "stdout_file": "claude-only-ls.stdout",
+      "stderr_file": "claude-only-ls.stderr"
+    },
+    {
+      "run_number": 8,
+      "scenario": "codex-only",
+      "fixture_variant": "absent-codex-dir",
+      "fake_programs": [
+        "codex"
+      ],
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "stdout_sha256": "4b612b1da9d3a5ccd39b3603d8927999aeb4b51c55cbca6276b50349bca86311",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "output_bytes": {
+        "stdout": 3091,
+        "stderr": 0
+      },
+      "stdout_file": "codex-only-agents.stdout",
+      "stderr_file": "codex-only-agents.stderr"
+    },
+    {
+      "run_number": 9,
+      "scenario": "codex-only",
+      "fixture_variant": "absent-codex-dir",
+      "fake_programs": [
+        "codex"
+      ],
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 0,
+      "stdout_sha256": "962e722102caea103b6750ad379d6af3a5cba262c406510b98435071896ff772",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "output_bytes": {
+        "stdout": 57,
+        "stderr": 0
+      },
+      "stdout_file": "codex-only-ls.stdout",
+      "stderr_file": "codex-only-ls.stderr"
+    },
+    {
+      "run_number": 10,
+      "scenario": "gemini-only",
+      "fixture_variant": "absent-codex-dir",
+      "fake_programs": [
+        "gemini"
+      ],
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "stdout_sha256": "f8fc901ff64cf45b6ff1230db6af4be2ceacd698cfaf4fe73c491e22c23b68d8",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "output_bytes": {
+        "stdout": 2952,
+        "stderr": 0
+      },
+      "stdout_file": "gemini-only-agents.stdout",
+      "stderr_file": "gemini-only-agents.stderr"
+    },
+    {
+      "run_number": 11,
+      "scenario": "gemini-only",
+      "fixture_variant": "absent-codex-dir",
+      "fake_programs": [
+        "gemini"
+      ],
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 0,
+      "stdout_sha256": "a7c981ecaec253f00851cd0747a8ce8317ac26c5764ff388adfab11d8a72ab91",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "output_bytes": {
+        "stdout": 57,
+        "stderr": 0
+      },
+      "stdout_file": "gemini-only-ls.stdout",
+      "stderr_file": "gemini-only-ls.stderr"
+    },
+    {
+      "run_number": 12,
+      "scenario": "all-three",
+      "fixture_variant": "absent-codex-dir",
+      "fake_programs": [
+        "claude",
+        "codex",
+        "gemini"
+      ],
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "stdout_sha256": "40f695d6158688332fb1075bd648c35bbf6e35ae82feb01eac684631c834407c",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "output_bytes": {
+        "stdout": 3147,
+        "stderr": 0
+      },
+      "stdout_file": "all-three-agents.stdout",
+      "stderr_file": "all-three-agents.stderr"
+    },
+    {
+      "run_number": 13,
+      "scenario": "all-three",
+      "fixture_variant": "absent-codex-dir",
+      "fake_programs": [
+        "claude",
+        "codex",
+        "gemini"
+      ],
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 0,
+      "stdout_sha256": "41b980a9f90a3e1b01520d5b6257d1339a26b3040d5faed9c88a2c39bbf75927",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "output_bytes": {
+        "stdout": 183,
+        "stderr": 0
+      },
+      "stdout_file": "all-three-ls.stdout",
+      "stderr_file": "all-three-ls.stderr"
+    },
+    {
+      "run_number": 14,
+      "scenario": "codex-only-empty-codex-dir",
+      "fixture_variant": "precreated-empty-codex-dir",
+      "fake_programs": [
+        "codex"
+      ],
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "stdout_sha256": "4b612b1da9d3a5ccd39b3603d8927999aeb4b51c55cbca6276b50349bca86311",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "output_bytes": {
+        "stdout": 3091,
+        "stderr": 0
+      },
+      "stdout_file": "codex-only-agents.stdout",
+      "stderr_file": "codex-only-agents.stderr"
+    },
+    {
+      "run_number": 15,
+      "scenario": "codex-only-empty-codex-dir",
+      "fixture_variant": "precreated-empty-codex-dir",
+      "fake_programs": [
+        "codex"
+      ],
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 0,
+      "stdout_sha256": "962e722102caea103b6750ad379d6af3a5cba262c406510b98435071896ff772",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "output_bytes": {
+        "stdout": 57,
+        "stderr": 0
+      },
+      "stdout_file": "codex-only-ls.stdout",
+      "stderr_file": "codex-only-ls.stderr"
+    },
+    {
+      "run_number": 16,
+      "scenario": "all-three-empty-codex-dir",
+      "fixture_variant": "precreated-empty-codex-dir",
+      "fake_programs": [
+        "claude",
+        "codex",
+        "gemini"
+      ],
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "stdout_sha256": "40f695d6158688332fb1075bd648c35bbf6e35ae82feb01eac684631c834407c",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "output_bytes": {
+        "stdout": 3147,
+        "stderr": 0
+      },
+      "stdout_file": "all-three-agents.stdout",
+      "stderr_file": "all-three-agents.stderr"
+    },
+    {
+      "run_number": 17,
+      "scenario": "all-three-empty-codex-dir",
+      "fixture_variant": "precreated-empty-codex-dir",
+      "fake_programs": [
+        "claude",
+        "codex",
+        "gemini"
+      ],
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 0,
+      "stdout_sha256": "41b980a9f90a3e1b01520d5b6257d1339a26b3040d5faed9c88a2c39bbf75927",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "output_bytes": {
+        "stdout": 183,
+        "stderr": 0
+      },
+      "stdout_file": "all-three-ls.stdout",
+      "stderr_file": "all-three-ls.stderr"
+    },
+    {
+      "run_number": 18,
+      "scenario": "all-three-untraced",
+      "fixture_variant": "absent-codex-dir",
+      "fake_programs": [
+        "claude",
+        "codex",
+        "gemini"
+      ],
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "stdout_sha256": "40f695d6158688332fb1075bd648c35bbf6e35ae82feb01eac684631c834407c",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "output_bytes": {
+        "stdout": 3147,
+        "stderr": 0
+      },
+      "stdout_file": "all-three-agents.stdout",
+      "stderr_file": "all-three-agents.stderr"
+    },
+    {
+      "run_number": 19,
+      "scenario": "all-three-untraced",
+      "fixture_variant": "absent-codex-dir",
+      "fake_programs": [
+        "claude",
+        "codex",
+        "gemini"
+      ],
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 0,
+      "stdout_sha256": "41b980a9f90a3e1b01520d5b6257d1339a26b3040d5faed9c88a2c39bbf75927",
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "output_bytes": {
+        "stdout": 183,
+        "stderr": 0
+      },
+      "stdout_file": "all-three-ls.stdout",
+      "stderr_file": "all-three-ls.stderr"
+    }
+  ]
+}

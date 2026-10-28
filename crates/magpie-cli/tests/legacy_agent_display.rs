@@ -18,7 +18,8 @@ use std::{
 };
 
 use legacy_agent_display::{
-    CodexDirectory, DisplayError, TextCommand, inspect_codex_directory, render,
+    CodexDirectory, DisplayError, TextCommand, inspect_codex_directory,
+    inspect_empty_candidate_state, render, render_unconfigured_candidates,
 };
 use magpie_core::agent_catalog::{
     Detection, DiscoveryInput, DiscoveryReport, ExecutableStyle, NotCheckedReason, ScanLimits,
@@ -410,4 +411,118 @@ fn errors_are_explicit_slice_diagnostics_not_the_original_empty_message() {
     assert!(diagnostic.contains("incomplete"));
     assert!(!diagnostic.contains("no supported agents found"));
     let _: &dyn std::error::Error = &error;
+}
+
+#[cfg(unix)]
+#[test]
+fn candidate_renderer_matches_39_original_bytes_without_path_substitution() {
+    for (programs, directory, scenario) in [
+        (&["claude"][..], CodexDirectory::Missing, "claude-only"),
+        (&["codex"][..], CodexDirectory::Missing, "codex-only"),
+        (&["gemini"][..], CodexDirectory::Missing, "gemini-only"),
+        (
+            &["claude", "codex", "gemini"][..],
+            CodexDirectory::Missing,
+            "all-three",
+        ),
+        (&["codex"][..], observed_codex_directory(), "codex-only"),
+        (
+            &["claude", "codex", "gemini"][..],
+            observed_codex_directory(),
+            "all-three",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        for program in programs {
+            fixture.executable(program);
+        }
+        let report = fixture.report();
+        for (command, name) in [(TextCommand::Agents, "agents"), (TextCommand::Ls, "ls")] {
+            let output = render_unconfigured_candidates(
+                command,
+                &report,
+                &directory,
+                Path::new("/fixture/codex/config.toml"),
+            )
+            .unwrap();
+            let expected = fs::read(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/legacy_agent_candidates")
+                    .join(format!("{scenario}-{name}.stdout")),
+            )
+            .unwrap();
+            assert_eq!(output.stdout.as_bytes(), expected, "{scenario} {name}");
+            assert_eq!(output.exit_code, 0);
+            assert!(output.stderr.is_empty());
+            assert_eq!(output.unchecked_agent_ids.len(), 48);
+        }
+    }
+}
+
+#[test]
+fn empty_candidate_inspection_requires_absent_or_explicitly_empty_state() {
+    let fixture = Fixture::new();
+    let home = fixture.root.join("home");
+    fs::create_dir(&home).unwrap();
+    let codex = fixture.root.join("codex");
+    assert!(inspect_empty_candidate_state(&home, &codex).unwrap());
+    fs::create_dir(&codex).unwrap();
+    assert!(inspect_empty_candidate_state(&home, &codex).unwrap());
+    let account = codex.join("auth.json");
+    fs::write(&account, b"PRIVATE_SYNTHETIC_ACCOUNT").unwrap();
+    assert!(!inspect_empty_candidate_state(&home, &codex).unwrap());
+    assert_eq!(fs::read(&account).unwrap(), b"PRIVATE_SYNTHETIC_ACCOUNT");
+    fs::remove_file(&account).unwrap();
+    for name in [".claude", ".gemini"] {
+        let path = home.join(name);
+        fs::create_dir(&path).unwrap();
+        assert!(!inspect_empty_candidate_state(&home, &codex).unwrap());
+        fs::remove_dir(&path).unwrap();
+    }
+    assert!(inspect_empty_candidate_state(Path::new("relative"), &codex).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn new_candidate_slice_does_not_accept_uncertain_or_unobserved_states() {
+    let fixture = Fixture::new();
+    fixture.executable("codex");
+    let path = Path::new("/fixture/codex/config.toml");
+    let report = fixture.report();
+    for command in [TextCommand::Agents, TextCommand::Ls] {
+        assert_eq!(
+            render_unconfigured_candidates(command, &report, &CodexDirectory::NotChecked, path),
+            Err(DisplayError::IncompleteDiscovery)
+        );
+        let mut uncertain = report.clone();
+        uncertain
+            .agents
+            .iter_mut()
+            .find(|agent| agent.definition.id == "codex")
+            .unwrap()
+            .detection = Detection::Inconclusive;
+        assert_eq!(
+            render_unconfigured_candidates(command, &uncertain, &CodexDirectory::Missing, path),
+            Err(DisplayError::IncompleteDiscovery)
+        );
+        assert_eq!(
+            render_unconfigured_candidates(
+                command,
+                &report,
+                &CodexDirectory::Missing,
+                Path::new("/fixture/codex\ncontrol/config.toml")
+            ),
+            Err(DisplayError::UnrepresentableConfigPath)
+        );
+    }
+    fixture.executable("claude");
+    assert_eq!(
+        render_unconfigured_candidates(
+            TextCommand::Ls,
+            &fixture.report(),
+            &CodexDirectory::Missing,
+            path
+        ),
+        Err(DisplayError::UnobservedCombination)
+    );
 }
