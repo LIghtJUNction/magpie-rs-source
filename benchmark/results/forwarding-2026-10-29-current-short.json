@@ -1,0 +1,1173 @@
+{
+  "schema_version": 1,
+  "method": "loopback-chat-forwarding-v1",
+  "timestamp_utc": "2026-10-28T22:07:37.380501+00:00",
+  "raw_result_sha256": "5284b66f2feb97a711adb9ba79a973238574de1b722079791d7ef88b4d6ce67c",
+  "raw_result": "retained outside checkout because it includes host telemetry",
+  "binary_sha256": "5fdc33b709f0bca7cc2a5bcc5eb327c9d13eed0befaa55cffee12ea831e62a6a",
+  "binary_bytes": 3654848,
+  "binary_version": "magpie 0.2.0",
+  "binary_built_from_source_commit": "2bbdff72818a94c4ba4ae9e8e72b22cf8ce9ead2",
+  "build_command": "CARGO_TARGET_DIR=<external> CARGO_BUILD_JOBS=1 cargo build --release --offline --locked -p magpie-cli",
+  "runner_source_commit": "0f1a8f74615858a60f1ac6a9cae4a52b72f2940c",
+  "runner_sha256": "5b0b08cf3a892f8cc1918beabc19335c2fa8389fff70bdd1edda69a3fbf33796",
+  "source_checkout_warning": "untracked future CLI files existed during measurement, but were not declared in or compiled by the binary; raw source identity does not attest build provenance",
+  "environment": {
+    "os": "Linux-7.2.11-arch1-1-x86_64-with-glibc2.44",
+    "architecture": "x86_64",
+    "logical_cpus": 24,
+    "load_average_before": [
+      9.61572265625,
+      10.375,
+      10.5107421875
+    ]
+  },
+  "workload": {
+    "fixture": {
+      "delta_events": 5,
+      "nominal_seconds": 0.5,
+      "stream_bytes": 98318,
+      "stream_sha256": "52b4864d2600175b8d38d47745132a15d6740b09afaf3efb036c24fa592665a4",
+      "delta_event_bytes": 16384,
+      "delta_sha256": "06001fba2f382e204c5da11b40d4db9d2c652a69bc5b5f2d01d2e0b6f15bfbc9",
+      "finish_event_bytes": 16384,
+      "finish_sha256": "302d8da3fb2b6b9fe26d4f5452a1146b6923cd3f9d4bdeda5f42032cf037949d",
+      "done_sha256": "d8d37da081f11203f2af42092a92cb35508f27db75eba643058a0a580454517d",
+      "nonstream_bytes": 65536,
+      "nonstream_sha256": "071bcea637f42feaeed6053a23bb5d1c7e124a03d41b477abe31223d1e338bef",
+      "events_per_second": 10
+    },
+    "long_fixture": {
+      "delta_events": 20,
+      "nominal_seconds": 2.0,
+      "stream_bytes": 344078,
+      "stream_sha256": "54ff8c0641d595d28cd0e92479578c7bf42417f7e46e92f18a356e6488fec39a",
+      "delta_event_bytes": 16384,
+      "delta_sha256": "06001fba2f382e204c5da11b40d4db9d2c652a69bc5b5f2d01d2e0b6f15bfbc9",
+      "finish_event_bytes": 16384,
+      "finish_sha256": "302d8da3fb2b6b9fe26d4f5452a1146b6923cd3f9d4bdeda5f42032cf037949d",
+      "done_sha256": "d8d37da081f11203f2af42092a92cb35508f27db75eba643058a0a580454517d",
+      "nonstream_bytes": 65536,
+      "nonstream_sha256": "071bcea637f42feaeed6053a23bb5d1c7e124a03d41b477abe31223d1e338bef",
+      "events_per_second": 10
+    },
+    "duration_seconds_per_matrix_cell": 5.0,
+    "round_interval_seconds": 0.05,
+    "max_requests_per_cell": 250000,
+    "sample_interval_seconds": 0.1,
+    "io_timeout_seconds": 3.0,
+    "active_cap_required": 4,
+    "warmup": "one fully validated request per path and payload kind",
+    "compile_profile_allocator_linkage": "not attested for supplied prebuilt binary",
+    "config_sha256": "733348481212a919a9f3989ac4d09a8df4c40a002dcd77adb89ce33cb3048464",
+    "config_template_sha256": "a7ac5d69be2d5265dda7988a7f650ba342552cccc8a5d3e0518bfb1e9fa31bf2"
+  },
+  "correctness_valid": true,
+  "counts": {
+    "success": 3427,
+    "rejected": 1217,
+    "error": 0,
+    "cancelled": 5,
+    "provider_started": 3432
+  },
+  "idle": {
+    "samples": 5,
+    "rss_kib": {
+      "count": 5,
+      "p50": 5600,
+      "p95_nearest_rank": 5600,
+      "min": 5600,
+      "max": 5600
+    },
+    "pss_kib": {
+      "count": 5,
+      "p50": 3189,
+      "p95_nearest_rank": 3189,
+      "min": 3189,
+      "max": 3189
+    },
+    "swap_kib": {
+      "count": 5,
+      "p50": 0,
+      "p95_nearest_rank": 0,
+      "min": 0,
+      "max": 0
+    },
+    "swap_pss_kib": {
+      "count": 5,
+      "p50": 0,
+      "p95_nearest_rank": 0,
+      "min": 0,
+      "max": 0
+    },
+    "resident_plus_swap_kib": {
+      "count": 5,
+      "p50": 5600,
+      "p95_nearest_rank": 5600,
+      "min": 5600,
+      "max": 5600
+    },
+    "pss_plus_swap_pss_kib": {
+      "count": 5,
+      "p50": 3189,
+      "p95_nearest_rank": 3189,
+      "min": 3189,
+      "max": 3189
+    },
+    "threads": {
+      "count": 5,
+      "p50": 1,
+      "p95_nearest_rank": 1,
+      "min": 1,
+      "max": 1
+    },
+    "fds": {
+      "count": 5,
+      "p50": 7,
+      "p95_nearest_rank": 7,
+      "min": 7,
+      "max": 7
+    }
+  },
+  "target_all_sampled_phases": {
+    "samples": 732,
+    "max_rss_kib": 6084,
+    "max_swap_kib": 2732,
+    "sample_gap_seconds": {
+      "count": 731,
+      "p50": 0.10190194001188502,
+      "p95_nearest_rank": 0.10708780799177475,
+      "min": 0.10085790901212022,
+      "max": 0.14639720099512488
+    }
+  },
+  "cases": [
+    {
+      "phase": "direct-json-1",
+      "offered_concurrency": 1,
+      "counts": {
+        "success": 100,
+        "rejected": 0,
+        "error": 0,
+        "cancelled": 0,
+        "provider_started": 100
+      },
+      "total_ms": {
+        "count": 100,
+        "p50": 1.508070999989286,
+        "p95_nearest_rank": 3.5992740013170987,
+        "min": 0.9432820079382509,
+        "max": 5.085145006887615
+      },
+      "valid_requests_per_second": 19.999159591314452,
+      "first_event_ms": {
+        "count": 0,
+        "p50": null,
+        "p95_nearest_rank": null
+      },
+      "memory": {
+        "samples": 50,
+        "rss_kib": {
+          "count": 50,
+          "p50": 5600.0,
+          "p95_nearest_rank": 5600,
+          "min": 5600,
+          "max": 5600
+        },
+        "pss_kib": {
+          "count": 50,
+          "p50": 3189.0,
+          "p95_nearest_rank": 3189,
+          "min": 3189,
+          "max": 3189
+        },
+        "swap_kib": {
+          "count": 50,
+          "p50": 0.0,
+          "p95_nearest_rank": 0,
+          "min": 0,
+          "max": 0
+        },
+        "swap_pss_kib": {
+          "count": 50,
+          "p50": 0.0,
+          "p95_nearest_rank": 0,
+          "min": 0,
+          "max": 0
+        },
+        "resident_plus_swap_kib": {
+          "count": 50,
+          "p50": 5600.0,
+          "p95_nearest_rank": 5600,
+          "min": 5600,
+          "max": 5600
+        },
+        "pss_plus_swap_pss_kib": {
+          "count": 50,
+          "p50": 3189.0,
+          "p95_nearest_rank": 3189,
+          "min": 3189,
+          "max": 3189
+        },
+        "threads": {
+          "count": 50,
+          "p50": 1.0,
+          "p95_nearest_rank": 1,
+          "min": 1,
+          "max": 1
+        },
+        "fds": {
+          "count": 50,
+          "p50": 7.0,
+          "p95_nearest_rank": 7,
+          "min": 7,
+          "max": 7
+        }
+      }
+    },
+    {
+      "phase": "gateway-json-1",
+      "offered_concurrency": 1,
+      "counts": {
+        "success": 100,
+        "rejected": 0,
+        "error": 0,
+        "cancelled": 0,
+        "provider_started": 100
+      },
+      "total_ms": {
+        "count": 100,
+        "p50": 2.4696999898878857,
+        "p95_nearest_rank": 4.3603160011116415,
+        "min": 1.3216469960752875,
+        "max": 6.148537009721622
+      },
+      "valid_requests_per_second": 19.998470552936098,
+      "first_event_ms": {
+        "count": 0,
+        "p50": null,
+        "p95_nearest_rank": null
+      },
+      "memory": {
+        "samples": 49,
+        "rss_kib": {
+          "count": 49,
+          "p50": 5600,
+          "p95_nearest_rank": 5604,
+          "min": 5600,
+          "max": 5604
+        },
+        "pss_kib": {
+          "count": 49,
+          "p50": 3190,
+          "p95_nearest_rank": 3194,
+          "min": 3189,
+          "max": 3194
+        },
+        "swap_kib": {
+          "count": 49,
+          "p50": 0,
+          "p95_nearest_rank": 0,
+          "min": 0,
+          "max": 0
+        },
+        "swap_pss_kib": {
+          "count": 49,
+          "p50": 0,
+          "p95_nearest_rank": 0,
+          "min": 0,
+          "max": 0
+        },
+        "resident_plus_swap_kib": {
+          "count": 49,
+          "p50": 5600,
+          "p95_nearest_rank": 5604,
+          "min": 5600,
+          "max": 5604
+        },
+        "pss_plus_swap_pss_kib": {
+          "count": 49,
+          "p50": 3190,
+          "p95_nearest_rank": 3194,
+          "min": 3189,
+          "max": 3194
+        },
+        "threads": {
+          "count": 49,
+          "p50": 1,
+          "p95_nearest_rank": 1,
+          "min": 1,
+          "max": 1
+        },
+        "fds": {
+          "count": 49,
+          "p50": 7,
+          "p95_nearest_rank": 7,
+          "min": 7,
+          "max": 7
+        }
+      }
+    },
+    {
+      "phase": "gateway-json-4",
+      "offered_concurrency": 4,
+      "counts": {
+        "success": 400,
+        "rejected": 0,
+        "error": 0,
+        "cancelled": 0,
+        "provider_started": 400
+      },
+      "total_ms": {
+        "count": 400,
+        "p50": 3.7329499900806695,
+        "p95_nearest_rank": 9.720696019940078,
+        "min": 1.2264199904166162,
+        "max": 12.982569984160364
+      },
+      "valid_requests_per_second": 79.99343586653728,
+      "first_event_ms": {
+        "count": 0,
+        "p50": null,
+        "p95_nearest_rank": null
+      },
+      "memory": {
+        "samples": 50,
+        "rss_kib": {
+          "count": 50,
+          "p50": 5736.0,
+          "p95_nearest_rank": 5744,
+          "min": 5604,
+          "max": 5744
+        },
+        "pss_kib": {
+          "count": 50,
+          "p50": 3326.0,
+          "p95_nearest_rank": 3334,
+          "min": 3194,
+          "max": 3334
+        },
+        "swap_kib": {
+          "count": 50,
+          "p50": 0.0,
+          "p95_nearest_rank": 0,
+          "min": 0,
+          "max": 0
+        },
+        "swap_pss_kib": {
+          "count": 50,
+          "p50": 0.0,
+          "p95_nearest_rank": 0,
+          "min": 0,
+          "max": 0
+        },
+        "resident_plus_swap_kib": {
+          "count": 50,
+          "p50": 5736.0,
+          "p95_nearest_rank": 5744,
+          "min": 5604,
+          "max": 5744
+        },
+        "pss_plus_swap_pss_kib": {
+          "count": 50,
+          "p50": 3326.0,
+          "p95_nearest_rank": 3334,
+          "min": 3194,
+          "max": 3334
+        },
+        "threads": {
+          "count": 50,
+          "p50": 1.0,
+          "p95_nearest_rank": 1,
+          "min": 1,
+          "max": 1
+        },
+        "fds": {
+          "count": 50,
+          "p50": 7.0,
+          "p95_nearest_rank": 7,
+          "min": 7,
+          "max": 13
+        }
+      }
+    },
+    {
+      "phase": "direct-json-4",
+      "offered_concurrency": 4,
+      "counts": {
+        "success": 400,
+        "rejected": 0,
+        "error": 0,
+        "cancelled": 0,
+        "provider_started": 400
+      },
+      "total_ms": {
+        "count": 400,
+        "p50": 2.857807994587347,
+        "p95_nearest_rank": 4.0658249927219,
+        "min": 1.0578770015854388,
+        "max": 9.149357996648178
+      },
+      "valid_requests_per_second": 79.99005110949089,
+      "first_event_ms": {
+        "count": 0,
+        "p50": null,
+        "p95_nearest_rank": null
+      },
+      "memory": {
+        "samples": 50,
+        "rss_kib": {
+          "count": 50,
+          "p50": 5744.0,
+          "p95_nearest_rank": 5744,
+          "min": 5744,
+          "max": 5744
+        },
+        "pss_kib": {
+          "count": 50,
+          "p50": 3334.0,
+          "p95_nearest_rank": 3334,
+          "min": 3334,
+          "max": 3334
+        },
+        "swap_kib": {
+          "count": 50,
+          "p50": 0.0,
+          "p95_nearest_rank": 0,
+          "min": 0,
+          "max": 0
+        },
+        "swap_pss_kib": {
+          "count": 50,
+          "p50": 0.0,
+          "p95_nearest_rank": 0,
+          "min": 0,
+          "max": 0
+        },
+        "resident_plus_swap_kib": {
+          "count": 50,
+          "p50": 5744.0,
+          "p95_nearest_rank": 5744,
+          "min": 5744,
+          "max": 5744
+        },
+        "pss_plus_swap_pss_kib": {
+          "count": 50,
+          "p50": 3334.0,
+          "p95_nearest_rank": 3334,
+          "min": 3334,
+          "max": 3334
+        },
+        "threads": {
+          "count": 50,
+          "p50": 1.0,
+          "p95_nearest_rank": 1,
+          "min": 1,
+          "max": 1
+        },
+        "fds": {
+          "count": 50,
+          "p50": 7.0,
+          "p95_nearest_rank": 7,
+          "min": 7,
+          "max": 7
+        }
+      }
+    },
+    {
+      "phase": "direct-json-16",
+      "offered_concurrency": 16,
+      "counts": {
+        "success": 1600,
+        "rejected": 0,
+        "error": 0,
+        "cancelled": 0,
+        "provider_started": 1600
+      },
+      "total_ms": {
+        "count": 1600,
+        "p50": 9.00138150609564,
+        "p95_nearest_rank": 26.374051987659186,
+        "min": 2.218203997472301,
+        "max": 42.82435498316772
+      },
+      "valid_requests_per_second": 319.8835949350777,
+      "first_event_ms": {
+        "count": 0,
+        "p50": null,
+        "p95_nearest_rank": null
+      },
+      "memory": {
+        "samples": 49,
+        "rss_kib": {
+          "count": 49,
+          "p50": 5744,
+          "p95_nearest_rank": 5744,
+          "min": 5744,
+          "max": 5744
+        },
+        "pss_kib": {
+          "count": 49,
+          "p50": 3334,
+          "p95_nearest_rank": 3334,
+          "min": 3334,
+          "max": 3334
+        },
+        "swap_kib": {
+          "count": 49,
+          "p50": 0,
+          "p95_nearest_rank": 0,
+          "min": 0,
+          "max": 0
+        },
+        "swap_pss_kib": {
+          "count": 49,
+          "p50": 0,
+          "p95_nearest_rank": 0,
+          "min": 0,
+          "max": 0
+        },
+        "resident_plus_swap_kib": {
+          "count": 49,
+          "p50": 5744,
+          "p95_nearest_rank": 5744,
+          "min": 5744,
+          "max": 5744
+        },
+        "pss_plus_swap_pss_kib": {
+          "count": 49,
+          "p50": 3334,
+          "p95_nearest_rank": 3334,
+          "min": 3334,
+          "max": 3334
+        },
+        "threads": {
+          "count": 49,
+          "p50": 1,
+          "p95_nearest_rank": 1,
+          "min": 1,
+          "max": 1
+        },
+        "fds": {
+          "count": 49,
+          "p50": 7,
+          "p95_nearest_rank": 7,
+          "min": 7,
+          "max": 7
+        }
+      }
+    },
+    {
+      "phase": "gateway-json-16",
+      "offered_concurrency": 16,
+      "counts": {
+        "success": 515,
+        "rejected": 1085,
+        "error": 0,
+        "cancelled": 0,
+        "provider_started": 515
+      },
+      "total_ms": {
+        "count": 515,
+        "p50": 5.711926001822576,
+        "p95_nearest_rank": 18.633180006872863,
+        "min": 2.7143190091010183,
+        "max": 30.09391701198183
+      },
+      "valid_requests_per_second": 102.97363971630672,
+      "first_event_ms": {
+        "count": 0,
+        "p50": null,
+        "p95_nearest_rank": null
+      },
+      "memory": {
+        "samples": 49,
+        "rss_kib": {
+          "count": 49,
+          "p50": 5932,
+          "p95_nearest_rank": 5932,
+          "min": 5852,
+          "max": 5948
+        },
+        "pss_kib": {
+          "count": 49,
+          "p50": 3522,
+          "p95_nearest_rank": 3522,
+          "min": 3442,
+          "max": 3538
+        },
+        "swap_kib": {
+          "count": 49,
+          "p50": 0,
+          "p95_nearest_rank": 0,
+          "min": 0,
+          "max": 0
+        },
+        "swap_pss_kib": {
+          "count": 49,
+          "p50": 0,
+          "p95_nearest_rank": 0,
+          "min": 0,
+          "max": 0
+        },
+        "resident_plus_swap_kib": {
+          "count": 49,
+          "p50": 5932,
+          "p95_nearest_rank": 5932,
+          "min": 5852,
+          "max": 5948
+        },
+        "pss_plus_swap_pss_kib": {
+          "count": 49,
+          "p50": 3522,
+          "p95_nearest_rank": 3522,
+          "min": 3442,
+          "max": 3538
+        },
+        "threads": {
+          "count": 49,
+          "p50": 1,
+          "p95_nearest_rank": 1,
+          "min": 1,
+          "max": 1
+        },
+        "fds": {
+          "count": 49,
+          "p50": 7,
+          "p95_nearest_rank": 7,
+          "min": 7,
+          "max": 11
+        }
+      }
+    },
+    {
+      "phase": "gateway-sse-1",
+      "offered_concurrency": 1,
+      "counts": {
+        "success": 10,
+        "rejected": 0,
+        "error": 0,
+        "cancelled": 0,
+        "provider_started": 10
+      },
+      "total_ms": {
+        "count": 10,
+        "p50": 501.9585419940995,
+        "p95_nearest_rank": 502.89836098090746,
+        "min": 501.6790369991213,
+        "max": 502.89836098090746
+      },
+      "valid_requests_per_second": 1.9911532555050728,
+      "first_event_ms": {
+        "count": 10,
+        "p50": 1.737789498292841,
+        "p95_nearest_rank": 3.189839975675568,
+        "min": 1.3891530106775463,
+        "max": 3.189839975675568
+      },
+      "memory": {
+        "samples": 50,
+        "rss_kib": {
+          "count": 50,
+          "p50": 5932.0,
+          "p95_nearest_rank": 5932,
+          "min": 5932,
+          "max": 5932
+        },
+        "pss_kib": {
+          "count": 50,
+          "p50": 3522.0,
+          "p95_nearest_rank": 3522,
+          "min": 3522,
+          "max": 3522
+        },
+        "swap_kib": {
+          "count": 50,
+          "p50": 0.0,
+          "p95_nearest_rank": 0,
+          "min": 0,
+          "max": 0
+        },
+        "swap_pss_kib": {
+          "count": 50,
+          "p50": 0.0,
+          "p95_nearest_rank": 0,
+          "min": 0,
+          "max": 0
+        },
+        "resident_plus_swap_kib": {
+          "count": 50,
+          "p50": 5932.0,
+          "p95_nearest_rank": 5932,
+          "min": 5932,
+          "max": 5932
+        },
+        "pss_plus_swap_pss_kib": {
+          "count": 50,
+          "p50": 3522.0,
+          "p95_nearest_rank": 3522,
+          "min": 3522,
+          "max": 3522
+        },
+        "threads": {
+          "count": 50,
+          "p50": 1.0,
+          "p95_nearest_rank": 1,
+          "min": 1,
+          "max": 1
+        },
+        "fds": {
+          "count": 50,
+          "p50": 9.0,
+          "p95_nearest_rank": 9,
+          "min": 7,
+          "max": 9
+        }
+      }
+    },
+    {
+      "phase": "direct-sse-1",
+      "offered_concurrency": 1,
+      "counts": {
+        "success": 10,
+        "rejected": 0,
+        "error": 0,
+        "cancelled": 0,
+        "provider_started": 10
+      },
+      "total_ms": {
+        "count": 10,
+        "p50": 501.3326549960766,
+        "p95_nearest_rank": 505.6868020037655,
+        "min": 501.0092690063175,
+        "max": 505.6868020037655
+      },
+      "valid_requests_per_second": 1.9895639789067856,
+      "first_event_ms": {
+        "count": 10,
+        "p50": 1.1844125110656023,
+        "p95_nearest_rank": 6.942131993127987,
+        "min": 0.9722769900690764,
+        "max": 6.942131993127987
+      },
+      "memory": {
+        "samples": 50,
+        "rss_kib": {
+          "count": 50,
+          "p50": 5932.0,
+          "p95_nearest_rank": 5932,
+          "min": 5932,
+          "max": 5932
+        },
+        "pss_kib": {
+          "count": 50,
+          "p50": 3522.0,
+          "p95_nearest_rank": 3522,
+          "min": 3522,
+          "max": 3522
+        },
+        "swap_kib": {
+          "count": 50,
+          "p50": 0.0,
+          "p95_nearest_rank": 0,
+          "min": 0,
+          "max": 0
+        },
+        "swap_pss_kib": {
+          "count": 50,
+          "p50": 0.0,
+          "p95_nearest_rank": 0,
+          "min": 0,
+          "max": 0
+        },
+        "resident_plus_swap_kib": {
+          "count": 50,
+          "p50": 5932.0,
+          "p95_nearest_rank": 5932,
+          "min": 5932,
+          "max": 5932
+        },
+        "pss_plus_swap_pss_kib": {
+          "count": 50,
+          "p50": 3522.0,
+          "p95_nearest_rank": 3522,
+          "min": 3522,
+          "max": 3522
+        },
+        "threads": {
+          "count": 50,
+          "p50": 1.0,
+          "p95_nearest_rank": 1,
+          "min": 1,
+          "max": 1
+        },
+        "fds": {
+          "count": 50,
+          "p50": 7.0,
+          "p95_nearest_rank": 7,
+          "min": 7,
+          "max": 7
+        }
+      }
+    },
+    {
+      "phase": "direct-sse-4",
+      "offered_concurrency": 4,
+      "counts": {
+        "success": 40,
+        "rejected": 0,
+        "error": 0,
+        "cancelled": 0,
+        "provider_started": 40
+      },
+      "total_ms": {
+        "count": 40,
+        "p50": 502.2858445008751,
+        "p95_nearest_rank": 504.2147830245085,
+        "min": 500.7798619917594,
+        "max": 506.3452849863097
+      },
+      "valid_requests_per_second": 7.9352200266911055,
+      "first_event_ms": {
+        "count": 40,
+        "p50": 2.802818999043666,
+        "p95_nearest_rank": 4.03974499204196,
+        "min": 1.13149598473683,
+        "max": 4.573716025333852
+      },
+      "memory": {
+        "samples": 50,
+        "rss_kib": {
+          "count": 50,
+          "p50": 5932.0,
+          "p95_nearest_rank": 5932,
+          "min": 5932,
+          "max": 5932
+        },
+        "pss_kib": {
+          "count": 50,
+          "p50": 3522.0,
+          "p95_nearest_rank": 3522,
+          "min": 3521,
+          "max": 3522
+        },
+        "swap_kib": {
+          "count": 50,
+          "p50": 0.0,
+          "p95_nearest_rank": 0,
+          "min": 0,
+          "max": 0
+        },
+        "swap_pss_kib": {
+          "count": 50,
+          "p50": 0.0,
+          "p95_nearest_rank": 0,
+          "min": 0,
+          "max": 0
+        },
+        "resident_plus_swap_kib": {
+          "count": 50,
+          "p50": 5932.0,
+          "p95_nearest_rank": 5932,
+          "min": 5932,
+          "max": 5932
+        },
+        "pss_plus_swap_pss_kib": {
+          "count": 50,
+          "p50": 3522.0,
+          "p95_nearest_rank": 3522,
+          "min": 3521,
+          "max": 3522
+        },
+        "threads": {
+          "count": 50,
+          "p50": 1.0,
+          "p95_nearest_rank": 1,
+          "min": 1,
+          "max": 1
+        },
+        "fds": {
+          "count": 50,
+          "p50": 7.0,
+          "p95_nearest_rank": 7,
+          "min": 7,
+          "max": 7
+        }
+      }
+    },
+    {
+      "phase": "gateway-sse-4",
+      "offered_concurrency": 4,
+      "counts": {
+        "success": 40,
+        "rejected": 0,
+        "error": 0,
+        "cancelled": 0,
+        "provider_started": 40
+      },
+      "total_ms": {
+        "count": 40,
+        "p50": 505.41818200144917,
+        "p95_nearest_rank": 513.4053489891812,
+        "min": 502.3213050153572,
+        "max": 517.0140950067434
+      },
+      "valid_requests_per_second": 7.856588694485133,
+      "first_event_ms": {
+        "count": 40,
+        "p50": 6.310161013971083,
+        "p95_nearest_rank": 9.991134982556105,
+        "min": 2.8009230154566467,
+        "max": 11.327528016408905
+      },
+      "memory": {
+        "samples": 50,
+        "rss_kib": {
+          "count": 50,
+          "p50": 5960.0,
+          "p95_nearest_rank": 5992,
+          "min": 5932,
+          "max": 5992
+        },
+        "pss_kib": {
+          "count": 50,
+          "p50": 3549.0,
+          "p95_nearest_rank": 3581,
+          "min": 3521,
+          "max": 3581
+        },
+        "swap_kib": {
+          "count": 50,
+          "p50": 896.0,
+          "p95_nearest_rank": 896,
+          "min": 0,
+          "max": 896
+        },
+        "swap_pss_kib": {
+          "count": 50,
+          "p50": 0.0,
+          "p95_nearest_rank": 0,
+          "min": 0,
+          "max": 0
+        },
+        "resident_plus_swap_kib": {
+          "count": 50,
+          "p50": 6856.0,
+          "p95_nearest_rank": 6888,
+          "min": 5932,
+          "max": 6888
+        },
+        "pss_plus_swap_pss_kib": {
+          "count": 50,
+          "p50": 3549.0,
+          "p95_nearest_rank": 3581,
+          "min": 3521,
+          "max": 3581
+        },
+        "threads": {
+          "count": 50,
+          "p50": 1.0,
+          "p95_nearest_rank": 1,
+          "min": 1,
+          "max": 1
+        },
+        "fds": {
+          "count": 50,
+          "p50": 15.0,
+          "p95_nearest_rank": 15,
+          "min": 7,
+          "max": 15
+        }
+      }
+    },
+    {
+      "phase": "gateway-sse-16",
+      "offered_concurrency": 16,
+      "counts": {
+        "success": 40,
+        "rejected": 120,
+        "error": 0,
+        "cancelled": 0,
+        "provider_started": 40
+      },
+      "total_ms": {
+        "count": 40,
+        "p50": 515.3182054928038,
+        "p95_nearest_rank": 525.9781269996893,
+        "min": 505.1156039990019,
+        "max": 528.9171329932287
+      },
+      "valid_requests_per_second": 7.608366512965145,
+      "first_event_ms": {
+        "count": 40,
+        "p50": 18.765474495012313,
+        "p95_nearest_rank": 25.190729007590562,
+        "min": 5.852150003192946,
+        "max": 25.62625301652588
+      },
+      "memory": {
+        "samples": 51,
+        "rss_kib": {
+          "count": 51,
+          "p50": 6016,
+          "p95_nearest_rank": 6084,
+          "min": 5932,
+          "max": 6084
+        },
+        "pss_kib": {
+          "count": 51,
+          "p50": 3605,
+          "p95_nearest_rank": 3673,
+          "min": 3521,
+          "max": 3673
+        },
+        "swap_kib": {
+          "count": 51,
+          "p50": 896,
+          "p95_nearest_rank": 896,
+          "min": 896,
+          "max": 896
+        },
+        "swap_pss_kib": {
+          "count": 51,
+          "p50": 0,
+          "p95_nearest_rank": 0,
+          "min": 0,
+          "max": 0
+        },
+        "resident_plus_swap_kib": {
+          "count": 51,
+          "p50": 6912,
+          "p95_nearest_rank": 6980,
+          "min": 6828,
+          "max": 6980
+        },
+        "pss_plus_swap_pss_kib": {
+          "count": 51,
+          "p50": 3605,
+          "p95_nearest_rank": 3673,
+          "min": 3521,
+          "max": 3673
+        },
+        "threads": {
+          "count": 51,
+          "p50": 1,
+          "p95_nearest_rank": 1,
+          "min": 1,
+          "max": 1
+        },
+        "fds": {
+          "count": 51,
+          "p50": 15,
+          "p95_nearest_rank": 15,
+          "min": 7,
+          "max": 15
+        }
+      }
+    },
+    {
+      "phase": "direct-sse-16",
+      "offered_concurrency": 16,
+      "counts": {
+        "success": 160,
+        "rejected": 0,
+        "error": 0,
+        "cancelled": 0,
+        "provider_started": 160
+      },
+      "total_ms": {
+        "count": 160,
+        "p50": 512.51202300773,
+        "p95_nearest_rank": 538.3462900063023,
+        "min": 503.33747200784273,
+        "max": 552.4886650091503
+      },
+      "valid_requests_per_second": 30.140162517586642,
+      "first_event_ms": {
+        "count": 160,
+        "p50": 13.407798003754579,
+        "p95_nearest_rank": 39.47119601070881,
+        "min": 3.3451589988544583,
+        "max": 53.18222299683839
+      },
+      "memory": {
+        "samples": 51,
+        "rss_kib": {
+          "count": 51,
+          "p50": 5932,
+          "p95_nearest_rank": 5932,
+          "min": 4100,
+          "max": 5932
+        },
+        "pss_kib": {
+          "count": 51,
+          "p50": 3521,
+          "p95_nearest_rank": 3521,
+          "min": 1689,
+          "max": 3521
+        },
+        "swap_kib": {
+          "count": 51,
+          "p50": 896,
+          "p95_nearest_rank": 2732,
+          "min": 896,
+          "max": 2732
+        },
+        "swap_pss_kib": {
+          "count": 51,
+          "p50": 0,
+          "p95_nearest_rank": 124,
+          "min": 0,
+          "max": 124
+        },
+        "resident_plus_swap_kib": {
+          "count": 51,
+          "p50": 6828,
+          "p95_nearest_rank": 6832,
+          "min": 6828,
+          "max": 6832
+        },
+        "pss_plus_swap_pss_kib": {
+          "count": 51,
+          "p50": 3521,
+          "p95_nearest_rank": 3521,
+          "min": 1813,
+          "max": 3521
+        },
+        "threads": {
+          "count": 51,
+          "p50": 1,
+          "p95_nearest_rank": 1,
+          "min": 1,
+          "max": 1
+        },
+        "fds": {
+          "count": 51,
+          "p50": 7,
+          "p95_nearest_rank": 7,
+          "min": 7,
+          "max": 7
+        }
+      }
+    }
+  ],
+  "limitations": [
+    "Baseline only; no original Magpie A/B, absolute performance budget or pass claim.",
+    "One sequential matrix, not five interleaved independent A/B repetitions; page cache retained.",
+    "Both clients and threaded provider share a Python process/GIL and host with the sampler.",
+    "Paced barrier rounds (>=50ms apart) cap offered rate; throughput is not maximum capacity.",
+    "Direct concurrency 16 permits 16 provider streams; gateway accepts at most four; rejections differ.",
+    "Python fixture CPU, scheduling, loopback, body validation and connection setup affect latency.",
+    "Total latency starts before connection setup and ends after EOF plus byte/hash validation.",
+    "First event means one complete validated 16KiB SSE frame, not headers or first TCP byte.",
+    "No inference, TLS, remote vendor, translated protocol, Usage, GUI or non-Linux acceptance.",
+    "RSS/PSS are sampled, may miss brief peaks; swap is separate and not a low-memory-device test.",
+    "PSS+SwapPss includes attributed swapped pages; neither it nor RSS+Swap equals allocations.",
+    "Child checks sample every target task's children; short-lived/detached descendants can be missed.",
+    "Memory-window trends are observations; no calibrated leak/recovery tolerance or profiler limiter.",
+    "Five seconds per cell, not the five-minute performance gate.",
+    "Two seconds for long stream, not the 300-second gate.",
+    "A one-pass short run is not an A/B comparison or capacity measurement."
+  ],
+  "performance_verdict": "baseline only; no performance pass or A/B claim"
+}
