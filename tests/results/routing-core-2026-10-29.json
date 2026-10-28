@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-29",
+  "tested_source_base": "71d53e0a8823000e7494a280b6323b1200e4d0b9",
+  "input_sha256": {
+    "crates/magpie-core/src/lib.rs": "893e55e0c22c74cabfd1bd994121045ee42f2fce3677ad9c7825380693bb1eec",
+    "crates/magpie-core/src/routing.rs": "e52b679baad2b6f4e51abd63dbf28d9e145e15019b84e3d924efab8f36f19b80",
+    "crates/magpie-core/tests/routing.rs": "f6d5ceceefa403199d35643521d27921d59e56b1e6ee05f7e344301d1a0661c7"
+  },
+  "tests": {
+    "routing_integration": {
+      "passed": 36
+    },
+    "core_all_targets_clippy": "passed",
+    "core_format_check": "passed"
+  },
+  "scope": "Linux in-memory synthetic account snapshots; no real credentials or networking",
+  "coverage": "seven selection strategies, bounded group validation, explicit unknown observations and exclusions",
+  "not_checked": [
+    "Gateway integration or actual upstream requests",
+    "persistence and group management",
+    "automatic retry or session affinity",
+    "performance",
+    "other operating systems",
+    "complete REQ-040 through REQ-045"
+  ]
+}

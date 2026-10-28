@@ -5,5 +5,6 @@ pub mod codex_config;
 pub mod codex_transaction;
 pub mod gateway;
 pub mod paths;
+pub mod routing;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
