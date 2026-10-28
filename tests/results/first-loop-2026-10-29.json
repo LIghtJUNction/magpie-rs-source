@@ -1,0 +1,14 @@
+{
+  "scope": "synthetic_provider_real_loopback_http_and_isolated_config_candidate",
+  "binary_sha256": "e3463d7717d0f8a73b5ea6d63d363e9835ce1c81dc0afbdb5c83bbf3696b86f1",
+  "tests_run": 26,
+  "failures": 0,
+  "errors": 0,
+  "skipped": 0,
+  "duration_seconds": 2.485,
+  "passed": true,
+  "real_codex_execution": "not_run",
+  "native_gpui": "not_run",
+  "external_tls": "not_run",
+  "original_magpie_ab": "not_run"
+}

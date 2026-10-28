@@ -1,0 +1,1563 @@
+//! Reversible, explicitly requested Codex configuration transactions.
+//!
+//! This candidate has a native mutation backend for Linux, Android and macOS.
+//! Other platforms return [`TransactionError::UnsupportedPlatform`]. It never
+//! discovers or reads a user's home directory: callers must supply the target.
+//!
+//! A private adjacent state directory contains plaintext recovery images. These
+//! are local transaction data, **not** an export or an encrypted backup product.
+//! The containing directory must already exist and must not be writable by
+//! another Unix user/group. Symlink components and nonregular files are refused.
+//!
+//! `create_new` provides a cooperative lock. Exact bytes AND file identity are
+//! checked again immediately before atomic replacement. Portable filesystem
+//! rename is not compare-and-swap: a noncooperating writer can still win the
+//! interval between that check and rename. Agent quiescence and native filesystem
+//! integration tests remain required before shipping automatic configuration
+//! mutation. Stale locks are deliberately not broken automatically.
+//!
+//! All new plaintext fragments, including staging files, stay in the private
+//! same-filesystem state directory and count against its storage limit. Abandoned
+//! fragments are retained rather than deleting files based on their names.
+
+use std::fmt;
+use std::net::SocketAddr;
+use std::path::Path;
+
+const OWNED_FIELDS: [&str; 7] = [
+    "model",
+    "model_provider",
+    "model_providers.magpie.name",
+    "model_providers.magpie.base_url",
+    "model_providers.magpie.wire_api",
+    "model_providers.magpie.requires_openai_auth",
+    "model_providers.magpie.supports_websockets",
+];
+
+/// Deliberately contains no underlying IO/parser messages or configuration data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransactionError {
+    UnsupportedPlatform,
+    UnsafePath,
+    MissingParent,
+    NotAFile,
+    Symlink,
+    TooLarge,
+    InvalidUtf8,
+    InvalidToml,
+    ReadOnly,
+    Read,
+    Write,
+    LockBusy,
+    UnknownProvider,
+    UnsupportedShape,
+    InvalidModel,
+    InvalidGateway,
+    OriginalChanged,
+    AlreadyManaged,
+    NotManaged,
+    StateInvalid,
+    RecoveryRequired,
+    CommitUncertain,
+    StorageLimit,
+}
+
+impl fmt::Display for TransactionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::UnsupportedPlatform => {
+                "secure native configuration mutation is not implemented on this platform"
+            }
+            Self::UnsafePath => "configuration path or parent directory is unsafe",
+            Self::MissingParent => "configuration parent directory does not exist",
+            Self::NotAFile => "configuration or recovery image is not a regular single-link file",
+            Self::Symlink => "symlink configuration paths or recovery files are refused",
+            Self::TooLarge => "configuration exceeds the transaction size limit",
+            Self::InvalidUtf8 => "configuration is not valid UTF-8",
+            Self::InvalidToml => "configuration is not valid TOML; original bytes were preserved",
+            Self::ReadOnly => "configuration or containing directory is read-only",
+            Self::Read => "configuration or recovery state could not be read",
+            Self::Write => "transaction data could not be persisted before target replacement",
+            Self::LockBusy => {
+                "another transaction or a stale cooperative lock blocks this operation"
+            }
+            Self::UnknownProvider => {
+                "an unowned Magpie provider already exists; explicit reconciliation is required"
+            }
+            Self::UnsupportedShape => "a managed configuration field has an unsupported TOML shape",
+            Self::InvalidModel => {
+                "model must be a bounded provider/model identifier without whitespace or control characters"
+            }
+            Self::InvalidGateway => {
+                "gateway must be a literal loopback address with a nonzero port"
+            }
+            Self::OriginalChanged => {
+                "configuration changed since it was read; no stale snapshot was applied"
+            }
+            Self::AlreadyManaged => {
+                "this configuration is already managed; disconnect before connecting again"
+            }
+            Self::NotManaged => "no active Magpie ownership record exists for this configuration",
+            Self::StateInvalid => {
+                "private transaction state is invalid or does not belong to this target"
+            }
+            Self::RecoveryRequired => {
+                "a pending transaction requires recovery; keep the private recovery files"
+            }
+            Self::CommitUncertain => {
+                "target replacement may have completed; inspect recovery status before retrying"
+            }
+            Self::StorageLimit => {
+                "private transaction storage limit reached; review retained recovery files"
+            }
+        };
+        f.write_str(message)
+    }
+}
+
+impl std::error::Error for TransactionError {}
+
+/// Configuration ownership only; this is never a gateway/network health claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionStatus {
+    Unmanaged,
+    Connected,
+    Drifted,
+    RecoveryRequired,
+}
+
+impl ConnectionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unmanaged => "unmanaged",
+            Self::Connected => "connected",
+            Self::Drifted => "drifted",
+            Self::RecoveryRequired => "recovery-required",
+        }
+    }
+}
+
+/// Counts describe the seven owned scalar fields, including externally deleted
+/// fields that are deliberately preserved as absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisconnectOutcome {
+    pub restored_fields: usize,
+    pub preserved_fields: usize,
+    pub config_removed: bool,
+}
+
+/// Opaque, single-use plan. Original bytes are held privately for the final
+/// precondition check; neither Debug nor public metadata exposes their values.
+pub struct PreparedConnect {
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    inner: native::Plan,
+}
+
+impl PreparedConnect {
+    pub fn config_existed(&self) -> bool {
+        #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+        return self.inner.original.bytes.is_some();
+        #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+        false
+    }
+
+    /// Field names only. Values may be private and are intentionally omitted.
+    pub fn changed_fields(&self) -> &[&'static str] {
+        #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+        return &self.inner.changed_fields;
+        #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+        &[]
+    }
+}
+
+impl fmt::Debug for PreparedConnect {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PreparedConnect")
+            .field("config_existed", &self.config_existed())
+            .field("changed_fields", &self.changed_fields())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Read-only preparation. The existing parent directory is required; this
+/// function does not create configuration, locks, state or backup files.
+pub fn prepare_connect(
+    path: &Path,
+    model: &str,
+    gateway: SocketAddr,
+) -> Result<PreparedConnect, TransactionError> {
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    return native::prepare(path, model, gateway).map(|inner| PreparedConnect { inner });
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+    {
+        let _ = (path, model, gateway);
+        Err(TransactionError::UnsupportedPlatform)
+    }
+}
+
+/// Persist recovery images and a pending journal before atomically replacing
+/// the target. Replacement files are private (0600), including on disconnect.
+pub fn commit_connect(plan: PreparedConnect) -> Result<ConnectionStatus, TransactionError> {
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    return native::commit(plan.inner);
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+    {
+        let _ = plan;
+        Err(TransactionError::UnsupportedPlatform)
+    }
+}
+
+/// Restore only values that still equal the most recent Magpie values. Unrelated
+/// changes and drifted owned fields remain. Also finalizes an interrupted
+/// transaction when the target exactly matches a recorded before/after image;
+/// ambiguous recovery never overwrites the target.
+pub fn disconnect(path: &Path) -> Result<DisconnectOutcome, TransactionError> {
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    return native::disconnect(path);
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+    {
+        let _ = path;
+        Err(TransactionError::UnsupportedPlatform)
+    }
+}
+
+pub fn connection_status(path: &Path) -> Result<ConnectionStatus, TransactionError> {
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    return native::status(path);
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+    {
+        let _ = path;
+        Err(TransactionError::UnsupportedPlatform)
+    }
+}
+
+#[cfg(test)]
+#[doc(hidden)]
+pub mod test_support {
+    use super::TransactionError;
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+
+    pub const CRASH_EXIT: i32 = 86;
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum Point {
+        StageSynced,
+        ImageSynced,
+        BeforeInstall,
+        BeforeDirectorySync,
+    }
+
+    pub enum Action {
+        Fail,
+        Exit,
+    }
+
+    struct Fault {
+        point: Point,
+        path: PathBuf,
+        remaining: usize,
+        action: Action,
+    }
+
+    thread_local! {
+        static FAULT: RefCell<Option<Fault>> = const { RefCell::new(None) };
+    }
+
+    pub fn arm(point: Point, path: &Path, occurrence: usize, action: Action) {
+        assert!(occurrence > 0, "fault occurrence must be nonzero");
+        FAULT.with(|fault| {
+            *fault.borrow_mut() = Some(Fault {
+                point,
+                path: path.to_path_buf(),
+                remaining: occurrence,
+                action,
+            });
+        });
+    }
+
+    pub fn checkpoint(point: Point, path: &Path) -> Result<(), TransactionError> {
+        let action = FAULT.with(|fault| {
+            let mut fault = fault.borrow_mut();
+            let armed = fault.as_mut()?;
+            if armed.point != point || armed.path != path {
+                return None;
+            }
+            armed.remaining -= 1;
+            if armed.remaining == 0 {
+                fault.take().map(|fault| fault.action)
+            } else {
+                None
+            }
+        });
+        match action {
+            Some(Action::Fail) => Err(TransactionError::Write),
+            Some(Action::Exit) => std::process::exit(CRASH_EXIT),
+            None => Ok(()),
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+mod native {
+    use super::{ConnectionStatus, DisconnectOutcome, OWNED_FIELDS, TransactionError as Error};
+    use std::ffi::OsStr;
+    use std::fs::{self, DirBuilder, File, Metadata, OpenOptions};
+    use std::io::{Read, Write};
+    use std::net::SocketAddr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+    use std::path::{Component, Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use toml_edit::{DocumentMut, Item, Table, Value, value};
+
+    const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
+    const MAX_JOURNAL_BYTES: u64 = 16 * 1024;
+    const MAX_STATE_BYTES: u64 = 128 * 1024 * 1024;
+    const MAX_STATE_ENTRIES: usize = 256;
+    const PROVIDER_KEYS: [&str; 5] = [
+        "name",
+        "base_url",
+        "wire_api",
+        "requires_openai_auth",
+        "supports_websockets",
+    ];
+
+    // O_NOFOLLOW | O_NONBLOCK. O_NONBLOCK prevents an adversarially replaced
+    // FIFO/device from hanging open before its descriptor can be validated.
+    // These flags are platform ABI values; all unsupported targets fail closed.
+    // ARM/AArch64 Linux use a different O_NOFOLLOW value from x86/RISC-V.
+    // Audited against corresponding rust-lang/libc platform definitions.
+    // Another CPU needs an explicit ABI entry, never an assumed generic value.
+    fn read_flags() -> Result<i32, Error> {
+        #[cfg(all(
+            any(target_os = "linux", target_os = "android"),
+            any(target_arch = "arm", target_arch = "aarch64")
+        ))]
+        return Ok(0x8000 | 0x800);
+        #[cfg(any(
+            all(
+                any(target_os = "linux", target_os = "android"),
+                any(target_arch = "x86", target_arch = "x86_64")
+            ),
+            all(target_os = "linux", target_arch = "riscv64")
+        ))]
+        return Ok(0x20000 | 0x800);
+        #[cfg(target_os = "macos")]
+        return Ok(0x100 | 0x4);
+        #[cfg(not(any(
+            all(
+                any(target_os = "linux", target_os = "android"),
+                any(
+                    target_arch = "arm",
+                    target_arch = "aarch64",
+                    target_arch = "x86",
+                    target_arch = "x86_64"
+                )
+            ),
+            all(target_os = "linux", target_arch = "riscv64"),
+            target_os = "macos"
+        )))]
+        Err(Error::UnsupportedPlatform)
+    }
+
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    pub(super) struct Plan {
+        target: Target,
+        pub(super) original: Snapshot,
+        connected: Vec<u8>,
+        pub(super) changed_fields: Vec<&'static str>,
+    }
+
+    struct Target {
+        path: PathBuf,
+        parent: PathBuf,
+        state: PathBuf,
+        parent_identity: (u64, u64),
+        binding: String,
+    }
+
+    pub(super) struct Snapshot {
+        pub(super) bytes: Option<Vec<u8>>,
+        identity: Option<Identity>,
+    }
+
+    #[derive(PartialEq, Eq)]
+    struct Identity {
+        dev: u64,
+        ino: u64,
+        mode: u32,
+        size: u64,
+        mtime: i64,
+        mtime_nsec: i64,
+        nlink: u64,
+    }
+
+    impl Identity {
+        fn of(meta: &Metadata) -> Self {
+            Self {
+                dev: meta.dev(),
+                ino: meta.ino(),
+                mode: meta.mode(),
+                size: meta.len(),
+                mtime: meta.mtime(),
+                mtime_nsec: meta.mtime_nsec(),
+                nlink: meta.nlink(),
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Phase {
+        Prepared,
+        Connected,
+        DisconnectPrepared,
+        Disconnected,
+        Aborted,
+    }
+
+    struct Journal {
+        session: String,
+        disconnect_session: String,
+        phase: Phase,
+        original_exists: bool,
+        disconnect_before_exists: bool,
+        disconnected_exists: bool,
+        restored: usize,
+        preserved: usize,
+        removed: bool,
+    }
+
+    impl Journal {
+        fn image_path(&self, target: &Target, suffix: &str) -> PathBuf {
+            let session = if matches!(suffix, "disconnect-before" | "disconnected") {
+                &self.disconnect_session
+            } else {
+                &self.session
+            };
+            target.state.join(format!("{session}-{suffix}.toml"))
+        }
+
+        fn outcome(&self) -> DisconnectOutcome {
+            DisconnectOutcome {
+                restored_fields: self.restored,
+                preserved_fields: self.preserved,
+                config_removed: self.removed,
+            }
+        }
+    }
+
+    struct Lock {
+        path: PathBuf,
+        identity: (u64, u64),
+        _file: File,
+    }
+
+    impl Drop for Lock {
+        fn drop(&mut self) {
+            if let Ok(meta) = fs::symlink_metadata(&self.path) {
+                if !meta.file_type().is_symlink() && (meta.dev(), meta.ino()) == self.identity {
+                    let _ = fs::remove_file(&self.path);
+                    if let Some(parent) = self.path.parent() {
+                        let _ = sync_dir(parent);
+                    }
+                }
+            }
+        }
+    }
+
+    struct Stage {
+        path: PathBuf,
+        identity: (u64, u64),
+        active: bool,
+    }
+
+    impl Drop for Stage {
+        fn drop(&mut self) {
+            if self.active {
+                if let Ok(meta) = fs::symlink_metadata(&self.path) {
+                    if !meta.file_type().is_symlink() && (meta.dev(), meta.ino()) == self.identity {
+                        let _ = fs::remove_file(&self.path);
+                    }
+                }
+            }
+        }
+    }
+
+    pub(super) fn prepare(path: &Path, model: &str, gateway: SocketAddr) -> Result<Plan, Error> {
+        validate_model(model)?;
+        validate_gateway(gateway)?;
+        let target = target(path, true)?;
+        check_no_lock(&target)?;
+        require_inactive(read_journal(&target)?.as_ref())?;
+        let original = read_config(&target.path, true)?;
+        let connected = build_connected(original.bytes.as_deref(), model, gateway)?;
+        let before = parse_optional(original.bytes.as_deref())?;
+        let after = parse(&connected)?;
+        let changed_fields = OWNED_FIELDS
+            .iter()
+            .enumerate()
+            .filter_map(|(index, name)| (!owned_equal(&before, &after, index)).then_some(*name))
+            .collect();
+        check_no_lock(&target)?;
+        Ok(Plan {
+            target,
+            original,
+            connected,
+            changed_fields,
+        })
+    }
+
+    pub(super) fn commit(plan: Plan) -> Result<ConnectionStatus, Error> {
+        let target = plan.target;
+        recheck_parent(&target, true)?;
+        let _lock = acquire_lock(&target, true)?;
+        let previous = read_journal(&target)?;
+        require_inactive(previous.as_ref())?;
+        expect_current(&target, &plan.original)?;
+        // Include both images, the config stage and both journal publications
+        // in the logical budget before replacing the target.
+        ensure_budget(
+            &target,
+            plan.original.bytes.as_ref().map_or(0, Vec::len)
+                + 2 * plan.connected.len()
+                + 2 * MAX_JOURNAL_BYTES as usize,
+            5,
+        )?;
+        let mut staged = stage(&target, &plan.connected)?;
+        let mut journal = Journal {
+            session: nonce(),
+            disconnect_session: String::new(),
+            phase: Phase::Prepared,
+            original_exists: plan.original.bytes.is_some(),
+            disconnect_before_exists: false,
+            disconnected_exists: false,
+            restored: 0,
+            preserved: 0,
+            removed: false,
+        };
+        write_new_private(
+            &target,
+            &journal.image_path(&target, "original"),
+            plan.original.bytes.as_deref().unwrap_or_default(),
+        )?;
+        write_new_private(
+            &target,
+            &journal.image_path(&target, "connected"),
+            &plan.connected,
+        )?;
+        sync_dir(&target.state)?;
+        persist_journal(&target, &journal)?;
+        if let Err(error) = expect_current(&target, &plan.original) {
+            journal.phase = Phase::Aborted;
+            persist_journal(&target, &journal).map_err(|_| Error::RecoveryRequired)?;
+            return Err(error);
+        }
+        // This is intentionally the last check before rename, not a claim of
+        // filesystem compare-and-swap against noncooperating writers.
+        if let Err(error) = install_stage(&mut staged, &target.path) {
+            journal.phase = Phase::Aborted;
+            persist_journal(&target, &journal).map_err(|_| Error::RecoveryRequired)?;
+            return Err(error);
+        }
+        sync_dir(&target.parent).map_err(|_| Error::CommitUncertain)?;
+        journal.phase = Phase::Connected;
+        persist_journal(&target, &journal).map_err(|_| Error::CommitUncertain)?;
+        if let Some(previous) = previous {
+            discard_finished_images(&target, &previous);
+        }
+        inspect_connected(&target, &plan.connected).map_err(|_| Error::CommitUncertain)
+    }
+
+    pub(super) fn status(path: &Path) -> Result<ConnectionStatus, Error> {
+        let target = target(path, false)?;
+        check_no_lock(&target)?;
+        let result = match read_journal(&target)? {
+            None => ConnectionStatus::Unmanaged,
+            Some(journal) => match journal.phase {
+                Phase::Disconnected | Phase::Aborted => ConnectionStatus::Unmanaged,
+                Phase::Prepared | Phase::DisconnectPrepared => ConnectionStatus::RecoveryRequired,
+                Phase::Connected => {
+                    let (_, connected) = connection_images(&target, &journal)?;
+                    inspect_connected(&target, &connected)?
+                }
+            },
+        };
+        check_no_lock(&target)?;
+        Ok(result)
+    }
+
+    pub(super) fn disconnect(path: &Path) -> Result<DisconnectOutcome, Error> {
+        let target = target(path, true)?;
+        let _lock = acquire_lock(&target, false)?;
+        let mut journal = read_journal(&target)?.ok_or(Error::NotManaged)?;
+        if matches!(journal.phase, Phase::Disconnected | Phase::Aborted) {
+            return Err(Error::NotManaged);
+        }
+        if journal.phase == Phase::DisconnectPrepared {
+            return resume_disconnect(&target, &mut journal);
+        }
+        let (original, connected) = connection_images(&target, &journal)?;
+        let current = read_config(&target.path, true)?;
+        if journal.phase == Phase::Prepared {
+            if current.bytes == original {
+                journal.phase = Phase::Aborted;
+                persist_journal(&target, &journal)?;
+                return Ok(DisconnectOutcome {
+                    restored_fields: 0,
+                    preserved_fields: 0,
+                    config_removed: false,
+                });
+            }
+            if current.bytes.as_deref() != Some(connected.as_slice()) {
+                return Err(Error::RecoveryRequired);
+            }
+        }
+        let (restored, outcome) =
+            restore_owned(original.as_deref(), &connected, current.bytes.as_deref())?;
+        // Reserve the images, replacement stage and both journal publications.
+        ensure_budget(
+            &target,
+            current.bytes.as_ref().map_or(0, Vec::len)
+                + 2 * restored.as_ref().map_or(0, Vec::len)
+                + 2 * MAX_JOURNAL_BYTES as usize,
+            5,
+        )?;
+        // A crash before publishing the disconnect journal can leave partial
+        // private images. A fresh attempt uses fresh create_new names, so those
+        // unreferenced files never block or become a source of restoration.
+        journal.disconnect_session = nonce();
+        write_new_private(
+            &target,
+            &journal.image_path(&target, "disconnect-before"),
+            current.bytes.as_deref().unwrap_or_default(),
+        )?;
+        write_new_private(
+            &target,
+            &journal.image_path(&target, "disconnected"),
+            restored.as_deref().unwrap_or_default(),
+        )?;
+        sync_dir(&target.state)?;
+        journal.phase = Phase::DisconnectPrepared;
+        journal.disconnect_before_exists = current.bytes.is_some();
+        journal.disconnected_exists = restored.is_some();
+        journal.restored = outcome.restored_fields;
+        journal.preserved = outcome.preserved_fields;
+        journal.removed = outcome.config_removed;
+        persist_journal(&target, &journal)?;
+        apply_disconnect(&target, &mut journal, &current, restored.as_deref())?;
+        Ok(outcome)
+    }
+
+    fn resume_disconnect(
+        target: &Target,
+        journal: &mut Journal,
+    ) -> Result<DisconnectOutcome, Error> {
+        // Both images are durable before this phase is published. Exact image
+        // matching is required; ambiguous external changes need manual review.
+        let before = stored_image(
+            target,
+            journal,
+            "disconnect-before",
+            journal.disconnect_before_exists,
+        )?;
+        let after = stored_image(target, journal, "disconnected", journal.disconnected_exists)?;
+        let (original, connected) = connection_images(target, journal)?;
+        let (expected, outcome) = restore_owned(original.as_deref(), &connected, before.as_deref())
+            .map_err(|_| Error::StateInvalid)?;
+        if expected != after || outcome != journal.outcome() {
+            return Err(Error::StateInvalid);
+        }
+        let current = read_config(&target.path, true)?;
+        if current.bytes == after {
+            ensure_budget(target, MAX_JOURNAL_BYTES as usize, 1)?;
+            // Observing the after-image does not prove the interrupted rename
+            // or unlink reached disk. Order that sync before the final journal.
+            sync_dir(&target.parent).map_err(|_| Error::CommitUncertain)?;
+            journal.phase = Phase::Disconnected;
+            persist_journal(target, journal).map_err(|_| Error::CommitUncertain)?;
+            return Ok(journal.outcome());
+        }
+        if current.bytes != before {
+            return Err(Error::RecoveryRequired);
+        }
+        apply_disconnect(target, journal, &current, after.as_deref())?;
+        Ok(journal.outcome())
+    }
+
+    fn apply_disconnect(
+        target: &Target,
+        journal: &mut Journal,
+        current: &Snapshot,
+        after: Option<&[u8]>,
+    ) -> Result<(), Error> {
+        ensure_budget(
+            target,
+            after.map_or(0, <[u8]>::len) + MAX_JOURNAL_BYTES as usize,
+            2,
+        )?;
+        let mut staged = after
+            .filter(|_| current.bytes.as_deref() != after)
+            .map(|bytes| stage(target, bytes))
+            .transpose()?;
+        expect_current(target, current)?;
+        if current.bytes.as_deref() != after {
+            if let Some(staged) = staged.as_mut() {
+                install_stage(staged, &target.path)?;
+            } else {
+                fs::remove_file(&target.path).map_err(|_| Error::Write)?;
+            }
+            sync_dir(&target.parent).map_err(|_| Error::CommitUncertain)?;
+        }
+        journal.phase = Phase::Disconnected;
+        persist_journal(target, journal).map_err(|_| Error::CommitUncertain)
+    }
+
+    fn validate_model(model: &str) -> Result<(), Error> {
+        if model.len() > 512
+            || model.is_empty()
+            || !model.is_ascii()
+            || model
+                .bytes()
+                .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+        {
+            return Err(Error::InvalidModel);
+        }
+        let Some((provider, name)) = model.split_once('/') else {
+            return Err(Error::InvalidModel);
+        };
+        if provider.is_empty()
+            || name.is_empty()
+            || provider.len() > 128
+            || !provider
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            || name.bytes().any(|b| b"\\\"'?#".contains(&b))
+        {
+            return Err(Error::InvalidModel);
+        }
+        Ok(())
+    }
+
+    fn validate_gateway(gateway: SocketAddr) -> Result<(), Error> {
+        if gateway.port() == 0 || !gateway.ip().is_loopback() {
+            return Err(Error::InvalidGateway);
+        }
+        // Scoped IPv6 is unnecessary for ::1 and produces a URL with additional
+        // platform semantics. Refuse it rather than constructing an invalid URL.
+        if let SocketAddr::V6(address) = gateway {
+            if address.scope_id() != 0 || address.flowinfo() != 0 {
+                return Err(Error::InvalidGateway);
+            }
+        }
+        Ok(())
+    }
+
+    fn build_connected(
+        original: Option<&[u8]>,
+        model: &str,
+        gateway: SocketAddr,
+    ) -> Result<Vec<u8>, Error> {
+        let mut document = parse_optional(original)?;
+        for key in ["model", "model_provider"] {
+            if document
+                .get(key)
+                .is_some_and(|item| item.as_str().is_none())
+            {
+                return Err(Error::UnsupportedShape);
+            }
+        }
+        if let Some(providers) = document.get("model_providers") {
+            let providers = providers.as_table().ok_or(Error::UnsupportedShape)?;
+            if providers.contains_key("magpie") {
+                return Err(Error::UnknownProvider);
+            }
+        }
+        replace_value(document.as_table_mut(), "model", Value::from(model));
+        replace_value(
+            document.as_table_mut(),
+            "model_provider",
+            Value::from("magpie"),
+        );
+        if !document.contains_key("model_providers") {
+            let mut providers = Table::new();
+            providers.set_implicit(true);
+            document["model_providers"] = Item::Table(providers);
+        }
+        let mut provider = Table::new();
+        provider["name"] = value("magpie");
+        provider["base_url"] = value(format!("http://{gateway}/v1"));
+        provider["wire_api"] = value("responses");
+        provider["requires_openai_auth"] = value(false);
+        provider["supports_websockets"] = value(false);
+        document["model_providers"]["magpie"] = Item::Table(provider);
+        let bytes = document.to_string().into_bytes();
+        if bytes.len() as u64 > MAX_CONFIG_BYTES {
+            return Err(Error::TooLarge);
+        }
+        Ok(bytes)
+    }
+
+    fn replace_value(table: &mut Table, key: &str, mut next: Value) {
+        if let Some(existing) = table.get_mut(key) {
+            if let Some(previous) = existing.as_value() {
+                *next.decor_mut() = previous.decor().clone();
+            }
+            // Table::insert formats an existing key and drops its key-level
+            // decoration. Mutate its value in place to retain preceding comments,
+            // quoted key spelling and spacing around the equals sign.
+            *existing = Item::Value(next);
+        } else {
+            table.insert(key, Item::Value(next));
+        }
+    }
+
+    fn owned_item(document: &DocumentMut, index: usize) -> Option<&Item> {
+        match index {
+            0 => document.get("model"),
+            1 => document.get("model_provider"),
+            _ => document
+                .get("model_providers")?
+                .as_table()?
+                .get("magpie")?
+                .as_table()?
+                .get(PROVIDER_KEYS[index - 2]),
+        }
+    }
+
+    fn owned_equal(current: &DocumentMut, written: &DocumentMut, index: usize) -> bool {
+        let (Some(current), Some(written)) =
+            (owned_item(current, index), owned_item(written, index))
+        else {
+            return false;
+        };
+        if let Some(value) = written.as_str() {
+            current.as_str() == Some(value)
+        } else if let Some(value) = written.as_bool() {
+            current.as_bool() == Some(value)
+        } else {
+            false
+        }
+    }
+
+    fn inspect_connected(target: &Target, connected: &[u8]) -> Result<ConnectionStatus, Error> {
+        let current = read_config(&target.path, false)?;
+        let Some(bytes) = current.bytes else {
+            return Ok(ConnectionStatus::Drifted);
+        };
+        let current = parse(&bytes)?;
+        let written = parse(connected)?;
+        Ok(
+            if (0..OWNED_FIELDS.len()).all(|i| owned_equal(&current, &written, i)) {
+                ConnectionStatus::Connected
+            } else {
+                ConnectionStatus::Drifted
+            },
+        )
+    }
+
+    fn restore_owned(
+        original: Option<&[u8]>,
+        connected: &[u8],
+        current: Option<&[u8]>,
+    ) -> Result<(Option<Vec<u8>>, DisconnectOutcome), Error> {
+        let Some(current) = current else {
+            return Ok((
+                None,
+                DisconnectOutcome {
+                    restored_fields: 0,
+                    preserved_fields: OWNED_FIELDS.len(),
+                    config_removed: false,
+                },
+            ));
+        };
+        if current == connected {
+            return Ok((
+                original.map(<[u8]>::to_vec),
+                DisconnectOutcome {
+                    restored_fields: OWNED_FIELDS.len(),
+                    preserved_fields: 0,
+                    config_removed: original.is_none(),
+                },
+            ));
+        }
+        let baseline = parse_optional(original)?;
+        let written = parse(connected)?;
+        let mut document = parse(current)?;
+        let mut comments = String::new();
+        let mut restored = 0;
+        for (index, key) in ["model", "model_provider"].iter().enumerate() {
+            if owned_equal(&document, &written, index) {
+                if let Some(previous) = baseline.get(key).and_then(Item::as_value) {
+                    replace_value(document.as_table_mut(), key, previous.clone());
+                } else {
+                    remove_preserving_comments(document.as_table_mut(), key, &mut comments);
+                }
+                restored += 1;
+            }
+        }
+        let matches: Vec<bool> = (2..OWNED_FIELDS.len())
+            .map(|i| owned_equal(&document, &written, i))
+            .collect();
+        if let Some(providers) = document
+            .get_mut("model_providers")
+            .and_then(Item::as_table_mut)
+        {
+            if let Some(provider) = providers.get_mut("magpie").and_then(Item::as_table_mut) {
+                for (index, key) in PROVIDER_KEYS.iter().enumerate() {
+                    if matches[index] {
+                        remove_preserving_comments(provider, key, &mut comments);
+                        restored += 1;
+                    }
+                }
+                if provider.is_empty() {
+                    remove_preserving_comments(providers, "magpie", &mut comments);
+                }
+            }
+            if providers.is_empty() && !baseline.contains_key("model_providers") {
+                remove_preserving_comments(
+                    document.as_table_mut(),
+                    "model_providers",
+                    &mut comments,
+                );
+            }
+        }
+        if !comments.is_empty() {
+            let mut trailing = document.trailing().as_str().unwrap_or_default().to_owned();
+            if !trailing.ends_with('\n') {
+                trailing.push('\n');
+            }
+            trailing.push_str(&comments);
+            document.set_trailing(trailing);
+        }
+        let bytes = document.to_string().into_bytes();
+        if bytes.len() as u64 > MAX_CONFIG_BYTES {
+            return Err(Error::TooLarge);
+        }
+        Ok((
+            Some(bytes),
+            DisconnectOutcome {
+                restored_fields: restored,
+                preserved_fields: OWNED_FIELDS.len() - restored,
+                config_removed: false,
+            },
+        ))
+    }
+
+    fn retain_comment(raw: Option<&toml_edit::RawString>, comments: &mut String) {
+        if let Some(text) = raw.and_then(toml_edit::RawString::as_str) {
+            if text.contains('#') {
+                comments.push_str(text);
+                if !text.ends_with('\n') {
+                    comments.push('\n');
+                }
+            }
+        }
+    }
+
+    fn remove_preserving_comments(table: &mut Table, key: &str, comments: &mut String) {
+        if let Some((key, item)) = table.get_key_value(key) {
+            retain_comment(key.leaf_decor().prefix(), comments);
+            retain_comment(key.leaf_decor().suffix(), comments);
+            if let Some(value) = item.as_value() {
+                retain_comment(value.decor().prefix(), comments);
+                retain_comment(value.decor().suffix(), comments);
+            } else if let Some(child) = item.as_table() {
+                retain_comment(child.decor().prefix(), comments);
+                retain_comment(child.decor().suffix(), comments);
+            }
+        }
+        table.remove(key);
+    }
+
+    fn parse(bytes: &[u8]) -> Result<DocumentMut, Error> {
+        let text = std::str::from_utf8(bytes).map_err(|_| Error::InvalidUtf8)?;
+        text.parse::<DocumentMut>().map_err(|_| Error::InvalidToml)
+    }
+
+    fn parse_optional(bytes: Option<&[u8]>) -> Result<DocumentMut, Error> {
+        bytes.map(parse).unwrap_or_else(|| Ok(DocumentMut::new()))
+    }
+
+    fn target(path: &Path, writable: bool) -> Result<Target, Error> {
+        let _ = read_flags()?;
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|_| Error::UnsafePath)?
+                .join(path)
+        };
+        let mut normalized = PathBuf::new();
+        for component in absolute.components() {
+            match component {
+                Component::RootDir | Component::Normal(_) => normalized.push(component.as_os_str()),
+                Component::CurDir => (),
+                _ => return Err(Error::UnsafePath),
+            }
+        }
+        let name = normalized
+            .file_name()
+            .and_then(OsStr::to_str)
+            .ok_or(Error::UnsafePath)?;
+        if name.is_empty() || name.len() > 180 || name.chars().any(char::is_control) {
+            return Err(Error::UnsafePath);
+        }
+        let parent = normalized.parent().ok_or(Error::UnsafePath)?.to_path_buf();
+        validate_directories(&parent, writable)?;
+        let meta = fs::symlink_metadata(&parent).map_err(|_| Error::Read)?;
+        let state = parent.join(format!(".{name}.magpie-state"));
+        let binding = hex(normalized.as_os_str().as_bytes());
+        Ok(Target {
+            path: normalized,
+            parent,
+            state,
+            parent_identity: (meta.dev(), meta.ino()),
+            binding,
+        })
+    }
+
+    fn validate_directories(parent: &Path, writable: bool) -> Result<(), Error> {
+        let mut current = PathBuf::new();
+        for component in parent.components() {
+            current.push(component.as_os_str());
+            let meta = fs::symlink_metadata(&current).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    Error::MissingParent
+                } else {
+                    Error::Read
+                }
+            })?;
+            if meta.file_type().is_symlink() {
+                return Err(Error::Symlink);
+            }
+            if !meta.is_dir() {
+                return Err(Error::UnsafePath);
+            }
+            if meta.mode() & 0o022 != 0 && meta.mode() & 0o1000 == 0 {
+                return Err(Error::UnsafePath);
+            }
+        }
+        let meta = fs::symlink_metadata(parent).map_err(|_| Error::Read)?;
+        // Ancestors such as /tmp may be sticky, but the immediate container must
+        // itself be a trusted directory. We never create it on the user's behalf.
+        if meta.mode() & 0o022 != 0 {
+            return Err(Error::UnsafePath);
+        }
+        if writable && meta.mode() & 0o200 == 0 {
+            return Err(Error::ReadOnly);
+        }
+        Ok(())
+    }
+
+    fn recheck_parent(target: &Target, writable: bool) -> Result<(), Error> {
+        validate_directories(&target.parent, writable)?;
+        let meta = fs::symlink_metadata(&target.parent).map_err(|_| Error::Read)?;
+        if (meta.dev(), meta.ino()) != target.parent_identity {
+            return Err(Error::OriginalChanged);
+        }
+        Ok(())
+    }
+
+    fn checked_meta(
+        meta: &Metadata,
+        private: bool,
+        writable: bool,
+        limit: u64,
+    ) -> Result<(), Error> {
+        if meta.file_type().is_symlink() {
+            return Err(Error::Symlink);
+        }
+        if !meta.is_file() || meta.nlink() != 1 {
+            return Err(Error::NotAFile);
+        }
+        if meta.len() > limit {
+            return Err(Error::TooLarge);
+        }
+        if private && meta.mode() & 0o077 != 0 {
+            return Err(Error::StateInvalid);
+        }
+        if meta.mode() & 0o400 == 0 {
+            return Err(Error::Read);
+        }
+        if writable && meta.mode() & 0o200 == 0 {
+            return Err(Error::ReadOnly);
+        }
+        if writable && meta.mode() & 0o022 != 0 {
+            return Err(Error::UnsafePath);
+        }
+        Ok(())
+    }
+
+    fn read_file(
+        path: &Path,
+        private: bool,
+        writable: bool,
+        limit: u64,
+    ) -> Result<Snapshot, Error> {
+        let meta = match fs::symlink_metadata(path) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Snapshot {
+                    bytes: None,
+                    identity: None,
+                });
+            }
+            Err(_) => return Err(Error::Read),
+        };
+        checked_meta(&meta, private, writable, limit)?;
+        let before = Identity::of(&meta);
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(read_flags()?)
+            .open(path)
+            .map_err(|_| Error::Read)?;
+        let opened = file.metadata().map_err(|_| Error::Read)?;
+        checked_meta(&opened, private, writable, limit)?;
+        if Identity::of(&opened) != before {
+            return Err(Error::OriginalChanged);
+        }
+        let mut bytes = Vec::with_capacity(meta.len() as usize);
+        (&file)
+            .take(limit + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| Error::Read)?;
+        if bytes.len() as u64 > limit {
+            return Err(Error::TooLarge);
+        }
+        let after = file.metadata().map_err(|_| Error::Read)?;
+        let named = fs::symlink_metadata(path).map_err(|_| Error::OriginalChanged)?;
+        if Identity::of(&after) != before
+            || Identity::of(&named) != before
+            || bytes.len() as u64 != meta.len()
+        {
+            return Err(Error::OriginalChanged);
+        }
+        Ok(Snapshot {
+            bytes: Some(bytes),
+            identity: Some(before),
+        })
+    }
+
+    fn read_config(path: &Path, writable: bool) -> Result<Snapshot, Error> {
+        read_file(path, false, writable, MAX_CONFIG_BYTES)
+    }
+
+    fn expect_current(target: &Target, expected: &Snapshot) -> Result<(), Error> {
+        recheck_parent(target, true)?;
+        let current = read_config(&target.path, true)?;
+        if current.bytes != expected.bytes || current.identity != expected.identity {
+            return Err(Error::OriginalChanged);
+        }
+        Ok(())
+    }
+
+    fn state_exists(target: &Target) -> Result<bool, Error> {
+        match fs::symlink_metadata(&target.state) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(_) => Err(Error::Read),
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Err(Error::Symlink);
+                }
+                if !meta.is_dir() || meta.mode() & 0o077 != 0 {
+                    return Err(Error::StateInvalid);
+                }
+                if meta.dev() != target.parent_identity.0 {
+                    return Err(Error::UnsafePath);
+                }
+                if meta.mode() & 0o700 != 0o700 {
+                    return Err(Error::ReadOnly);
+                }
+                Ok(true)
+            }
+        }
+    }
+
+    fn check_no_lock(target: &Target) -> Result<(), Error> {
+        if state_exists(target)? {
+            match fs::symlink_metadata(target.state.join("lock")) {
+                Ok(_) => return Err(Error::LockBusy),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                Err(_) => return Err(Error::Read),
+            }
+        }
+        Ok(())
+    }
+
+    fn acquire_lock(target: &Target, create: bool) -> Result<Lock, Error> {
+        if !state_exists(target)? {
+            if !create {
+                return Err(Error::NotManaged);
+            }
+            match DirBuilder::new().mode(0o700).create(&target.state) {
+                Ok(()) => sync_dir(&target.parent)?,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
+                Err(_) => return Err(Error::Write),
+            }
+            state_exists(target)?;
+        }
+        let path = target.state.join("lock");
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    Error::LockBusy
+                } else {
+                    Error::Write
+                }
+            })?;
+        let meta = file.metadata().map_err(|_| Error::Write)?;
+        let guard = Lock {
+            path,
+            identity: (meta.dev(), meta.ino()),
+            _file: file,
+        };
+        guard._file.sync_all().map_err(|_| Error::Write)?;
+        sync_dir(&target.state)?;
+        Ok(guard)
+    }
+
+    fn require_inactive(journal: Option<&Journal>) -> Result<(), Error> {
+        match journal.map(|j| j.phase) {
+            None | Some(Phase::Disconnected | Phase::Aborted) => Ok(()),
+            Some(Phase::Connected) => Err(Error::AlreadyManaged),
+            Some(Phase::Prepared | Phase::DisconnectPrepared) => Err(Error::RecoveryRequired),
+        }
+    }
+
+    fn write_new_private(target: &Target, path: &Path, bytes: &[u8]) -> Result<(), Error> {
+        if bytes.len() as u64 > MAX_CONFIG_BYTES {
+            return Err(Error::TooLarge);
+        }
+        ensure_budget(target, bytes.len(), 1)?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|_| Error::Write)?;
+        file.write_all(bytes).map_err(|_| Error::Write)?;
+        file.sync_all().map_err(|_| Error::Write)?;
+        #[cfg(test)]
+        super::test_support::checkpoint(super::test_support::Point::ImageSynced, &target.state)?;
+        Ok(())
+    }
+
+    fn stage(target: &Target, bytes: &[u8]) -> Result<Stage, Error> {
+        if bytes.len() as u64 > MAX_CONFIG_BYTES {
+            return Err(Error::TooLarge);
+        }
+        ensure_budget(target, bytes.len(), 1)?;
+        for _ in 0..8 {
+            let path = target.state.join(format!(".magpie-stage-{}", nonce()));
+            let mut file = match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+            {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return Err(Error::Write),
+            };
+            let meta = file.metadata().map_err(|_| Error::Write)?;
+            let guard = Stage {
+                path,
+                identity: (meta.dev(), meta.ino()),
+                active: true,
+            };
+            file.write_all(bytes).map_err(|_| Error::Write)?;
+            file.sync_all().map_err(|_| Error::Write)?;
+            #[cfg(test)]
+            super::test_support::checkpoint(
+                super::test_support::Point::StageSynced,
+                &target.state,
+            )?;
+            return Ok(guard);
+        }
+        Err(Error::Write)
+    }
+
+    fn install_stage(stage: &mut Stage, target: &Path) -> Result<(), Error> {
+        let meta = fs::symlink_metadata(&stage.path).map_err(|_| Error::Write)?;
+        checked_meta(&meta, true, true, MAX_CONFIG_BYTES)?;
+        if (meta.dev(), meta.ino()) != stage.identity {
+            return Err(Error::OriginalChanged);
+        }
+        #[cfg(test)]
+        super::test_support::checkpoint(super::test_support::Point::BeforeInstall, target)?;
+        fs::rename(&stage.path, target).map_err(|_| Error::Write)?;
+        stage.active = false;
+        Ok(())
+    }
+
+    fn sync_dir(path: &Path) -> Result<(), Error> {
+        #[cfg(test)]
+        super::test_support::checkpoint(super::test_support::Point::BeforeDirectorySync, path)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(read_flags()?)
+            .open(path)
+            .map_err(|_| Error::Write)?;
+        if !file.metadata().map_err(|_| Error::Write)?.is_dir() {
+            return Err(Error::UnsafePath);
+        }
+        file.sync_all().map_err(|_| Error::Write)
+    }
+
+    fn persist_journal(target: &Target, journal: &Journal) -> Result<(), Error> {
+        let mut document = DocumentMut::new();
+        document["version"] = value(1);
+        document["target"] = value(&target.binding);
+        document["session"] = value(&journal.session);
+        document["disconnect_session"] = value(&journal.disconnect_session);
+        document["phase"] = value(match journal.phase {
+            Phase::Prepared => "prepared",
+            Phase::Connected => "connected",
+            Phase::DisconnectPrepared => "disconnect-prepared",
+            Phase::Disconnected => "disconnected",
+            Phase::Aborted => "aborted",
+        });
+        document["original_exists"] = value(journal.original_exists);
+        document["disconnect_before_exists"] = value(journal.disconnect_before_exists);
+        document["disconnected_exists"] = value(journal.disconnected_exists);
+        document["restored_fields"] = value(journal.restored as i64);
+        document["preserved_fields"] = value(journal.preserved as i64);
+        document["config_removed"] = value(journal.removed);
+        let bytes = document.to_string().into_bytes();
+        if bytes.len() as u64 > MAX_JOURNAL_BYTES {
+            return Err(Error::StateInvalid);
+        }
+        let mut staged = stage(target, &bytes)?;
+        let journal_path = target.state.join("journal.toml");
+        // Never overwrite a nonregular, hardlinked or externally accessible
+        // journal, even if it appeared after the previous read.
+        let _ = read_file(&journal_path, true, true, MAX_JOURNAL_BYTES)?;
+        install_stage(&mut staged, &journal_path)?;
+        sync_dir(&target.state)
+    }
+
+    fn read_journal(target: &Target) -> Result<Option<Journal>, Error> {
+        if !state_exists(target)? {
+            return Ok(None);
+        }
+        let snapshot = read_file(
+            &target.state.join("journal.toml"),
+            true,
+            false,
+            MAX_JOURNAL_BYTES,
+        )?;
+        let Some(bytes) = snapshot.bytes else {
+            return Ok(None);
+        };
+        let document = parse(&bytes).map_err(|_| Error::StateInvalid)?;
+        if document.get("version").and_then(Item::as_integer) != Some(1)
+            || document.get("target").and_then(Item::as_str) != Some(target.binding.as_str())
+        {
+            return Err(Error::StateInvalid);
+        }
+        let session = document
+            .get("session")
+            .and_then(Item::as_str)
+            .ok_or(Error::StateInvalid)?;
+        if session.is_empty()
+            || session.len() > 80
+            || !session.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
+        {
+            return Err(Error::StateInvalid);
+        }
+        let phase = match document.get("phase").and_then(Item::as_str) {
+            Some("prepared") => Phase::Prepared,
+            Some("connected") => Phase::Connected,
+            Some("disconnect-prepared") => Phase::DisconnectPrepared,
+            Some("disconnected") => Phase::Disconnected,
+            Some("aborted") => Phase::Aborted,
+            _ => return Err(Error::StateInvalid),
+        };
+        let disconnect_session = document
+            .get("disconnect_session")
+            .and_then(Item::as_str)
+            .ok_or(Error::StateInvalid)?;
+        if disconnect_session.len() > 80
+            || !disconnect_session
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() || b == b'-')
+            || (matches!(phase, Phase::DisconnectPrepared | Phase::Disconnected)
+                && disconnect_session.is_empty())
+        {
+            return Err(Error::StateInvalid);
+        }
+        let boolean = |key| {
+            document
+                .get(key)
+                .and_then(Item::as_bool)
+                .ok_or(Error::StateInvalid)
+        };
+        let count = |key| {
+            let count = document
+                .get(key)
+                .and_then(Item::as_integer)
+                .ok_or(Error::StateInvalid)?;
+            if !(0..=OWNED_FIELDS.len() as i64).contains(&count) {
+                return Err(Error::StateInvalid);
+            }
+            Ok(count as usize)
+        };
+        let journal = Journal {
+            session: session.to_owned(),
+            disconnect_session: disconnect_session.to_owned(),
+            phase,
+            original_exists: boolean("original_exists")?,
+            disconnect_before_exists: boolean("disconnect_before_exists")?,
+            disconnected_exists: boolean("disconnected_exists")?,
+            restored: count("restored_fields")?,
+            preserved: count("preserved_fields")?,
+            removed: boolean("config_removed")?,
+        };
+        if journal.restored + journal.preserved > OWNED_FIELDS.len()
+            || (matches!(phase, Phase::DisconnectPrepared | Phase::Disconnected)
+                && journal.restored + journal.preserved != OWNED_FIELDS.len())
+            || (journal.removed
+                && (!journal.disconnect_before_exists || journal.disconnected_exists))
+        {
+            return Err(Error::StateInvalid);
+        }
+        Ok(Some(journal))
+    }
+
+    fn stored_image(
+        target: &Target,
+        journal: &Journal,
+        suffix: &str,
+        exists: bool,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        let snapshot = read_file(
+            &journal.image_path(target, suffix),
+            true,
+            false,
+            MAX_CONFIG_BYTES,
+        )?;
+        let bytes = snapshot.bytes.ok_or(Error::StateInvalid)?;
+        if exists {
+            Ok(Some(bytes))
+        } else if bytes.is_empty() {
+            Ok(None)
+        } else {
+            Err(Error::StateInvalid)
+        }
+    }
+
+    fn connection_images(
+        target: &Target,
+        journal: &Journal,
+    ) -> Result<(Option<Vec<u8>>, Vec<u8>), Error> {
+        let original = stored_image(target, journal, "original", journal.original_exists)?;
+        let connected =
+            stored_image(target, journal, "connected", true)?.ok_or(Error::StateInvalid)?;
+        let document = parse(&connected).map_err(|_| Error::StateInvalid)?;
+        let model = document
+            .get("model")
+            .and_then(Item::as_str)
+            .ok_or(Error::StateInvalid)?;
+        let base_url = owned_item(&document, 3)
+            .and_then(Item::as_str)
+            .ok_or(Error::StateInvalid)?;
+        let address = base_url
+            .strip_prefix("http://")
+            .and_then(|url| url.strip_suffix("/v1"))
+            .ok_or(Error::StateInvalid)?;
+        let gateway = address
+            .parse::<SocketAddr>()
+            .map_err(|_| Error::StateInvalid)?;
+        validate_model(model).map_err(|_| Error::StateInvalid)?;
+        validate_gateway(gateway).map_err(|_| Error::StateInvalid)?;
+        let expected = build_connected(original.as_deref(), model, gateway)
+            .map_err(|_| Error::StateInvalid)?;
+        if expected != connected {
+            return Err(Error::StateInvalid);
+        }
+        Ok((original, connected))
+    }
+
+    fn ensure_budget(
+        target: &Target,
+        additional_bytes: usize,
+        additional_entries: usize,
+    ) -> Result<(), Error> {
+        if !state_exists(target)? {
+            return Err(Error::StateInvalid);
+        }
+        let mut total = additional_bytes as u64;
+        if total > MAX_STATE_BYTES || additional_entries > MAX_STATE_ENTRIES {
+            return Err(Error::StorageLimit);
+        }
+        let entries = fs::read_dir(&target.state).map_err(|_| Error::Read)?;
+        for (index, entry) in entries.enumerate() {
+            if index >= MAX_STATE_ENTRIES - additional_entries {
+                return Err(Error::StorageLimit);
+            }
+            let entry = entry.map_err(|_| Error::Read)?;
+            let meta = fs::symlink_metadata(entry.path()).map_err(|_| Error::Read)?;
+            if meta.file_type().is_symlink()
+                || !meta.is_file()
+                || meta.mode() & 0o077 != 0
+                || meta.nlink() != 1
+            {
+                return Err(Error::StateInvalid);
+            }
+            total = total.checked_add(meta.len()).ok_or(Error::StorageLimit)?;
+            if total > MAX_STATE_BYTES {
+                return Err(Error::StorageLimit);
+            }
+        }
+        Ok(())
+    }
+
+    fn discard_finished_images(target: &Target, previous: &Journal) {
+        if !matches!(previous.phase, Phase::Disconnected | Phase::Aborted) {
+            return;
+        }
+        for suffix in ["original", "connected", "disconnect-before", "disconnected"] {
+            if previous.disconnect_session.is_empty()
+                && matches!(suffix, "disconnect-before" | "disconnected")
+            {
+                continue;
+            }
+            let path = previous.image_path(target, suffix);
+            if let Ok(meta) = fs::symlink_metadata(&path) {
+                if checked_meta(&meta, true, true, MAX_CONFIG_BYTES).is_ok() {
+                    let _ = fs::remove_file(path);
+                }
+            }
+        }
+        let _ = sync_dir(&target.state);
+    }
+
+    fn nonce() -> String {
+        let time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        format!(
+            "{time:032x}-{:08x}-{:016x}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        let mut result = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            result.push(char::from(DIGITS[(byte >> 4) as usize]));
+            result.push(char::from(DIGITS[(byte & 15) as usize]));
+        }
+        result
+    }
+}

@@ -3,6 +3,7 @@ use std::process::ExitCode;
 
 use magpie_core::agents::{self, CodexDiscovery};
 use magpie_core::codex_config::{self, CodexConnectPreview, FieldChange};
+use magpie_core::codex_transaction;
 use magpie_core::paths;
 
 fn main() -> ExitCode {
@@ -63,6 +64,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
         "agents" => agents_command(args),
         "config" => config_command(args),
         "models" => models_command(args),
+        "gateway" => gateway_command(args),
         "gui" => gui_command(args),
         "serve" => serve_command(args),
         "status" => status_command(args),
@@ -133,11 +135,21 @@ fn agents_command(mut args: impl Iterator<Item = String>) -> Result<(), String> 
             Ok(())
         }
         Some("connect") => connect_command(args),
+        Some("disconnect") => transaction_state_command(args, true),
+        Some("connection-status") => transaction_state_command(args, false),
         Some(_) => Err("unknown agents command".to_owned()),
     }
 }
 
 fn connect_command(mut args: impl Iterator<Item = String>) -> Result<(), String> {
+    let arguments: Vec<String> = args.by_ref().collect();
+    if arguments
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--apply" | "--config" | "--gateway"))
+    {
+        return transaction_connect_command(arguments.into_iter());
+    }
+    let mut args = arguments.into_iter();
     let Some(agent) = args.next() else {
         return Err(
             "usage: magpie agents connect codex --model local/fixture-a --dry-run [--json]"
@@ -190,6 +202,140 @@ fn connect_command(mut args: impl Iterator<Item = String>) -> Result<(), String>
         );
     } else {
         print_connect_preview(agent_installed, &path, &preview);
+    }
+    Ok(())
+}
+
+fn transaction_connect_command(mut args: impl Iterator<Item = String>) -> Result<(), String> {
+    if args.next().as_deref() != Some("codex") {
+        return Err("unsupported agent".into());
+    }
+    let (mut model, mut config, mut gateway) = (None, None, None);
+    let (mut apply, mut dry_run, mut json) = (false, false, false);
+    while let Some(option) = args.next() {
+        match option.as_str() {
+            "--model" if model.is_none() => {
+                model = Some(args.next().ok_or("--model requires a value")?)
+            }
+            "--config" if config.is_none() => {
+                config = Some(args.next().ok_or("--config requires a path")?)
+            }
+            "--gateway" if gateway.is_none() => {
+                gateway = Some(
+                    args.next()
+                        .ok_or("--gateway requires a loopback address")?
+                        .parse::<std::net::SocketAddr>()
+                        .map_err(|_| "invalid Gateway socket address")?,
+                )
+            }
+            "--apply" if !apply => apply = true,
+            "--dry-run" if !dry_run => dry_run = true,
+            "--json" if !json => json = true,
+            _ => return Err("unexpected or duplicate transaction argument".into()),
+        }
+    }
+    if apply == dry_run {
+        return Err("choose exactly one of --apply or --dry-run".into());
+    }
+    // This candidate requires an explicit path. Native UI confirmation can later supply it.
+    let path = std::path::PathBuf::from(
+        config.ok_or("--config is required for the transaction candidate")?,
+    );
+    let model = model.ok_or("--model is required")?;
+    let gateway = gateway.unwrap_or_else(magpie_service::default_gateway_addr);
+    let plan = codex_transaction::prepare_connect(&path, &model, gateway)
+        .map_err(|error| format!("config_transaction_error: {error}"))?;
+    let existed = plan.config_existed();
+    let fields = plan
+        .changed_fields()
+        .iter()
+        .map(|field| format!("\"{}\"", json_escape(field)))
+        .collect::<Vec<_>>()
+        .join(",");
+    let state = if apply {
+        magpie_service::forward::probe_model(gateway, &model)
+            .map_err(|error| format!("gateway_probe_failed: {error}"))?;
+        codex_transaction::commit_connect(plan)
+            .map_err(|error| format!("config_transaction_error: {error}"))?
+            .as_str()
+    } else {
+        "prepared"
+    };
+    if json {
+        println!(
+            "{{\"operation\":\"agents.connect\",\"candidate\":true,\"dry_run\":{},\"writes_performed\":{},\"config_existed\":{},\"state\":\"{}\",\"gateway_readiness\":\"{}\",\"provider_readiness\":\"not_probed\",\"agent_execution\":\"not_checked\",\"changed_fields\":[{}]}}",
+            dry_run,
+            apply,
+            existed,
+            state,
+            if apply {
+                "listener_and_configured_model_checked"
+            } else {
+                "not_checked"
+            },
+            fields
+        );
+    } else {
+        println!(
+            "Codex configuration: {state}\nGateway: {}\nProvider: not probed\nAgent execution: not checked\nChanged fields: {fields}",
+            if apply {
+                "listener and configured model checked"
+            } else {
+                "not checked"
+            }
+        );
+    }
+    Ok(())
+}
+
+fn transaction_state_command(
+    mut args: impl Iterator<Item = String>,
+    disconnect: bool,
+) -> Result<(), String> {
+    if args.next().as_deref() != Some("codex") {
+        return Err("unsupported agent".into());
+    }
+    let (mut config, mut json) = (None, false);
+    while let Some(option) = args.next() {
+        match option.as_str() {
+            "--config" if config.is_none() => {
+                config = Some(args.next().ok_or("--config requires a path")?)
+            }
+            "--json" if !json => json = true,
+            _ => return Err("unexpected or duplicate transaction argument".into()),
+        }
+    }
+    let path = std::path::PathBuf::from(
+        config.ok_or("--config is required for the transaction candidate")?,
+    );
+    if disconnect {
+        let outcome = codex_transaction::disconnect(&path)
+            .map_err(|error| format!("config_transaction_error: {error}"))?;
+        if json {
+            println!(
+                "{{\"operation\":\"agents.disconnect\",\"restored_fields\":{},\"preserved_fields\":{},\"config_removed\":{}}}",
+                outcome.restored_fields, outcome.preserved_fields, outcome.config_removed
+            );
+        } else {
+            println!(
+                "Codex disconnected: restored {} owned fields; preserved {} external changes; config removed: {}",
+                outcome.restored_fields, outcome.preserved_fields, outcome.config_removed
+            );
+        }
+    } else {
+        let status = codex_transaction::connection_status(&path)
+            .map_err(|error| format!("config_transaction_error: {error}"))?;
+        if json {
+            println!(
+                "{{\"operation\":\"agents.connection-status\",\"state\":\"{}\",\"gateway_readiness\":\"not_checked\"}}",
+                status.as_str()
+            );
+        } else {
+            println!(
+                "Codex configuration: {}\nGateway: not checked",
+                status.as_str()
+            );
+        }
     }
     Ok(())
 }
@@ -370,6 +516,7 @@ fn status_command(mut args: impl Iterator<Item = String>) -> Result<(), String> 
 fn serve_command(mut args: impl Iterator<Item = String>) -> Result<(), String> {
     let mut address = None;
     let mut catalog_path = None;
+    let mut forward_path = None;
     while let Some(option) = args.next() {
         match option.as_str() {
             "--listen" if address.is_none() => {
@@ -386,14 +533,37 @@ fn serve_command(mut args: impl Iterator<Item = String>) -> Result<(), String> {
                         .ok_or_else(|| "--catalog requires a path".to_owned())?,
                 );
             }
+            "--forward" if forward_path.is_none() => {
+                forward_path = Some(
+                    args.next()
+                        .ok_or_else(|| "--forward requires a path".to_owned())?,
+                );
+            }
             _ => {
                 return Err(
-                    "usage: magpie serve [--listen 127.0.0.1:PORT] [--catalog PATH]".to_owned(),
+                    "usage: magpie serve [--listen 127.0.0.1:PORT] [--catalog PATH | --forward PATH]".to_owned(),
                 );
             }
         }
     }
     let address = address.unwrap_or_else(magpie_service::default_gateway_addr);
+    if let Some(path) = forward_path {
+        if catalog_path.is_some() {
+            return Err("--catalog and --forward are mutually exclusive".into());
+        }
+        let config = magpie_service::forward::ForwardConfig::load(std::path::Path::new(&path))
+            .map_err(|error| format!("forward_config_error: {error}"))?;
+        let server = magpie_service::forward::ForwardServer::bind(address, config)
+            .map_err(|error| format!("gateway_bind_failed: {error}"))?;
+        // This is bind information; /health is the actual readiness check.
+        println!(
+            "Forward candidate bound at {} (readiness: GET /health)",
+            server.local_addr().map_err(|_| "gateway_bind_failed")?
+        );
+        return server
+            .run()
+            .map_err(|error| format!("gateway_runtime_error: {error}"));
+    }
     let catalog = load_catalog(catalog_path.as_deref())?;
     let server = magpie_service::GatewayServer::bind_with_catalog(
         address,
@@ -435,6 +605,37 @@ fn models_command(mut args: impl Iterator<Item = String>) -> Result<(), String> 
     }
     let catalog = load_catalog(path.as_deref())?;
     println!("{}", catalog.models_json());
+    Ok(())
+}
+
+fn gateway_command(mut args: impl Iterator<Item = String>) -> Result<(), String> {
+    const USAGE: &str = "usage: magpie gateway inspect [--listen ADDR] --json";
+    if args.next().as_deref() != Some("inspect") {
+        return Err(USAGE.to_owned());
+    }
+    let mut address = None;
+    let mut json = false;
+    while let Some(option) = args.next() {
+        match option.as_str() {
+            "--listen" if address.is_none() => {
+                address = Some(
+                    args.next()
+                        .ok_or(USAGE)?
+                        .parse::<std::net::SocketAddr>()
+                        .map_err(|_| "gateway_inspect_failed: invalid Gateway socket address")?,
+                );
+            }
+            "--json" if !json => json = true,
+            _ => return Err(USAGE.to_owned()),
+        }
+    }
+    if !json {
+        return Err(USAGE.to_owned());
+    }
+    let address = address.unwrap_or_else(magpie_service::default_gateway_addr);
+    let inspection = magpie_service::forward::inspect_gateway(address)
+        .map_err(|error| format!("gateway_inspect_failed: {error}"))?;
+    println!("{inspection}");
     Ok(())
 }
 
@@ -488,7 +689,7 @@ fn json_escape(value: &str) -> String {
 
 fn print_help() {
     println!(
-        "magpie {}\n\nUsage:\n  magpie <command> [options]\n\nCommands:\n  agents [--json]       Discover Codex and inspect its config path\n  agents status codex   Show Codex discovery status\n  agents connect codex  Preview a reversible config change (requires --dry-run)\n  config path [--json]  Show the configuration directory\n  models [--catalog PATH] [--json]  List configured provider/model IDs\n  serve [--listen ADDR] [--catalog PATH]  Run the loopback Gateway\n  gui [agents]          Open the GPUI desktop application\n  status [--json]       Show version and target platform\n  --help                Show this help\n  --version             Show version",
+        "magpie {}\n\nUsage:\n  magpie <command> [options]\n\nCommands:\n  agents [--json]       Discover Codex and inspect its config path\n  agents status codex   Show Codex discovery status\n  agents connect codex --model ID --dry-run   Legacy read-only preview\n  agents connect codex --model ID --config PATH --gateway ADDR <--dry-run|--apply> [--json]\n  agents disconnect codex --config PATH [--json]\n  agents connection-status codex --config PATH [--json]\n  config path [--json]  Show the configuration directory\n  models [--catalog PATH] [--json]  List configured provider/model IDs\n  gateway inspect [--listen ADDR] --json  Inspect the running Gateway catalog\n  serve [--listen ADDR] [--catalog PATH | --forward PATH]  Run the loopback Gateway\n  gui [agents]          Open the GPUI desktop application\n  status [--json]       Show version and target platform\n  --help                Show this help\n  --version             Show version",
         magpie_core::VERSION
     );
 }

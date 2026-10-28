@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "tested_utc": "2026-10-28T18:45:44.323078+00:00",
+  "source_base_commit": "ffe2b6f20bfa06be9cdcd8b1f15a9d8308026725",
+  "build_input_scope": "workspace Cargo.toml/Cargo.lock and crates Rust/TOML; GUI excluded",
+  "build_input_sha256": {
+    "Cargo.toml": "f7b713377efb6d8b6bca910f2cffff9827b1d9f62366a6bc1514963f65712985",
+    "Cargo.lock": "31bd5212cb7623543661b28b4029c710bde28749a868ebfff43cd8dbcf7682ed",
+    "crates/magpie-cli/Cargo.toml": "339e2a847efb3dd49b8c99bb5ea4e8f3df8f9a345697b665cd000b4a83d7e127",
+    "crates/magpie-cli/src/main.rs": "420e79fd4495aa9031b275517bfa3cd65a6af80f96c7f47cc1c23e4c8f88f5cd",
+    "crates/magpie-cli/tests/catalog_cli.rs": "e2617e2186e82019e65ce1628d11c66468050ddbbd933031d1b5752034d8a79a",
+    "crates/magpie-cli/tests/desktop_snapshot.rs": "60ee4d002327828d10283118e723030ee1dce3d7cb18419eaa50b65ff1ffd374",
+    "crates/magpie-core/Cargo.toml": "9418a45c2dfb17aa07c9f106495919e9015ade229a41d2f21743531707af1277",
+    "crates/magpie-core/src/agents.rs": "d945cb6c4f14539deb2d52207208b639d5abcddf234c8aff45be9fc4044de44a",
+    "crates/magpie-core/src/catalog.rs": "601a8247c5709f70fa62d55836880798733d041a7b35b6d5dd82b3a1315303f2",
+    "crates/magpie-core/src/codex_config.rs": "5cdfe62e83859a3021b5b184c2105d16dab6a80b8d504583c1586c87ff949312",
+    "crates/magpie-core/src/codex_transaction.rs": "5db38f52521727e61c0ee0d04d8c4a65c943ca57fc1fc4f989e857e0b847a71f",
+    "crates/magpie-core/src/gateway.rs": "b530eca5a75c63c32c357135ed1d8f6900706348e16aa8a4ad8a4ec8910564c7",
+    "crates/magpie-core/src/lib.rs": "24227a09457363f427145c4e432b045315da9b73859b8af6048a813a9a2d7c43",
+    "crates/magpie-core/src/paths.rs": "34b4d3b6bd93d818df4ae9de3ba874690fac5727aff2aafae5f269f50281b817",
+    "crates/magpie-core/tests/codex_transaction.rs": "74029ac952f344bb1ace7d4918ffbf4fc48a95a4417d9df3cd3afadf00a044e5",
+    "crates/magpie-service/Cargo.toml": "be0f1dc1fb248e660aed18838d2e8f7dd0fb8d576fcd5c3738ce5e56cf9ef358",
+    "crates/magpie-service/src/forward.rs": "ca5c17949a7f624e778cf3d4246d519d826fbdd01bfce1be93206b1f3d187bd3",
+    "crates/magpie-service/src/gateway.rs": "b6ce333063d61926dd41f2443ad64441642974f1b37db157fea1c0b1fae6a5bd",
+    "crates/magpie-service/src/http.rs": "5a1ad2b83ee9ca489c49f507b7f13352d69a7a6bbe99e666720ec728ba133f41",
+    "crates/magpie-service/src/lib.rs": "20abf55177cb5550a63cc5eb48055aee4e31044ffbd07b11db744471f29073bf",
+    "crates/magpie-service/tests/catalog_http.rs": "dc37d743ec86c8041d2e1b45ea3dae88abc473058f3d1fa24912a31603fb547f"
+  },
+  "build_inputs_stable": true,
+  "binary": {
+    "sha256": "e3463d7717d0f8a73b5ea6d63d363e9835ce1c81dc0afbdb5c83bbf3696b86f1",
+    "bytes": 3271792
+  },
+  "platform": "Linux x86_64",
+  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+  "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
+  "build": "CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=<external> cargo build --locked --release --offline -p magpie-cli",
+  "workspace_tests": {
+    "passed": 75,
+    "failed": 0,
+    "ignored_worker_entries": 2,
+    "worker_entries_invoked_by_parent_tests": true
+  },
+  "clippy": "workspace/all-targets/all-features/-Dwarnings passed",
+  "rustdoc": "workspace/no-deps passed",
+  "fixtures": {
+    "tests/first_loop.py": "122d502219c87ad1a5c8bb6b7c273692f622a48b61d3cc022cbb3678d2b5d76d",
+    "tests/native_codex.py": "59a3207d906e3d8d241b6f6552a9f8194ccd5a2c9226b342b980217ade3c53ee"
+  },
+  "limits": [
+    "Linux x86_64 only for these records",
+    "Synthetic local provider, no real account or external model",
+    "Native GUI not exercised",
+    "Real power loss, native cross-platform filesystems and final-check/rename race not verified",
+    "Full 93 requirements and original Magpie A/B not completed"
+  ]
+}

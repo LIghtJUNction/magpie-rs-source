@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod catalog;
 pub mod codex_config;
+pub mod codex_transaction;
 pub mod gateway;
 pub mod paths;
 

@@ -1,0 +1,28 @@
+{
+  "scope": "installed_codex_isolated_config_synthetic_local_provider",
+  "binary_sha256": "e3463d7717d0f8a73b5ea6d63d363e9835ce1c81dc0afbdb5c83bbf3696b86f1",
+  "native_gpui": "not_run",
+  "external_provider": "not_run",
+  "original_magpie_ab": "not_run",
+  "passed": true,
+  "codex_version": "codex-cli 0.165.0",
+  "codex_exit_code": 0,
+  "provider_requests": [
+    {
+      "path": "/v1/responses",
+      "model": "native-fixture",
+      "stream": true,
+      "provider_key_correct": true
+    }
+  ],
+  "marker_received": true,
+  "event_types": [
+    "thread.started",
+    "item.completed",
+    "turn.started",
+    "item.completed",
+    "turn.completed"
+  ],
+  "config_restored_exactly": true,
+  "duration_seconds": 1.246
+}

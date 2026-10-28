@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "provider_id": "local",
+  "base_url": "http://127.0.0.1:18081/v1",
+  "models": ["fixture-a"],
+  "api_key_env": "MAGPIE_FIXTURE_PROVIDER_KEY"
+}

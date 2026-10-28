@@ -1,8 +1,11 @@
 # Magpie Rust
 
 Rust implementation for the `magpie-rs` Recipkg project. Version 0.2.0 is an
-early preview with a standalone CLI, loopback model catalog, and GPUI Agent
-status window. The full product contract remains under active implementation. The Pro desktop redesign is integrated and has passed the local Linux build and Clippy checks; user visual acceptance is pending. This source checkpoint is not a desktop release.
+early preview with a standalone CLI, bounded local-provider forwarding,
+recoverable Codex configuration changes, and a GPUI Agent status window.
+The full product contract remains under active implementation. The Pro desktop
+redesign has passed local Linux build and Clippy checks; user visual acceptance
+and the next GUI action flow are pending. This checkpoint is not a desktop release.
 
 ## Install
 
@@ -27,14 +30,16 @@ default workspace build.
 
 ## Current implementation boundary
 
-The CLI provides agent discovery, read-only configuration inspection and
-connection previews, status output, a static model catalog, and a loopback-only
-gateway. Agent discovery checks installed Codex, Claude Code, Gemini CLI,
+The CLI provides agent discovery, configuration inspection, explicit Codex
+connection/restore transactions, status output, and loopback-only gateways.
+Agent discovery checks installed Codex, Claude Code, Gemini CLI,
 OpenCode and Zed executables on PATH. Only Codex configuration is inspected;
 its explicit model, provider and reasoning effort are read without credentials.
-The GPUI application can refresh the local snapshot. Configuration and sign-in data are never modified by these
-operations. Provider sign-in, request forwarding, streaming, configuration
-writes, Usage, plugins, and synchronization remain unimplemented.
+The GPUI application currently refreshes a read-only local snapshot. Discovery,
+inspection and connection previews do not change user configuration or sign-ins.
+Only an explicit CLI transaction with a selected path writes configuration.
+Provider sign-in, remote HTTPS forwarding, protocol conversion, full Usage,
+plugins and synchronization remain unimplemented.
 
 ```sh
 magpie agents --json
@@ -57,6 +62,55 @@ Catalog loading is bounded to 1 MiB input and 8 MiB encoded response. The
 validated snapshot is shared across Gateway workers and loaded once at startup.
 Listing a model does not enable forwarding to an upstream. Consult the parent
 recipe for full requirements and acceptance status.
+
+### Actual local-provider forwarding and Codex connection
+
+`--forward` accepts the public JSON shape in `examples/forward-local.json`.
+It supports one explicitly configured literal-loopback HTTP provider through
+OpenAI Chat Completions and Responses, including bounded SSE, cancellation,
+four active requests and immediate overload rejection. Credentials, when needed,
+come from a named environment variable; the file contains only that reference.
+It does not implement remote providers or the full Gateway contract.
+The example expects an already running provider at port 18081 and the named
+credential environment variable. Replace its address/models/reference for your
+provider, or omit `api_key_env` for an unauthenticated local provider.
+
+```sh
+magpie serve --listen 127.0.0.1:3425 --forward examples/forward-local.json
+magpie gateway inspect --listen 127.0.0.1:3425 --json
+magpie agents connect codex --config /absolute/test-home/config.toml --model local/fixture-a --gateway 127.0.0.1:3425 --dry-run --json
+magpie agents connect codex --config /absolute/test-home/config.toml --model local/fixture-a --gateway 127.0.0.1:3425 --apply --json
+magpie agents connection-status codex --config /absolute/test-home/config.toml --json
+magpie agents disconnect codex --config /absolute/test-home/config.toml --json
+```
+
+Run the remaining commands in another terminal while `serve` runs. Supply an
+existing private parent directory and a model actually configured in the running
+Gateway. Preview writes nothing. Apply verifies the listener/catalog before
+committing seven owned fields. Unchanged configurations restore byte for byte;
+external edits retain their own values during selective restore. Private recovery
+images and a persistent journal are bounded to 128 MiB and 256 entries.
+An interrupted operation can require manual recovery of its cooperative lock;
+the final precondition-check/rename interval is not a filesystem compare-and-swap.
+Mutation currently supports Linux, macOS and Android; Windows returns an explicit
+unsupported-platform result. Configuration ownership does not prove Provider
+health or a completed Agent request.
+
+Local verification on the current candidate includes 75 workspace tests, 26
+real TCP/startup/CLI cases, and an installed Codex 0.165.0 executing against an
+isolated synthetic provider. The native-client case receives a Chinese Responses
+stream through Magpie and restores the original configuration bytes. It does
+not use a real account or external model. Reproduce with:
+
+```sh
+python3 -B tests/first_loop.py --binary /path/to/release/magpie
+python3 -B tests/native_codex.py --binary /path/to/release/magpie --codex /path/to/codex
+```
+
+Recorded evidence and exact binary/source/fixture hashes are in `tests/results/`.
+The two ignored test-worker entry points are executed explicitly by their parent
+cases; they are not separate completed product requirements. Native GUI operations,
+other Agent clients, external TLS and the full 93 requirements remain open.
 
 ## Performance measurements
 

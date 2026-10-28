@@ -1,5 +1,6 @@
 //! Hosts the local Gateway and its bounded request workers.
 
+pub mod forward;
 mod gateway;
 
 pub use gateway::{GatewayLimits, GatewayServer};
