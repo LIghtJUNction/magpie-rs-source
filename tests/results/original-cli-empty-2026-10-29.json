@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-29",
+  "tested_source_base": "0b2033fd6da4bd0589be64439038fd5f9c3a4da3",
+  "input_sha256": {
+    "crates/magpie-cli/src/main.rs": "62b2c0a68cdb9a40b4acc423123eeba8c1749fdd183471cab88e0536f7a2fb29",
+    "crates/magpie-cli/src/legacy_agent_display.rs": "db02f26a03fdf751bf755019f8ff9dc69e3d6e8d1973d090ac5d1dd593f0b4d6",
+    "crates/magpie-cli/tests/legacy_agent_display.rs": "dae2c4de4ec8b64238dc5a4a13c70adc1cc200e5d35f1a97366b53da40150172",
+    "crates/magpie-cli/tests/legacy_agent_cli.rs": "d0b429df526425b04ae74e9d10d74c83d2b065e4ab91a6dc8226fc6ec059934a",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_display/agents-empty.stdout": "8e01e78fb86e3fb8cd2493aeecccde601b3d898c3a9d2e1fd1589b97b854fa0f",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_display/agents-codex-directory.stdout": "b80e0f4d6d53183bf12666ff1e5487a732d47c18bd4fd2a6ba5dde25ca2aab86"
+  },
+  "tests": {
+    "cli_all_targets": {
+      "passed": 27,
+      "ignored_worker_entrypoints": 1
+    },
+    "cli_all_targets_clippy": "passed"
+  },
+  "scope": "Linux synthetic HOME/PATH; CLI process tests plus isolated original 0.1.1948 empty-state golden data",
+  "coverage": "68 name and order text in empty state, Codex directory-only hint, empty ls exit 1, existing agents --json empty contract",
+  "not_checked": [
+    "original populated executable formatting",
+    "other agent configuration directories",
+    "real user accounts or configurations",
+    "GUI compatibility with all new agents",
+    "other operating systems",
+    "complete original CLI compatibility"
+  ]
+}

@@ -1,3 +1,5 @@
+mod legacy_agent_display;
+
 use std::env;
 use std::process::ExitCode;
 
@@ -35,6 +37,7 @@ fn main() -> ExitCode {
 
 fn error_exit_code(code: &str) -> u8 {
     match code {
+        "no_supported_agents" => 1,
         "config_conflict" => 4,
         "config_not_a_file"
         | "config_symlink"
@@ -62,6 +65,15 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
             Ok(())
         }
         "agents" => agents_command(args),
+        "ls" => {
+            reject_extra_args(args)?;
+            if !render_original_agent_text(legacy_agent_display::TextCommand::Ls)?
+                && !print_discovered_agents()
+            {
+                return Err("agent_discovery_incomplete: agent identity is uncertain".to_owned());
+            }
+            Ok(())
+        }
         "config" => config_command(args),
         "models" => models_command(args),
         "gateway" => gateway_command(args),
@@ -75,20 +87,10 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
 fn agents_command(mut args: impl Iterator<Item = String>) -> Result<(), String> {
     match args.next().as_deref() {
         None => {
-            let installed = agents::discover_installed_agents();
-            if installed.is_empty() {
+            if !render_original_agent_text(legacy_agent_display::TextCommand::Agents)?
+                && !print_discovered_agents()
+            {
                 println!("No supported agents found on PATH");
-            }
-            for agent in installed {
-                if agent.id == "codex" {
-                    print_agent_status(&agents::discover_codex());
-                } else {
-                    println!(
-                        "{}\n  binary: {}\n  config: not checked",
-                        agent.name,
-                        agent.executable.display()
-                    );
-                }
             }
             Ok(())
         }
@@ -139,6 +141,55 @@ fn agents_command(mut args: impl Iterator<Item = String>) -> Result<(), String> 
         Some("connection-status") => transaction_state_command(args, false),
         Some(_) => Err("unknown agents command".to_owned()),
     }
+}
+
+fn render_original_agent_text(command: legacy_agent_display::TextCommand) -> Result<bool, String> {
+    use legacy_agent_display::{CodexDirectory, DisplayError};
+
+    let discovery = agents::discover_installed_agents_report()
+        .map_err(|_| "agent_discovery_incomplete: PATH cannot be inspected".to_owned())?;
+    let directory = agents::codex_config_path()
+        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+        .map_or(Ok(CodexDirectory::NotChecked), |path| {
+            legacy_agent_display::inspect_codex_directory(&path)
+        })
+        .map_err(|_| {
+            "agent_discovery_incomplete: Codex directory cannot be inspected".to_owned()
+        })?;
+    match legacy_agent_display::render(command, &discovery.report, &directory) {
+        Ok(output) if output.exit_code == 0 => {
+            print!("{}", output.stdout);
+            Ok(true)
+        }
+        Ok(output)
+            if output.exit_code == 1
+                && output.stderr == "magpie: no supported agents found on this machine\n" =>
+        {
+            Err("no_supported_agents: no supported agents found on this machine".to_owned())
+        }
+        Ok(_) => Err("agent_discovery_incomplete: unexpected listing result".to_owned()),
+        Err(
+            DisplayError::UnobservedCandidate { .. } | DisplayError::UnverifiedCandidate { .. },
+        ) => Ok(false),
+        Err(error) => Err(format!("agent_discovery_incomplete: {error}")),
+    }
+}
+
+fn print_discovered_agents() -> bool {
+    let installed = agents::discover_installed_agents();
+    let found = !installed.is_empty();
+    for agent in installed {
+        if agent.id == "codex" {
+            print_agent_status(&agents::discover_codex());
+        } else {
+            println!(
+                "{}\n  binary: {}\n  config: not checked",
+                agent.name,
+                agent.executable.display()
+            );
+        }
+    }
+    found
 }
 
 fn connect_command(mut args: impl Iterator<Item = String>) -> Result<(), String> {
