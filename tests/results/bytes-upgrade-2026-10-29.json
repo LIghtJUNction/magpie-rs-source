@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-29",
+  "base_source_commit": "4f689fa0d268ed623f4cf1de94caa04ab14140e5",
+  "change": "bytes 1.10.1 to 1.11.1",
+  "advisory": "https://github.com/advisories/GHSA-434x-w66g-qw3r",
+  "input_sha256": {
+    "Cargo.lock": "bbbcfa2bb7363ccd190bb913fb32b7fb45c2d98e0057d36bf295475c1fa1279c",
+    "crates/magpie-service/Cargo.toml": "2623dc4efe13cdaad68c5a92082c8b4a0329fd32c2d93ef00a27e36a82c8b3ee"
+  },
+  "tests": {
+    "workspace_all_targets": {
+      "passed": 101,
+      "ignored_worker_entrypoints": 4
+    },
+    "service_all_targets_clippy": "passed"
+  },
+  "scope": "isolated Linux workspace with synthetic fixtures; no claim the advisory was exploitable through Magpie",
+  "not_checked": [
+    "other operating systems",
+    "full feature parity",
+    "external provider accounts"
+  ]
+}
