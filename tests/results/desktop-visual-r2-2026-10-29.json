@@ -1,0 +1,47 @@
+{
+  "scope": "Pro visual r2 functional checkpoint, subsequently rejected by user; no visual pass",
+  "visual_acceptance": "rejected_by_user",
+  "full_product_complete": false,
+  "pro_response_file_id": "1A3eu0BY7Euut1kCM0lEIYuu4YO7Y1NPx",
+  "pro_bundle_sha256": "9bc50b6ae212e34cd1e97275bdb366521f712a54e25d2ebf6b845db4e4dff0da",
+  "local_changes": [
+    "remove internal requirement counts and CLI implementation narration from product copy",
+    "show pending verification instead of perpetual checking after a failed job",
+    "retain an alert when Codex disappears during reconciliation",
+    "add reproducible native font probe example"
+  ],
+  "checks": {
+    "linux_release": "passed",
+    "fmt": "passed",
+    "all_targets_clippy_D_warnings": "passed",
+    "component_tests_passed": 59,
+    "ignored_worker_entrypoints": 1,
+    "worker_explicitly_executed_cases": 2,
+    "real_codex_0_165_cases_passed": 2,
+    "native_font_shaping_samples": 75,
+    "native_font_missing_samples": 0,
+    "primary_families": [
+      "Adwaita Sans"
+    ],
+    "native_window_and_IME_visual_acceptance": "not_passed"
+  },
+  "source_base_commit": "4ff1e55a399bf0946a8afa9abffc33ea0ae83f8e",
+  "code_sha256": {
+    "apps/desktop/src/ui.rs": "f1b2b020ceae2c321e7f281ffdb0095077187daa405b94a64ee53abd76877bed",
+    "apps/desktop/src/theme.rs": "27a0d447575d5b90f46101f7c827fb26eb186bf1e83daec341eab5d951a23653",
+    "apps/desktop/src/actions_text.rs": "d5ce1f386701c32ddf22e45b3512baf4b17db9574fb42b41ab1a7ec29e957200",
+    "apps/desktop/src/localization.rs": "c6b28ff1f46fbd2630a214368ac1e5dca2a00ee45ac957d9a973721d2b24c588",
+    "apps/desktop/src/text_input.rs": "e26cca5d85b1d1656ecb2e96193fdade60ef642847ea33105c5da5229555f7a8",
+    "apps/desktop/examples/font_probe.rs": "e4172cdaf88857f306f962e306f6751886f22215b3ec497fcfb3fa526274a380"
+  },
+  "desktop_binary": {
+    "bytes": 24733800,
+    "sha256": "b539919a6e71a58122fa6f3fa9edfed450dea1af5e949fe295095f8effbe2e93"
+  },
+  "raw_font_probe_sha256": "6be826d893bd7e852ae7b66df269655e9a3b9eb91ab2aec80424c4bb62043f67",
+  "known_limitations": [
+    "visual direction rejected; actual GPUI raster comparison required",
+    "cancelling a dispatched configuration write can leave the existing cooperative lock; manual recovery may be required",
+    "only Codex has a limited implemented write workflow; complete 93 requirements and 68 agents still required"
+  ]
+}

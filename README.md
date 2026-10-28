@@ -3,10 +3,9 @@
 Rust implementation for the `magpie-rs` Recipkg project. Version 0.2.0 is an
 early preview with a standalone CLI, bounded local-provider forwarding,
 recoverable Codex configuration changes, and GPUI desktop actions.
-The full product contract remains under active implementation. The previous
-visual direction was rejected; a new Pro redesign is in progress. Local Linux
-builds and functional tests do not establish visual acceptance. This checkpoint
-is not a desktop release.
+The full product contract remains under active implementation. Both previous Pro visual directions were rejected; a further redesign is
+required. Local Linux builds, functional tests and native font shaping checks
+do not establish visual acceptance. This checkpoint is not a desktop release.
 
 ## Install
 
@@ -102,7 +101,7 @@ Mutation currently supports Linux, macOS and Android; Windows returns an explici
 unsupported-platform result. Configuration ownership does not prove Provider
 health or a completed Agent request.
 
-Local verification on the current candidate includes 75 workspace tests, 26
+Local verification on the current candidate includes 77 workspace tests, 26
 real TCP/startup/CLI cases, and an installed Codex 0.165.0 executing against an
 isolated synthetic provider. The native-client case receives a Chinese Responses
 stream through Magpie and restores the original configuration bytes. It does

@@ -89,12 +89,12 @@ impl TextInput {
             label: label.to_owned().into(),
             colors: InputColors {
                 surface: 0xffffff,
-                inset: 0xf1f0ec,
-                border: 0xe0ded8,
-                text: 0x232420,
-                muted: 0x62665f,
-                accent: 0x32634a,
-                selected: 0xe6eee8,
+                inset: 0xf0f0f2,
+                border: 0xe3e3e7,
+                text: 0x202124,
+                muted: 0x65666d,
+                accent: 0x3e61d4,
+                selected: 0xeef2ff,
             },
             disabled: false,
             dragging: false,
@@ -852,10 +852,10 @@ impl Render for TextInput {
             .w_full()
             .min_w_0()
             .px(px(10.))
-            .py(px(8.))
+            .py(px(7.))
             .border_1()
             .border_color(rgb(colors.border))
-            .rounded(px(6.))
+            .rounded(px(7.))
             .bg(rgb(if disabled {
                 colors.inset
             } else {

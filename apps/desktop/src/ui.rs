@@ -23,12 +23,14 @@ use crate::{
     localization::{Locale, Text},
     snapshot::{Agent, Snapshot},
     text_input::{InputEvent, TextInput},
-    theme::{Appearance, Palette},
+    theme::{self, Appearance, Palette},
 };
 
 const BREAKPOINT: f32 = 720.0;
-const BACK: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m10 5-7 7 7 7M3 12h18"/></svg>"#;
+const DOWN: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>"#;
 const CLOSE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.7" stroke-linecap="round"><path d="m6 6 12 12M6 18 18 6"/></svg>"#;
+
+const CHECK: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 4 4L19 6"/></svg>"#;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
@@ -54,6 +56,11 @@ enum Action {
     Escape,
     ToggleDiagnostics,
     ToggleFields,
+    OpenModels,
+    OpenConnection,
+    OpenDisconnect,
+    ToggleGateway,
+    ToggleRoadmap,
 }
 
 /// Native agent browser with explicit Codex CLI transactions.
@@ -66,6 +73,7 @@ pub struct MagpieWindow {
     details: Option<&'static str>,
     copied: Option<&'static str>,
     compact: bool,
+    editor_height: f32,
     focus: FocusHandle,
     detail_focus: FocusHandle,
     agent_focus: BTreeMap<&'static str, FocusHandle>,
@@ -87,6 +95,9 @@ pub struct MagpieWindow {
     check_after_refresh: bool,
     diagnostics: bool,
     preview_fields: bool,
+    gateway_settings: bool,
+    roadmap: bool,
+    return_focus: Option<&'static str>,
     close_handler_installed: bool,
     close_requested: bool,
     shutdown_pending: Arc<AtomicBool>,
@@ -151,6 +162,15 @@ impl MagpieWindow {
             scroll_anchors.insert(id, ScrollAnchor::for_handle(detail_scroll.clone()));
         }
         for id in [
+            "agents-page",
+            "settings-page",
+            "refresh",
+            "more-pages",
+            "gateway-settings",
+            "codex-model",
+            "codex-connect",
+            "codex-disconnect",
+            "close-details",
             "query-models",
             "preview-connect",
             "apply-connect",
@@ -210,6 +230,7 @@ impl MagpieWindow {
             details: None,
             copied: None,
             compact: false,
+            editor_height: 350.0,
             focus: cx.focus_handle(),
             detail_focus: cx.focus_handle().tab_index(0).tab_stop(true),
             agent_focus: BTreeMap::new(),
@@ -228,9 +249,12 @@ impl MagpieWindow {
             model_anchor,
             pending_action: None,
             pending_focus: None,
-            check_after_refresh: false,
+            check_after_refresh: true,
             diagnostics: false,
             preview_fields: false,
+            gateway_settings: false,
+            roadmap: false,
+            return_focus: None,
             close_handler_installed: false,
             close_requested: false,
             shutdown_pending: Arc::new(AtomicBool::new(false)),
@@ -288,9 +312,10 @@ impl MagpieWindow {
                 if view.check_after_refresh {
                     view.check_after_refresh = false;
                     // Discovery can remove Codex while a mutation is finishing.
-                    // Keep its unresolved state, but do not start a hidden job
-                    // without a rendered cancel/status control.
-                    if view.page == Page::Agents && view.details == Some("codex") {
+                    // The unified Codex row exposes progress and cancellation
+                    // even when its editor is collapsed. If discovery removes
+                    // it, keep the unresolved state without a hidden job.
+                    if view.page == Page::Agents && view.agent("codex").is_some() {
                         view.start_job(JobKind::Status, cx);
                     }
                 }
@@ -306,14 +331,52 @@ impl MagpieWindow {
             .and_then(|snapshot| snapshot.agents.iter().find(|agent| agent.id == id))
     }
 
+    fn ordered_agents(&self) -> Vec<&Agent> {
+        let mut agents: Vec<_> = self
+            .snapshot
+            .as_ref()
+            .into_iter()
+            .flat_map(|snapshot| snapshot.agents.iter())
+            .collect();
+        // Presentation only: prioritize the implemented connection workflow.
+        // The discovery result and stable IDs remain unchanged.
+        agents.sort_by_key(|agent| agent.id != "codex");
+        agents
+    }
+
+    fn row_index(&self, id: &str) -> Option<usize> {
+        self.ordered_agents()
+            .iter()
+            .position(|agent| agent.id == id)
+    }
+
+    fn open_codex(&mut self, origin: &'static str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.agent("codex").is_none() {
+            return;
+        }
+        let entering = self.details != Some("codex");
+        self.details = Some("codex");
+        self.return_focus = Some(origin);
+        self.roadmap = false;
+        if entering {
+            self.diagnostics = false;
+            self.detail_scroll.set_offset(point(px(0.0), px(0.0)));
+            self.check_connection(cx);
+        }
+        Self::focus_next_frame(self.detail_focus.clone(), window);
+        if let Some(index) = self.row_index("codex") {
+            self.roster_scroll.scroll_to_item(index);
+        }
+    }
+
     fn focus_next_frame(handle: FocusHandle, window: &mut Window) {
         // On narrow windows the destination element is not in the old tree.
         window.on_next_frame(move |window, cx| handle.focus(window, cx));
     }
 
     fn reveal_focused(&self, window: &mut Window, cx: &mut App) {
-        if let Some(snapshot) = &self.snapshot {
-            for (index, agent) in snapshot.agents.iter().enumerate() {
+        if self.snapshot.is_some() {
+            for (index, agent) in self.ordered_agents().iter().enumerate() {
                 if self
                     .agent_focus
                     .get(agent.id)
@@ -333,32 +396,77 @@ impl MagpieWindow {
                 .get(&model.id)
                 .is_some_and(|handle| handle.is_focused(window))
             {
+                if let Some(index) = self.row_index("codex") {
+                    self.roster_scroll.scroll_to_item(index);
+                }
                 self.model_scroll.scroll_to_item(index);
                 self.model_anchor.scroll_to(window, cx);
                 window.on_next_frame(|window, _| window.refresh());
                 return;
             }
         }
-        for (id, handle) in &self.control_focus {
-            if handle.is_focused(window) {
-                if let Some(anchor) = self.scroll_anchors.get(id) {
-                    anchor.scroll_to(window, cx);
-                    // The pinned API changes offset in a next-frame callback.
-                    // Request the paint that makes that changed offset visible.
-                    window.on_next_frame(|window, _| window.refresh());
-                }
-                break;
+        if self.detail_focus.is_focused(window) {
+            if let Some(index) = self.details.and_then(|id| self.row_index(id)) {
+                self.roster_scroll.scroll_to_item(index);
+                window.refresh();
             }
+            return;
+        }
+        for (id, handle) in &self.control_focus {
+            if !handle.is_focused(window) {
+                continue;
+            }
+            let row_control = matches!(*id, "codex-model" | "codex-connect" | "codex-disconnect")
+                || (*id == "cancel-operation" && self.details != Some("codex"));
+            if row_control {
+                if let Some(index) = self.row_index("codex") {
+                    self.roster_scroll.scroll_to_item(index);
+                    window.refresh();
+                }
+                return;
+            }
+            if matches!(
+                *id,
+                "agents-page" | "settings-page" | "refresh" | "more-pages"
+            ) {
+                return;
+            }
+            if self.page == Page::Agents
+                && let Some(index) = self.details.and_then(|id| self.row_index(id))
+            {
+                self.roster_scroll.scroll_to_item(index);
+            }
+            if let Some(anchor) = self.scroll_anchors.get(id) {
+                anchor.scroll_to(window, cx);
+                window.on_next_frame(|window, _| window.refresh());
+            }
+            return;
         }
     }
 
     fn close_details(&mut self, window: &mut Window) {
         if let Some(id) = self.details.take() {
-            let handle = self.agent_focus.get(id).unwrap_or(&self.focus).clone();
-            let index = self
-                .snapshot
-                .as_ref()
-                .and_then(|snapshot| snapshot.agents.iter().position(|agent| agent.id == id));
+            let origin = self.return_focus.take().map(|origin| {
+                let managed = self
+                    .actions
+                    .ownership
+                    .is_some_and(|state| state != Ownership::Unmanaged);
+                if (origin == "codex-connect"
+                    && (managed || !self.action_enabled(Action::OpenConnection)))
+                    || (origin == "codex-disconnect"
+                        && (!managed || !self.action_enabled(Action::OpenDisconnect)))
+                {
+                    "codex-model"
+                } else {
+                    origin
+                }
+            });
+            let handle = origin
+                .and_then(|id| self.control_focus.get(id))
+                .or_else(|| self.agent_focus.get(id))
+                .unwrap_or(&self.focus)
+                .clone();
+            let index = self.row_index(id);
             let scroll = self.roster_scroll.clone();
             window.on_next_frame(move |window, cx| {
                 handle.focus(window, cx);
@@ -369,6 +477,7 @@ impl MagpieWindow {
             });
         }
         self.copied = None;
+        self.diagnostics = false;
     }
 
     fn act(&mut self, action: Action, window: &mut Window, cx: &mut Context<Self>) {
@@ -377,17 +486,21 @@ impl MagpieWindow {
         }
         match action {
             Action::Refresh => {
+                if self.roadmap {
+                    self.pending_focus = Some("more-pages");
+                }
+                self.roadmap = false;
                 self.actions.invalidate_preview();
-                self.check_after_refresh = self.details == Some("codex");
+                self.check_after_refresh = self.page == Page::Agents;
                 if self.check_after_refresh {
                     self.actions.ownership = None;
                 }
                 self.refresh(cx);
             }
             Action::Page(page) => {
-                let entering =
-                    self.page != page && page == Page::Agents && self.details == Some("codex");
+                let entering = self.page != page && page == Page::Agents;
                 self.page = page;
+                self.roadmap = false;
                 if entering {
                     self.check_connection(cx);
                 }
@@ -397,6 +510,9 @@ impl MagpieWindow {
                     self.close_details(window);
                 } else if self.agent(id).is_some() {
                     self.details = Some(id);
+                    self.return_focus = None;
+                    self.roadmap = false;
+                    self.diagnostics = false;
                     self.copied = None;
                     self.detail_scroll.set_offset(point(px(0.0), px(0.0)));
                     Self::focus_next_frame(self.detail_focus.clone(), window);
@@ -406,6 +522,21 @@ impl MagpieWindow {
                 }
             }
             Action::CloseDetails => self.close_details(window),
+            Action::OpenModels => self.open_codex("codex-model", window, cx),
+            Action::OpenConnection => self.open_codex("codex-connect", window, cx),
+            Action::OpenDisconnect => {
+                // This is the same explicit confirmation as the expanded
+                // action. It never invokes a mutation from the row itself.
+                self.details = Some("codex");
+                self.return_focus = Some("codex-disconnect");
+                self.roadmap = false;
+                self.actions.invalidate_preview();
+                self.actions.disconnect_confirmation = true;
+                self.pending_focus = Some("confirm-disconnect");
+                if let Some(index) = self.row_index("codex") {
+                    self.roster_scroll.scroll_to_item(index);
+                }
+            }
             Action::CopyPath(id) => {
                 if let Some(path) = self
                     .agent(id)
@@ -437,8 +568,16 @@ impl MagpieWindow {
             Action::Cancel => self.actions.cancel(),
             Action::ToggleDiagnostics => self.diagnostics = !self.diagnostics,
             Action::ToggleFields => self.preview_fields = !self.preview_fields,
+            Action::ToggleGateway => self.gateway_settings = !self.gateway_settings,
+            Action::ToggleRoadmap => {
+                self.roadmap = !self.roadmap;
+                self.pending_focus = Some("more-pages");
+            }
             Action::Escape => {
-                if self.actions.busy().is_some() {
+                if self.roadmap {
+                    self.roadmap = false;
+                    self.pending_focus = Some("more-pages");
+                } else if self.actions.busy().is_some() {
                     self.actions.cancel();
                 } else if self.actions.disconnect_confirmation {
                     self.actions.disconnect_confirmation = false;
@@ -461,7 +600,11 @@ impl MagpieWindow {
             "r" if key.modifiers.control || key.modifiers.platform => {
                 self.act(Action::Refresh, window, cx)
             }
-            "escape" if self.page == Page::Agents && self.details.is_some() => {
+            "escape"
+                if self.roadmap
+                    || (self.page == Page::Agents
+                        && (self.details.is_some() || self.actions.busy().is_some())) =>
+            {
                 self.act(Action::Escape, window, cx);
             }
             "tab" => {
@@ -494,6 +637,8 @@ impl MagpieWindow {
             Action::Appearance(appearance) => Some(appearance == self.appearance),
             Action::ToggleDiagnostics => Some(self.diagnostics),
             Action::ToggleFields => Some(self.preview_fields),
+            Action::ToggleGateway => Some(self.gateway_settings),
+            Action::ToggleRoadmap => Some(self.roadmap),
             _ => None,
         };
         let selected = toggled == Some(true);
@@ -519,7 +664,7 @@ impl MagpieWindow {
                     Toggled::False
                 })
             })
-            .h(px(if self.compact { 40.0 } else { 36.0 }))
+            .h(px(if self.compact { 40.0 } else { 34.0 }))
             .flex_none()
             .px(px(10.0))
             .flex()
@@ -693,62 +838,66 @@ impl MagpieWindow {
             .overflow_hidden()
     }
 
-    fn agent_row(&self, agent: &Agent, palette: Palette, cx: &mut Context<Self>) -> Stateful<Div> {
+    fn ownership_label(&self) -> A {
+        match self.actions.ownership {
+            None => A::RowUnknown,
+            Some(Ownership::Unmanaged) => A::Unmanaged,
+            Some(Ownership::Connected) => A::Connected,
+            Some(Ownership::Drifted) => A::Drifted,
+            Some(Ownership::RecoveryRequired) => A::RecoveryRequired,
+        }
+    }
+
+    fn progress_label(kind: JobKind) -> A {
+        match kind {
+            JobKind::Inspect => A::Querying,
+            JobKind::Preview => A::Previewing,
+            JobKind::Apply => A::Saving,
+            JobKind::Status => A::Checking,
+            JobKind::Disconnect => A::Restoring,
+        }
+    }
+
+    fn agent_row(&self, agent: &Agent, palette: Palette, cx: &mut Context<Self>) -> Div {
         let selected = self.details == Some(agent.id);
-        let (status_color, _) = Self::config_colors(agent, palette);
-        let label = format!(
-            "{} · {}{}",
-            agent.name,
-            self.locale.text(Self::config_label(agent)),
-            if selected {
-                format!(" · {}", self.locale.text(Text::Selected))
-            } else {
-                String::new()
-            }
-        );
-        self.button(agent.id, "", None, Action::Details(agent.id), palette, cx)
-            .aria_label(label)
-            .aria_expanded(selected)
-            .when_some(self.agent_focus.get(agent.id), |row, focus| {
-                row.track_focus(
-                    &focus
-                        .clone()
-                        .tab_stop(self.actions.busy().is_none() && !self.check_after_refresh),
-                )
-            })
-            .relative()
-            .w_full()
-            .min_h(px(68.0))
-            .h_auto()
-            .rounded_none()
-            .px(px(12.0))
-            .py(px(10.0))
-            .justify_start()
+        let codex = agent.id == "codex";
+        let (config_color, _) = Self::config_colors(agent, palette);
+        let status = if !codex {
+            self.locale.action_text(A::ReadOnly).to_owned()
+        } else if let Some(kind) = self.actions.busy() {
+            self.locale
+                .action_text(Self::progress_label(kind))
+                .to_owned()
+        } else if self.check_after_refresh && self.refresh_task.is_some() {
+            self.locale.action_text(A::Checking).to_owned()
+        } else if self.actions.uncertain || self.actions.reconcile_needed() {
+            self.locale.action_text(A::NeedsReview).to_owned()
+        } else if agent.last_known {
+            self.locale.text(Text::LastKnown).to_owned()
+        } else if Self::config_problem(agent) {
+            self.locale.text(Self::config_label(agent)).to_owned()
+        } else if self.actions.error.is_some() && self.actions.ownership.is_none() {
+            self.locale.action_text(A::RowUnknown).to_owned()
+        } else {
+            self.locale.action_text(self.ownership_label()).to_owned()
+        };
+        let status_color = if codex
+            && (self.actions.uncertain
+                || self.actions.reconcile_needed()
+                || matches!(
+                    self.actions.ownership,
+                    Some(Ownership::Drifted | Ownership::RecoveryRequired)
+                )) {
+            palette.warning
+        } else {
+            config_color
+        };
+        let identity = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .items_center()
             .gap(px(12.0))
-            .bg(rgb(if selected {
-                palette.selected
-            } else {
-                palette.surface
-            }))
-            .hover(move |style| {
-                style.bg(rgb(if selected {
-                    palette.selected
-                } else {
-                    palette.inset
-                }))
-            })
-            .when(selected, |row| {
-                row.child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .top(px(10.0))
-                        .bottom(px(10.0))
-                        .w(px(3.0))
-                        .rounded(px(2.0))
-                        .bg(rgb(palette.accent)),
-                )
-            })
             .child(
                 div()
                     .size(px(28.0))
@@ -767,77 +916,178 @@ impl MagpieWindow {
                             .text_size(px(14.0))
                             .line_height(px(20.0))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(rgb(palette.text))
                             .child(text!(agent.name)),
                     )
                     .child(
                         div()
+                            .id(SharedString::from(format!("agent-status:{}", agent.id)))
+                            .role(Role::Status)
                             .w_full()
-                            .text_size(px(12.0))
-                            .line_height(px(16.0))
+                            .min_w_0()
                             .whitespace_normal()
+                            .text_size(px(12.0))
+                            .line_height(px(18.0))
                             .text_color(rgb(status_color))
-                            .child(text!(self.locale.text(Self::config_label(agent)))),
+                            .child(text!(status)),
                     ),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .bottom_0()
-                    .left(px(12.0))
-                    .right(px(12.0))
-                    .h(px(1.0))
-                    .bg(rgb(palette.border)),
-            )
-            .child(
-                svg()
-                    .data(assets::CHEVRON)
-                    .size(px(12.0))
-                    .text_color(rgb(if selected {
-                        palette.accent
-                    } else {
-                        palette.muted
-                    })),
-            )
+            );
+        let mut controls = div()
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .min_w_0()
+            .when(self.compact, |row| row.w_full().pl(px(40.0)).justify_end());
+        if codex {
+            // A draft selection is never advertised as the current saved model.
+            let model = agent
+                .settings
+                .as_ref()
+                .and_then(|settings| settings.model.as_deref())
+                .unwrap_or(self.locale.action_text(A::ChooseModel));
+            let picker = self
+                .button("codex-model", "", None, Action::OpenModels, palette, cx)
+                .aria_label(format!(
+                    "{} · {} · {model}",
+                    agent.name,
+                    self.locale.text(Text::Model)
+                ))
+                .aria_expanded(selected)
+                .w(px(220.0))
+                .min_w_0()
+                .justify_between()
+                .bg(rgb(palette.inset))
+                .text_color(rgb(palette.text))
+                .when(self.compact, |button| button.flex_1().w_auto())
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(text!(model.to_owned())),
+                )
+                .child(
+                    svg()
+                        .data(DOWN)
+                        .size(px(14.0))
+                        .flex_none()
+                        .text_color(rgb(palette.muted)),
+                );
+            controls = controls.child(picker);
+            if self.actions.busy().is_some() && !selected {
+                controls = controls.child(self.action_button(
+                    "cancel-operation",
+                    A::Cancel,
+                    Action::Cancel,
+                    palette,
+                    cx,
+                ));
+            } else {
+                let managed = self
+                    .actions
+                    .ownership
+                    .is_some_and(|state| state != Ownership::Unmanaged);
+                let (id, label, action) = if managed {
+                    (
+                        "codex-disconnect",
+                        A::DisconnectShort,
+                        Action::OpenDisconnect,
+                    )
+                } else {
+                    ("codex-connect", A::ConnectShort, Action::OpenConnection)
+                };
+                let enabled = self.action_enabled(action);
+                controls = controls.child(
+                    self.action_button(id, label, action, palette, cx)
+                        .min_w(px(if self.compact { 76.0 } else { 80.0 }))
+                        .when(!managed && enabled, |button| {
+                            button
+                                .bg(rgb(palette.text))
+                                .text_color(rgb(palette.surface))
+                                .hover(move |style| {
+                                    style.bg(rgb(palette.text)).text_color(rgb(palette.surface))
+                                })
+                        }),
+                );
+            }
+        } else {
+            controls = controls.child(
+                self.button(
+                    agent.id,
+                    self.locale.action_text(A::Details),
+                    Some(assets::CHEVRON),
+                    Action::Details(agent.id),
+                    palette,
+                    cx,
+                )
+                .aria_label(format!(
+                    "{} · {}",
+                    agent.name,
+                    self.locale.action_text(A::Details)
+                ))
+                .aria_expanded(selected)
+                .when_some(self.agent_focus.get(agent.id), |button, focus| {
+                    button.track_focus(
+                        &focus
+                            .clone()
+                            .tab_stop(self.action_enabled(Action::Details(agent.id))),
+                    )
+                })
+                .text_color(rgb(palette.muted)),
+            );
+        }
+        let row = div()
+            .w_full()
+            .min_w_0()
+            .min_h(px(72.0))
+            .px(px(16.0))
+            .py(px(12.0))
+            .bg(rgb(if selected {
+                palette.inset
+            } else {
+                palette.surface
+            }))
+            .flex()
+            .items_center()
+            .gap(px(16.0))
+            .when(self.compact, |row| {
+                row.flex_col().items_stretch().gap(px(10.0))
+            })
+            .child(identity)
+            .child(controls);
+        div()
+            .w_full()
+            .min_w_0()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .border_b_1()
+            .border_color(rgb(palette.border))
+            .child(row)
+            .when(selected, |row| {
+                row.child(self.inspector(agent, palette, cx))
+            })
     }
 
-    fn roster(&self, snapshot: &Snapshot, palette: Palette, cx: &mut Context<Self>) -> Div {
-        let mut rows = div()
+    fn roster(&self, _snapshot: &Snapshot, palette: Palette, cx: &mut Context<Self>) -> Div {
+        let rows = div()
             .id("roster-scroll")
             .flex_1()
             .min_h_0()
+            .min_w_0()
             .flex()
             .flex_col()
             .overflow_y_scroll()
-            .track_scroll(&self.roster_scroll);
-        for agent in &snapshot.agents {
-            rows = rows.child(self.agent_row(agent, palette, cx));
-        }
+            .track_scroll(&self.roster_scroll)
+            .children(
+                self.ordered_agents()
+                    .into_iter()
+                    .map(|agent| self.agent_row(agent, palette, cx)),
+            );
         self.panel(palette)
             .h_full()
-            .child(
-                div()
-                    .h(px(40.0))
-                    .flex_none()
-                    .px(px(16.0))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(rgb(palette.border))
-                    .child(self.caption(Text::Installed, palette))
-                    .child(
-                        div()
-                            .h(px(20.0))
-                            .px(px(6.0))
-                            .rounded(px(4.0))
-                            .bg(rgb(palette.inset))
-                            .text_size(px(12.0))
-                            .line_height(px(20.0))
-                            .text_color(rgb(palette.muted))
-                            .child(text!(snapshot.agents.len().to_string())),
-                    ),
-            )
+            .when(!self.compact && self.details.is_none(), |panel| {
+                panel.max_h(px(self.ordered_agents().len() as f32 * 73.0))
+            })
             .child(rows)
     }
 
@@ -944,39 +1194,44 @@ impl MagpieWindow {
     }
 
     fn inspector(&self, agent: &Agent, palette: Palette, cx: &mut Context<Self>) -> Div {
-        let identity = div()
-            .flex()
-            .items_center()
-            .gap(px(10.0))
-            .min_w_0()
-            .child(
-                div()
-                    .size(px(28.0))
-                    .flex_none()
-                    .child(Self::icon(agent, palette)),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .text_size(px(18.0))
-                    .line_height(px(24.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(text!(agent.name)),
-            );
-        let mut header = div()
-            .min_h(px(64.0))
+        let title = if agent.id != "codex" {
+            self.locale.action_text(A::Details)
+        } else if self.actions.preview.is_some() {
+            self.locale.action_text(A::PreviewTitle)
+        } else if self.actions.disconnect_confirmation {
+            self.locale.action_text(A::Disconnect)
+        } else {
+            self.locale.action_text(A::ChooseModel)
+        };
+        let header = div()
+            .h(px(44.0))
             .flex_none()
             .px(px(16.0))
-            .py(px(10.0))
             .flex()
             .items_center()
             .justify_between()
             .gap(px(8.0))
-            .border_b_1()
-            .border_color(rgb(palette.border))
-            .child(identity);
-        if !self.compact {
-            header = header.child(
+            .child(
+                div()
+                    .text_size(px(13.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .flex_1()
+                    .child(text!(title)),
+            )
+            .when(agent.id == "codex", |header| {
+                header.child(
+                    self.button(
+                        "check-connection",
+                        "",
+                        Some(assets::REFRESH),
+                        Action::CheckConnection,
+                        palette,
+                        cx,
+                    )
+                    .aria_label(self.locale.action_text(A::StatusRefresh)),
+                )
+            })
+            .child(
                 self.button(
                     "close-details",
                     "",
@@ -985,15 +1240,14 @@ impl MagpieWindow {
                     palette,
                     cx,
                 )
-                .aria_label(self.locale.text(Text::HideDetails))
+                .aria_label(self.locale.action_text(A::ClosePanel))
                 .track_focus(
                     &self
                         .detail_focus
                         .clone()
-                        .tab_stop(self.actions.busy().is_none() && !self.check_after_refresh),
+                        .tab_stop(self.action_enabled(Action::CloseDetails)),
                 ),
             );
-        }
         let mut content = div()
             .w_full()
             .min_w_0()
@@ -1010,7 +1264,6 @@ impl MagpieWindow {
             {
                 content = content.child(self.config_notice(agent, palette));
             }
-            content = content.child(self.model_values(agent, palette));
             if agent.id == "codex" {
                 content = content.child(self.connection_controls(palette, cx));
             }
@@ -1033,12 +1286,21 @@ impl MagpieWindow {
             .whitespace_normal(),
         );
         if self.diagnostics {
+            content = content.child(self.action_caption(A::CurrentConfig, palette));
+            content = content.child(self.model_values(agent, palette));
+            if agent.id == "codex" {
+                content = content.child(self.action_caption(A::OwnershipHint, palette));
+            }
             if let Some(ownership) = self.actions.ownership.filter(|_| agent.id == "codex") {
                 content = content.child(
                     div()
                         .text_size(px(11.0))
                         .text_color(rgb(palette.muted))
-                        .child(text!(format!("CLI · {}", ownership.as_str()))),
+                        .child(text!(format!(
+                            "{} · CLI {}",
+                            self.locale.action_text(A::Ownership),
+                            ownership.as_str()
+                        ))),
                 );
             }
             content = content.child(div().h(px(1.0)).flex_none().bg(rgb(palette.border)));
@@ -1110,46 +1372,25 @@ impl MagpieWindow {
                 false,
             ));
         }
-        self.panel(palette).h_full().child(header).child(
-            div()
-                .id("inspector-scroll")
-                .flex_1()
-                .min_h_0()
-                .min_w_0()
-                .overflow_y_scroll()
-                .track_scroll(&self.detail_scroll)
-                .child(content),
-        )
-    }
-
-    fn welcome_inspector(&self, palette: Palette) -> Div {
-        self.panel(palette)
-            .h_full()
-            .p(px(24.0))
-            .justify_center()
-            .items_center()
-            .gap(px(12.0))
-            .child(
-                svg()
-                    .data(assets::TERMINAL)
-                    .size(px(32.0))
-                    .text_color(rgb(palette.muted)),
-            )
+        div()
+            .w_full()
+            .min_w_0()
+            .h(px(self.editor_height))
+            .flex()
+            .flex_col()
+            .border_t_1()
+            .border_color(rgb(palette.border))
+            .bg(rgb(palette.surface))
+            .child(header)
             .child(
                 div()
-                    .text_size(px(16.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(text!(self.locale.text(Text::PickAgent))),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(280.0))
-                    .text_size(px(13.0))
-                    .line_height(px(20.0))
-                    .text_color(rgb(palette.muted))
-                    .whitespace_normal()
-                    .child(text!(self.locale.text(Text::PickAgentHint))),
+                    .id("inspector-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.detail_scroll)
+                    .child(content),
             )
     }
 
@@ -1261,34 +1502,33 @@ impl MagpieWindow {
         let Some(snapshot) = &self.snapshot else {
             return self.loading(palette);
         };
-        if snapshot.agents.is_empty() {
-            return self.empty(palette, cx);
-        }
-        let selected = self.details.and_then(|id| self.agent(id));
-        if self.compact {
-            return match selected {
-                Some(agent) => self.inspector(agent, palette, cx),
-                None => self.roster(snapshot, palette, cx),
-            };
-        }
-        let inspector = match selected {
-            Some(agent) => self.inspector(agent, palette, cx),
-            None => self.welcome_inspector(palette),
+        let content = if snapshot.agents.is_empty() {
+            self.empty(palette, cx)
+        } else {
+            self.roster(snapshot, palette, cx)
         };
-        div()
-            .w_full()
-            .h_full()
-            .min_h_0()
-            .flex()
-            .gap(px(16.0))
-            .child(
-                div()
-                    .w(px(296.0))
-                    .h_full()
-                    .flex_none()
-                    .child(self.roster(snapshot, palette, cx)),
-            )
-            .child(div().flex_1().min_w_0().h_full().child(inspector))
+        if self.agent("codex").is_none()
+            && (self.actions.reconcile_needed() || self.actions.uncertain)
+        {
+            return div()
+                .size_full()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .gap(px(12.0))
+                .child(
+                    self.action_message(
+                        "missing-codex-reconcile",
+                        self.locale.action_text(A::MissingCodexReview),
+                        true,
+                        palette,
+                    )
+                    .role(Role::Alert)
+                    .flex_none(),
+                )
+                .child(content.flex_1().min_h_0());
+        }
+        content
     }
 
     fn settings_page(&self, palette: Palette, cx: &mut Context<Self>) -> Div {
@@ -1406,24 +1646,30 @@ impl Render for MagpieWindow {
                 let _ = weak.update(cx, |view, cx| view.reveal_focused(window, cx));
             });
         }
-        let was_compact = self.compact;
         self.compact = window.viewport_size().width < px(BREAKPOINT);
-        if !was_compact
-            && self.compact
-            && self.page == Page::Agents
-            && self.details.is_some()
-            && self
-                .agent_focus
-                .values()
-                .any(|handle| handle.is_focused(window))
-        {
-            Self::focus_next_frame(self.detail_focus.clone(), window);
-        }
+        self.editor_height = (f32::from(window.viewport_size().height) - 210.0).clamp(150.0, 400.0);
         if self.page == Page::Agents
             && self
                 .agent_focus
                 .iter()
                 .any(|(id, handle)| handle.is_focused(window) && self.agent(id).is_none())
+        {
+            self.restore_root_focus = true;
+        }
+        if self.page == Page::Agents
+            && self.agent("codex").is_none()
+            && [
+                "codex-model",
+                "codex-connect",
+                "codex-disconnect",
+                "cancel-operation",
+            ]
+            .iter()
+            .any(|id| {
+                self.control_focus
+                    .get(id)
+                    .is_some_and(|handle| handle.is_focused(window))
+            })
         {
             self.restore_root_focus = true;
         }
@@ -1471,16 +1717,22 @@ impl Render for MagpieWindow {
             );
         });
         let gutter = if self.compact { 16.0 } else { 24.0 };
-        let page_title = if self.page == Page::Agents {
-            Text::LocalAgents
-        } else {
-            Text::Settings
-        };
-        let page_hint = if self.page == Page::Agents {
-            Text::Intro
-        } else {
-            Text::Preferences
-        };
+        let small_toolbar = window.viewport_size().width < px(440.0);
+        if small_toolbar
+            && !disabled
+            && !self.roadmap
+            && self
+                .control_focus
+                .get("refresh")
+                .is_some_and(|handle| handle.is_focused(window))
+        {
+            Self::focus_next_frame(self.control_focus["more-pages"].clone(), window);
+        }
+        let full_nav = window.viewport_size().width
+            >= px(match self.locale {
+                Locale::English | Locale::German | Locale::Japanese => 1100.0,
+                _ => 900.0,
+            });
         let body = match self.page {
             Page::Agents => self.agents_page(palette, cx),
             Page::Settings => self.settings_page(palette, cx),
@@ -1494,31 +1746,128 @@ impl Render for MagpieWindow {
                     .map_or(0, |snapshot| snapshot.agents.len()),
             )
         };
-        let heading = if self.compact && self.page == Page::Agents && self.details.is_some() {
-            div()
-                .min_h(px(48.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(12.0))
-                .child(
-                    self.button(
-                        "back-details",
-                        self.locale.text(Text::BackToAgents),
-                        Some(BACK),
-                        Action::CloseDetails,
-                        palette,
-                        cx,
-                    )
-                    .track_focus(
-                        &self
-                            .detail_focus
-                            .clone()
-                            .tab_stop(self.actions.busy().is_none() && !self.check_after_refresh),
-                    ),
+        let future_pages = [
+            A::ProvidersPage,
+            A::GatewayPage,
+            A::RoutesPage,
+            A::UsagePage,
+            A::SessionsPage,
+            A::LibraryPage,
+            A::PluginsPage,
+        ];
+        let navigation = div()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .min_w_0()
+            .child(
+                self.button(
+                    "agents-page",
+                    self.locale.text(Text::Agents),
+                    None,
+                    Action::Page(Page::Agents),
+                    palette,
+                    cx,
                 )
-                .child(
+                .px(px(if self.compact { 6.0 } else { 10.0 }))
+                .bg(rgb(if self.page == Page::Agents {
+                    palette.surface
+                } else {
+                    palette.background
+                }))
+                .text_color(rgb(if self.page == Page::Agents {
+                    palette.text
+                } else {
+                    palette.muted
+                }))
+                .border_1()
+                .border_color(rgb(if self.page == Page::Agents {
+                    palette.border
+                } else {
+                    palette.background
+                })),
+            )
+            .when(full_nav, |nav| {
+                nav.children(future_pages.map(|key| {
+                    div()
+                        .id(SharedString::from(format!("future-nav:{}", key as usize)))
+                        .role(Role::Status)
+                        .px(px(10.0))
+                        .text_size(px(12.0))
+                        .text_color(rgb(palette.muted))
+                        .whitespace_nowrap()
+                        .aria_label(format!(
+                            "{} · {}",
+                            self.locale.action_text(key),
+                            self.locale.action_text(A::Planned)
+                        ))
+                        .child(text!(self.locale.action_text(key)))
+                }))
+            })
+            .child(
+                self.button(
+                    "more-pages",
+                    self.locale.action_text(A::More),
+                    Some(DOWN),
+                    Action::ToggleRoadmap,
+                    palette,
+                    cx,
+                )
+                .px(px(if self.compact { 6.0 } else { 10.0 }))
+                .aria_expanded(self.roadmap)
+                .aria_label(format!(
+                    "{} · {}",
+                    self.locale.action_text(A::More),
+                    self.locale.action_text(A::Roadmap)
+                ))
+                .bg(rgb(palette.background)),
+            );
+        let roadmap_panel = div()
+            .id("roadmap-panel")
+            .flex_none()
+            .max_h(px(180.0))
+            .overflow_y_scroll()
+            .px(px(gutter))
+            .py(px(12.0))
+            .border_b_1()
+            .border_color(rgb(palette.border))
+            .bg(rgb(palette.surface))
+            .when(small_toolbar, |panel| {
+                panel.child(self.button(
+                    "refresh",
+                    self.locale.text(Text::Refresh),
+                    Some(assets::REFRESH),
+                    Action::Refresh,
+                    palette,
+                    cx,
+                ))
+            })
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(12.0))
+                    .children(future_pages.map(|key| {
+                        div()
+                            .id(SharedString::from(format!("future-panel:{}", key as usize)))
+                            .role(Role::Status)
+                            .text_size(px(12.0))
+                            .text_color(rgb(palette.muted))
+                            .child(text!(format!(
+                                "{} · {}",
+                                self.locale.action_text(key),
+                                self.locale.action_text(A::Planned)
+                            )))
+                    })),
+            )
+            .child(self.action_caption(A::RoadmapHint, palette).mt(px(10.0)));
+        let window_actions = div()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .flex_none()
+            .when(!small_toolbar, |row| {
+                row.child(
                     self.button(
                         "refresh",
                         "",
@@ -1527,6 +1876,7 @@ impl Render for MagpieWindow {
                         palette,
                         cx,
                     )
+                    .bg(rgb(palette.background))
                     .aria_label(self.locale.text(
                         if self.refresh_task.is_some() {
                             Text::Refreshing
@@ -1535,55 +1885,32 @@ impl Render for MagpieWindow {
                         },
                     )),
                 )
-        } else {
-            div()
-                .flex_none()
-                .flex()
-                .items_start()
-                .justify_between()
-                .gap(px(12.0))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.0))
-                        .child(
-                            div()
-                                .w_full()
-                                .text_size(px(if self.compact { 22.0 } else { 24.0 }))
-                                .line_height(px(28.0))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .whitespace_normal()
-                                .child(text!(self.locale.text(page_title))),
-                        )
-                        .child(self.caption(page_hint, palette)),
+            })
+            .child(
+                self.button(
+                    "settings-page",
+                    "",
+                    Some(assets::SETTINGS),
+                    Action::Page(Page::Settings),
+                    palette,
+                    cx,
                 )
-                .when(self.page == Page::Agents, |heading| {
-                    heading.child(
-                        self.button(
-                            "refresh",
-                            if self.compact {
-                                ""
-                            } else {
-                                self.locale.text(Text::Refresh)
-                            },
-                            Some(assets::REFRESH),
-                            Action::Refresh,
-                            palette,
-                            cx,
-                        )
-                        .aria_label(self.locale.text(
-                            if self.refresh_task.is_some() {
-                                Text::Refreshing
-                            } else {
-                                Text::Refresh
-                            },
-                        )),
-                    )
-                })
-        };
+                .px(px(8.0))
+                .bg(rgb(palette.background))
+                .aria_label(self.locale.text(Text::Settings)),
+            );
+        let heading = div()
+            .flex_none()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .min_h(px(24.0))
+            .child(if self.page == Page::Agents {
+                self.action_caption(A::WorkspaceIntro, palette)
+            } else {
+                self.caption(Text::Preferences, palette)
+            });
         div()
             .id("magpie")
             .track_focus(&self.focus)
@@ -1593,13 +1920,7 @@ impl Render for MagpieWindow {
             .size_full()
             .flex()
             .flex_col()
-            .font_family(if cfg!(target_os = "windows") {
-                "Segoe UI"
-            } else if cfg!(target_os = "macos") {
-                "Helvetica Neue"
-            } else {
-                "Noto Sans"
-            })
+            .font(theme::ui_font(cx, self.locale))
             .text_size(px(13.0))
             .line_height(px(20.0))
             .text_color(rgb(palette.text))
@@ -1612,7 +1933,7 @@ impl Render for MagpieWindow {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .gap(px(8.0))
+                    .gap(px(if self.compact { 4.0 } else { 8.0 }))
                     .border_b_1()
                     .border_color(rgb(palette.border))
                     .child(
@@ -1634,28 +1955,10 @@ impl Render for MagpieWindow {
                                     .child(text!("magpie")),
                             ),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .gap(px(4.0))
-                            .child(self.button(
-                                "agents-page",
-                                self.locale.text(Text::Agents),
-                                None,
-                                Action::Page(Page::Agents),
-                                palette,
-                                cx,
-                            ))
-                            .child(self.button(
-                                "settings-page",
-                                self.locale.text(Text::Settings),
-                                Some(assets::SETTINGS),
-                                Action::Page(Page::Settings),
-                                palette,
-                                cx,
-                            )),
-                    ),
+                    .child(navigation)
+                    .child(window_actions),
             )
+            .when(self.roadmap, |root| root.child(roadmap_panel))
             .child(
                 div()
                     .flex_1()
@@ -1730,6 +2033,9 @@ impl MagpieWindow {
                     | Action::CheckConnection
                     | Action::Run(_)
                     | Action::ConfirmDisconnect
+                    | Action::OpenDisconnect
+                    | Action::OpenModels
+                    | Action::OpenConnection
             )
         {
             return false;
@@ -1747,7 +2053,8 @@ impl MagpieWindow {
             Action::Run(JobKind::Status) | Action::CheckConnection => {
                 self.actions.config_path().is_some()
             }
-            Action::ConfirmDisconnect => self.actions.can_disconnect(),
+            Action::ConfirmDisconnect | Action::OpenDisconnect => self.actions.can_disconnect(),
+            Action::OpenModels | Action::OpenConnection => self.agent("codex").is_some(),
             _ => true,
         }
     }
@@ -1796,7 +2103,9 @@ impl MagpieWindow {
                             .or_insert_with(|| cx.focus_handle().tab_index(0).tab_stop(true));
                     }
                 }
-                view.pending_focus = Some(if view.actions.preview.is_some() {
+                view.pending_focus = Some(if view.details != Some("codex") {
+                    "codex-model"
+                } else if view.actions.preview.is_some() {
                     "apply-connect"
                 } else if kind == JobKind::Inspect && view.actions.catalog_is_current() {
                     "model-search"
@@ -1875,15 +2184,18 @@ impl MagpieWindow {
             cx,
         )
         .h_auto()
-        .min_h(px(if self.compact { 40.0 } else { 36.0 }))
+        .min_h(px(if self.compact { 40.0 } else { 34.0 }))
         .py(px(6.0))
         .whitespace_normal()
         .when(
-            enabled && matches!(action, Action::Run(JobKind::Apply)),
+            enabled && matches!(action, Action::Run(JobKind::Apply | JobKind::Preview)),
             |button| {
                 button
-                    .bg(rgb(palette.accent))
+                    .bg(rgb(palette.text))
                     .text_color(rgb(palette.surface))
+                    .hover(move |style| {
+                        style.bg(rgb(palette.text)).text_color(rgb(palette.surface))
+                    })
             },
         )
     }
@@ -1959,55 +2271,364 @@ impl MagpieWindow {
                         let _ = weak.update(cx, |view, cx| view.select_model(a11y_id.clone(), cx));
                     })
             })
-            .child(text!(model.to_owned()))
+            .flex()
+            .items_start()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .whitespace_normal()
+                    .child(text!(model.to_owned())),
+            )
+            .when(selected, |row| {
+                row.child(svg().data(CHECK).size(px(16.0)).flex_none())
+            })
+    }
+
+    fn review_field(&self, label: &'static str, value: String, palette: Palette) -> Div {
+        div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .gap(px(12.0))
+            .when(self.compact, |row| row.flex_col().gap(px(2.0)))
+            .child(
+                div()
+                    .w(px(108.0))
+                    .flex_none()
+                    .text_size(px(12.0))
+                    .line_height(px(18.0))
+                    .text_color(rgb(palette.muted))
+                    .whitespace_normal()
+                    .child(text!(label)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(13.0))
+                    .line_height(px(18.0))
+                    .whitespace_normal()
+                    .child(text!(value)),
+            )
+    }
+
+    fn preview_panel(&self, palette: Palette, cx: &mut Context<Self>) -> Option<Div> {
+        let ticket = self.actions.preview.as_ref()?;
+        let mut preview = div()
+            .w_full()
+            .min_w_0()
+            .p(px(12.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(rgb(palette.border))
+            .bg(rgb(palette.inset))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(self.action_caption(A::PreviewHint, palette))
+            .child(self.review_field(
+                self.locale.text(Text::Model),
+                ticket.binding.model.clone(),
+                palette,
+            ))
+            .child(self.review_field(
+                self.locale.action_text(A::Gateway),
+                ticket.binding.address.to_string(),
+                palette,
+            ))
+            .child(self.review_field(
+                self.locale.text(Text::ConfigPath),
+                ticket.binding.config.display().to_string(),
+                palette,
+            ))
+            .child(self.action_caption(
+                if ticket.info.config_existed {
+                    A::KeepConfig
+                } else {
+                    A::CreateConfig
+                },
+                palette,
+            ))
+            .child(self.action_caption(A::Preserve, palette))
+            .child(self.action_button(
+                "preview-fields",
+                A::Fields,
+                Action::ToggleFields,
+                palette,
+                cx,
+            ));
+        if self.preview_fields {
+            for field in &ticket.info.changed_fields {
+                preview = preview.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .text_size(px(11.0))
+                        .line_height(px(16.0))
+                        .whitespace_normal()
+                        .child(text!(field.clone())),
+                );
+            }
+        }
+        preview = preview.child(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(8.0))
+                .child(self.action_button(
+                    "apply-connect",
+                    A::Save,
+                    Action::Run(JobKind::Apply),
+                    palette,
+                    cx,
+                ))
+                .child(self.action_button(
+                    "edit-preview",
+                    A::Edit,
+                    Action::DismissPreview,
+                    palette,
+                    cx,
+                )),
+        );
+        Some(preview)
+    }
+
+    fn model_picker(&self, palette: Palette, cx: &mut Context<Self>) -> Div {
+        let mut choices = div().flex_1().min_w_0().flex().flex_col().gap(px(8.0));
+        if let Some(catalog) = &self.actions.catalog {
+            if !self.actions.catalog_is_current() {
+                choices = choices.child(self.action_message(
+                    "stale-catalog",
+                    format!(
+                        "{} · {}",
+                        self.locale.action_text(A::StaleCatalog),
+                        catalog.address
+                    ),
+                    true,
+                    palette,
+                ));
+            }
+            choices = choices.child(
+                div()
+                    .id("search-field")
+                    .w_full()
+                    .min_w_0()
+                    .anchor_scroll(self.scroll_anchors.get("model-search").cloned())
+                    .child(self.search_input.clone()),
+            );
+            let models = self.actions.visible_models();
+            if models.is_empty() {
+                choices = choices.child(
+                    self.action_caption(
+                        if catalog.models.is_empty() {
+                            A::NoModels
+                        } else {
+                            A::NoMatches
+                        },
+                        palette,
+                    )
+                    .py(px(12.0)),
+                );
+            } else {
+                let rows = div()
+                    .id("configured-models")
+                    .w_full()
+                    .min_w_0()
+                    .max_h(px(152.0))
+                    .flex()
+                    .flex_col()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.model_scroll)
+                    .children(
+                        models
+                            .iter()
+                            .map(|model| self.model_option(&model.id, palette, cx)),
+                    );
+                choices = choices.child(
+                    div()
+                        .id("models-field")
+                        .w_full()
+                        .min_w_0()
+                        .anchor_scroll(Some(self.model_anchor.clone()))
+                        .border_1()
+                        .border_color(rgb(palette.border))
+                        .rounded(px(6.0))
+                        .overflow_hidden()
+                        .child(rows),
+                );
+            }
+            choices = choices.child(
+                div()
+                    .text_size(px(11.0))
+                    .line_height(px(16.0))
+                    .text_color(rgb(palette.muted))
+                    .child(text!(format!(
+                        "{} · {}",
+                        self.locale.action_text(A::Configured),
+                        catalog.models.len()
+                    ))),
+            );
+        } else {
+            choices = choices.child(self.action_caption(A::NoCatalog, palette).py(px(20.0)));
+        }
+        let mut summary = div()
+            .w(px(232.0))
+            .min_w_0()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .when(self.compact, |column| column.w_full())
+            .child(self.action_caption(A::SelectedModel, palette));
+        if let Some(model) = &self.actions.selected {
+            summary = summary.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .text_size(px(13.0))
+                    .line_height(px(20.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .whitespace_normal()
+                    .child(text!(model.clone())),
+            );
+            if !self.actions.selected_available() {
+                summary = summary.child(self.action_message(
+                    "selected-model-unavailable",
+                    self.locale.action_text(A::SelectedMissing),
+                    true,
+                    palette,
+                ));
+            } else if !cli_bridge::writable_model(model) {
+                summary = summary.child(self.action_message(
+                    "model-write-limit",
+                    self.locale.action_text(A::UnicodeModel),
+                    true,
+                    palette,
+                ));
+            }
+        } else {
+            summary = summary.child(self.action_caption(A::PickerHint, palette));
+        }
+        summary = summary
+            .child(self.action_caption(A::Preserve, palette))
+            .child(div().flex_1().min_h(px(8.0)));
+        if self
+            .actions
+            .ownership
+            .is_some_and(|state| state != Ownership::Unmanaged)
+        {
+            summary = summary
+                .child(self.action_caption(A::ManagedHint, palette))
+                .child(self.action_button(
+                    "disconnect",
+                    A::Disconnect,
+                    Action::ConfirmDisconnect,
+                    palette,
+                    cx,
+                ));
+        } else {
+            summary = summary.child(self.action_button(
+                "preview-connect",
+                A::Preview,
+                Action::Run(JobKind::Preview),
+                palette,
+                cx,
+            ));
+        }
+        div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .gap(px(18.0))
+            .when(self.compact, |columns| columns.flex_col().gap(px(14.0)))
+            .child(choices)
+            .child(summary)
+    }
+
+    fn gateway_panel(&self, palette: Palette, cx: &mut Context<Self>) -> Div {
+        let visible = self.gateway_settings
+            || self.actions.catalog.is_none()
+            || !self.actions.catalog_is_current();
+        let mut panel = div()
+            .w_full()
+            .min_w_0()
+            .border_t_1()
+            .border_color(rgb(palette.border))
+            .pt(px(10.0))
+            .flex()
+            .flex_col()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .flex_wrap()
+                    .gap(px(8.0))
+                    .child(
+                        self.action_button(
+                            "gateway-settings",
+                            A::GatewaySettings,
+                            Action::ToggleGateway,
+                            palette,
+                            cx,
+                        )
+                        .aria_expanded(visible),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .min_w_0()
+                            .when(!self.compact && !visible, |row| {
+                                row.child(
+                                    div()
+                                        .max_w(px(220.0))
+                                        .truncate()
+                                        .text_size(px(11.0))
+                                        .text_color(rgb(palette.muted))
+                                        .child(text!(self.actions.address.clone())),
+                                )
+                            })
+                            .child(self.action_button(
+                                "query-models",
+                                A::Query,
+                                Action::Run(JobKind::Inspect),
+                                palette,
+                                cx,
+                            )),
+                    ),
+            );
+        if visible {
+            panel = panel.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .child(self.action_caption(A::Gateway, palette))
+                    .child(
+                        div()
+                            .id("gateway-field")
+                            .w_full()
+                            .min_w_0()
+                            .anchor_scroll(self.scroll_anchors.get("gateway-address").cloned())
+                            .child(self.gateway_input.clone()),
+                    )
+                    .child(self.action_caption(A::GatewayHint, palette)),
+            );
+        }
+        panel
     }
 
     fn connection_controls(&self, palette: Palette, cx: &mut Context<Self>) -> Div {
-        let state_label = match self.actions.ownership {
-            None => A::Unknown,
-            Some(Ownership::Unmanaged) => A::Unmanaged,
-            Some(Ownership::Connected) => A::Connected,
-            Some(Ownership::Drifted) => A::Drifted,
-            Some(Ownership::RecoveryRequired) => A::RecoveryRequired,
-        };
         let mut group = div().w_full().min_w_0().flex().flex_col().gap(px(12.0));
-        group = group.child(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(8.0))
-                        .child(
-                            div()
-                                .id("ownership-status")
-                                .role(Role::Status)
-                                .min_w_0()
-                                .flex_1()
-                                .text_size(px(13.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .whitespace_normal()
-                                .child(text!(format!(
-                                    "{} · {}",
-                                    self.locale.action_text(A::Ownership),
-                                    self.locale.action_text(state_label)
-                                ))),
-                        )
-                        .child(self.action_button(
-                            "check-connection",
-                            A::StatusRefresh,
-                            Action::CheckConnection,
-                            palette,
-                            cx,
-                        )),
-                )
-                .child(self.action_caption(A::OwnershipHint, palette)),
-        );
         if self.actions.uncertain {
             group = group.child(self.action_message(
                 "uncertain-result",
@@ -2069,24 +2690,32 @@ impl MagpieWindow {
                         cx,
                     )),
             );
-        } else if self.check_after_refresh
-            || self.actions.reconcile_needed()
-            || (matches!(
-                self.actions.notice,
-                Some(Notice::Connected | Notice::Disconnected(_))
-            ) && self.actions.snapshot_failed())
-        {
+        } else if self.check_after_refresh && self.refresh_task.is_some() {
             group = group.child(self.action_message(
                 "reconcile-status",
                 self.locale.action_text(A::Checking),
                 true,
                 palette,
             ));
+        } else if self.actions.reconcile_needed()
+            || (matches!(
+                self.actions.notice,
+                Some(Notice::Connected | Notice::Disconnected(_))
+            ) && self.actions.snapshot_failed())
+        {
+            if !self.actions.uncertain {
+                group = group.child(self.action_message(
+                    "reconcile-status",
+                    self.locale.action_text(A::NeedsReview),
+                    true,
+                    palette,
+                ));
+            }
         } else if let Some(notice) = &self.actions.notice {
             let key = match notice {
                 Notice::Connected => Some(A::ConnectDone),
                 Notice::Disconnected(_) => Some(A::DisconnectDone),
-                Notice::StatusVerified => Some(A::Verified),
+                Notice::StatusVerified => None,
                 _ => None,
             };
             if let Some(key) = key {
@@ -2106,296 +2735,48 @@ impl MagpieWindow {
                 palette,
             ));
         }
-        if self
-            .actions
-            .ownership
-            .is_some_and(|state| state != Ownership::Unmanaged)
-        {
-            group = group.child(self.action_caption(A::ManagedHint, palette));
-            if self.actions.disconnect_confirmation {
-                group = group.child(
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .p(px(12.0))
-                        .rounded(px(6.0))
-                        .border_1()
-                        .border_color(rgb(palette.warning))
-                        .flex()
-                        .flex_col()
-                        .gap(px(10.0))
-                        .child(self.action_caption(A::DisconnectHint, palette))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .gap(px(8.0))
-                                .child(self.action_button(
-                                    "confirm-disconnect",
-                                    A::ConfirmDisconnect,
-                                    Action::Run(JobKind::Disconnect),
-                                    palette,
-                                    cx,
-                                ))
-                                .child(self.action_button(
-                                    "keep-connection",
-                                    A::KeepConnection,
-                                    Action::KeepConnection,
-                                    palette,
-                                    cx,
-                                )),
-                        ),
-                );
-            } else {
-                group = group.child(div().flex().child(self.action_button(
-                    "disconnect",
-                    A::Disconnect,
-                    Action::ConfirmDisconnect,
-                    palette,
-                    cx,
-                )));
-            }
+        if let Some(preview) = self.preview_panel(palette, cx) {
+            return group.child(preview);
         }
-        group = group.child(div().h(px(1.0)).bg(rgb(palette.border)));
-        group = group.child(
-            div()
-                .w_full()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(6.0))
-                .child(self.action_caption(A::Gateway, palette))
-                .child(
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .flex()
-                        .gap(px(8.0))
-                        .when(self.compact, |row| row.flex_col())
-                        .child(
-                            div()
-                                .id("gateway-field")
-                                .flex_1()
-                                .min_w_0()
-                                .anchor_scroll(self.scroll_anchors.get("gateway-address").cloned())
-                                .child(self.gateway_input.clone()),
-                        )
-                        .child(self.action_button(
-                            "query-models",
-                            A::Query,
-                            Action::Run(JobKind::Inspect),
-                            palette,
-                            cx,
-                        )),
-                )
-                .child(self.action_caption(A::GatewayHint, palette)),
-        );
-        if let Some(catalog) = &self.actions.catalog {
-            if !self.actions.catalog_is_current() {
-                group = group.child(self.action_message(
-                    "stale-catalog",
-                    format!(
-                        "{} · {}",
-                        self.locale.action_text(A::StaleCatalog),
-                        catalog.address
-                    ),
-                    true,
-                    palette,
-                ));
-            }
-            group = group.child(
+        if self.actions.disconnect_confirmation {
+            return group.child(
                 div()
                     .w_full()
                     .min_w_0()
+                    .p(px(12.0))
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(rgb(palette.border))
+                    .bg(rgb(palette.inset))
                     .flex()
                     .flex_col()
-                    .gap(px(6.0))
-                    .child(self.action_caption(A::Search, palette))
+                    .gap(px(12.0))
+                    .child(self.action_caption(A::DisconnectHint, palette))
                     .child(
                         div()
-                            .id("search-field")
-                            .w_full()
-                            .min_w_0()
-                            .anchor_scroll(self.scroll_anchors.get("model-search").cloned())
-                            .child(self.search_input.clone()),
+                            .flex()
+                            .flex_wrap()
+                            .gap(px(8.0))
+                            .child(self.action_button(
+                                "confirm-disconnect",
+                                A::ConfirmDisconnect,
+                                Action::Run(JobKind::Disconnect),
+                                palette,
+                                cx,
+                            ))
+                            .child(self.action_button(
+                                "keep-connection",
+                                A::KeepConnection,
+                                Action::KeepConnection,
+                                palette,
+                                cx,
+                            )),
                     ),
             );
-            group = group.child(self.action_caption(A::HealthUnprobed, palette));
-            group = group.child(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(rgb(palette.muted))
-                    .child(text!(format!(
-                        "{} · {}",
-                        self.locale.action_text(A::Configured),
-                        catalog.models.len()
-                    ))),
-            );
-            let models = self.actions.visible_models();
-            if models.is_empty() {
-                group = group.child(self.action_caption(
-                    if catalog.models.is_empty() {
-                        A::NoModels
-                    } else {
-                        A::NoMatches
-                    },
-                    palette,
-                ));
-            } else {
-                let rows = div()
-                    .id("configured-models")
-                    .w_full()
-                    .min_w_0()
-                    .max_h(px(152.0))
-                    .flex()
-                    .flex_col()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.model_scroll)
-                    .children(
-                        models
-                            .iter()
-                            .map(|model| self.model_option(&model.id, palette, cx)),
-                    );
-                group = group.child(
-                    div()
-                        .id("models-field")
-                        .w_full()
-                        .min_w_0()
-                        .anchor_scroll(Some(self.model_anchor.clone()))
-                        .border_1()
-                        .border_color(rgb(palette.border))
-                        .rounded(px(6.0))
-                        .overflow_hidden()
-                        .child(rows),
-                );
-            }
-        } else {
-            group = group.child(self.action_caption(A::NoCatalog, palette));
-        }
-        if let Some(model) = &self.actions.selected {
-            group = group.child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .text_size(px(12.0))
-                    .line_height(px(18.0))
-                    .whitespace_normal()
-                    .child(text!(format!(
-                        "{} · {model}",
-                        self.locale.action_text(A::SelectedModel)
-                    ))),
-            );
-            if !self.actions.selected_available() {
-                group = group.child(self.action_message(
-                    "selected-model-unavailable",
-                    self.locale.action_text(A::SelectedMissing),
-                    true,
-                    palette,
-                ));
-            } else if !cli_bridge::writable_model(model) {
-                group = group.child(self.action_message(
-                    "model-write-limit",
-                    self.locale.action_text(A::UnicodeModel),
-                    true,
-                    palette,
-                ));
-            }
-        }
-        if let Some(ticket) = &self.actions.preview {
-            let mut preview = div()
-                .w_full()
-                .min_w_0()
-                .p(px(12.0))
-                .rounded(px(6.0))
-                .border_1()
-                .border_color(rgb(palette.accent))
-                .bg(rgb(palette.selected))
-                .flex()
-                .flex_col()
-                .gap(px(10.0))
-                .child(
-                    div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(text!(self.locale.action_text(A::PreviewTitle))),
-                )
-                .child(self.action_caption(A::PreviewHint, palette))
-                .child(self.field(Text::Model, ticket.binding.model.clone(), palette, false))
-                .child(
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .whitespace_normal()
-                        .child(text!(format!(
-                            "{} · {}",
-                            self.locale.action_text(A::Gateway),
-                            ticket.binding.address
-                        ))),
-                )
-                .child(self.field(
-                    Text::ConfigPath,
-                    ticket.binding.config.display().to_string(),
-                    palette,
-                    false,
-                ))
-                .child(self.action_caption(
-                    if ticket.info.config_existed {
-                        A::KeepConfig
-                    } else {
-                        A::CreateConfig
-                    },
-                    palette,
-                ))
-                .child(self.action_caption(A::Preserve, palette))
-                .child(self.action_button(
-                    "preview-fields",
-                    A::Fields,
-                    Action::ToggleFields,
-                    palette,
-                    cx,
-                ));
-            if self.preview_fields {
-                for field in &ticket.info.changed_fields {
-                    preview = preview.child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .text_size(px(11.0))
-                            .line_height(px(16.0))
-                            .whitespace_normal()
-                            .child(text!(field.clone())),
-                    );
-                }
-            }
-            preview = preview.child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(8.0))
-                    .child(self.action_button(
-                        "apply-connect",
-                        A::Save,
-                        Action::Run(JobKind::Apply),
-                        palette,
-                        cx,
-                    ))
-                    .child(self.action_button(
-                        "edit-preview",
-                        A::Edit,
-                        Action::DismissPreview,
-                        palette,
-                        cx,
-                    )),
-            );
-            group = group.child(preview);
-        } else {
-            group = group.child(div().flex().child(self.action_button(
-                "preview-connect",
-                A::Preview,
-                Action::Run(JobKind::Preview),
-                palette,
-                cx,
-            )));
         }
         group
+            .child(self.action_caption(A::HealthUnprobed, palette))
+            .child(self.model_picker(palette, cx))
+            .child(self.gateway_panel(palette, cx))
     }
 }
