@@ -25,12 +25,12 @@ fn main() -> ExitCode {
         if argument == "--help" || argument == "-h" {
             println!(
                 "Magpie {} (early version)\n\
-                 Native GPUI view of installed coding agents and read-only Codex settings.\n\n\
+                 Native GPUI agent browser with explicit Codex connection and restore actions.\n\n\
                  Usage: magpie-desktop [--help | --version]\n\n\
                  Without arguments, opens the desktop window.\n\
                  --help, -h     Show this help without opening a display\n\
                  --version, -V  Show the version without opening a display\n\n\
-                 The view reads local configuration and does not start or probe the gateway.",
+                 Queries use the packaged Magpie CLI; saving and restoring require explicit actions. The gateway is started separately.",
                 env!("CARGO_PKG_VERSION"),
             );
             return ExitCode::SUCCESS;

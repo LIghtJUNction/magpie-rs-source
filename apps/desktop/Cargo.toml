@@ -9,8 +9,18 @@ license = "MIT"
 
 [dependencies]
 magpie-core = { path = "../../crates/magpie-core" }
+accesskit = "=0.24.1"
+async-io = "=2.6.0"
+async-process = "=2.5.0"
+futures-lite = "=2.6.1"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+unicode-segmentation = "=1.13.3"
 gpui = { git = "https://github.com/zed-industries/zed", rev = "37faef81f74fc1bb08be9939c4cffc8ede6ced2f", default-features = false }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "37faef81f74fc1bb08be9939c4cffc8ede6ced2f", default-features = false, features = ["font-kit", "wayland", "x11"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "=1.1.6", features = ["process", "fs"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", rev = "37faef81f74fc1bb08be9939c4cffc8ede6ced2f", default-features = false, features = ["windows-manifest"] }

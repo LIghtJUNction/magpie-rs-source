@@ -2,10 +2,11 @@
 
 Rust implementation for the `magpie-rs` Recipkg project. Version 0.2.0 is an
 early preview with a standalone CLI, bounded local-provider forwarding,
-recoverable Codex configuration changes, and a GPUI Agent status window.
-The full product contract remains under active implementation. The Pro desktop
-redesign has passed local Linux build and Clippy checks; user visual acceptance
-and the next GUI action flow are pending. This checkpoint is not a desktop release.
+recoverable Codex configuration changes, and GPUI desktop actions.
+The full product contract remains under active implementation. The previous
+visual direction was rejected; a new Pro redesign is in progress. Local Linux
+builds and functional tests do not establish visual acceptance. This checkpoint
+is not a desktop release.
 
 ## Install
 
@@ -35,9 +36,14 @@ connection/restore transactions, status output, and loopback-only gateways.
 Agent discovery checks installed Codex, Claude Code, Gemini CLI,
 OpenCode and Zed executables on PATH. Only Codex configuration is inspected;
 its explicit model, provider and reasoning effort are read without credentials.
-The GPUI application currently refreshes a read-only local snapshot. Discovery,
-inspection and connection previews do not change user configuration or sign-ins.
-Only an explicit CLI transaction with a selected path writes configuration.
+The GPUI application reads local snapshots and calls the packaged CLI for model
+queries, selection, read-only connection previews, explicit saves, ownership
+checks and offline restoration. A preview is invalidated when its inputs or
+observed configuration change. Discovery, inspection and previews do not change
+configuration or sign-ins; only an explicit save or restore writes the selected
+Codex configuration. The desktop requires its matching CLI beside the executable,
+or an explicit absolute `MAGPIE_CLI_PATH` for development; it does not search PATH
+for another Magpie binary.
 Provider sign-in, remote HTTPS forwarding, protocol conversion, full Usage,
 plugins and synchronization remain unimplemented.
 
@@ -107,10 +113,26 @@ python3 -B tests/first_loop.py --binary /path/to/release/magpie
 python3 -B tests/native_codex.py --binary /path/to/release/magpie --codex /path/to/codex
 ```
 
+The window-independent desktop action worker also passed with Codex 0.165.0 in
+two isolated homes: an existing configuration and an originally missing file.
+Both cases execute the real desktop state/CLI bridge, query and select a model,
+preview without writes, save, run Codex through the synthetic Responses stream,
+stop the gateway, and restore the exact original bytes or original absence.
+Build the desktop library test executable with `cargo test --release --locked
+--manifest-path apps/desktop/Cargo.toml --lib --no-run --message-format=json`, then
+use its reported executable path:
+
+```sh
+python3 -B tests/desktop_actions.py --self-check
+python3 -B tests/desktop_actions.py --binary /path/to/release/magpie --test-binary /path/to/magpie_desktop-libtest --codex /path/to/codex --report /path/to/desktop-actions.json
+```
+
 Recorded evidence and exact binary/source/fixture hashes are in `tests/results/`.
 The two ignored test-worker entry points are executed explicitly by their parent
-cases; they are not separate completed product requirements. Native GUI operations,
-other Agent clients, external TLS and the full 93 requirements remain open.
+cases; the desktop adds one ignored worker explicitly run twice by its Python
+coordinator. These are not separate completed product requirements. Actual native
+window interactions, IME, screen readers, other Agent clients, external TLS and
+the full 93 requirements remain open.
 
 ## Performance measurements
 

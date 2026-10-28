@@ -1,0 +1,116 @@
+{
+  "scope": "window_independent_desktop_actions_real_cli_gateway_installed_codex",
+  "acceptance": "T01_continuous_synthetic_provider_roundtrip",
+  "worker_test": "actions_state::tests::real_cli_native_codex_roundtrip",
+  "passed": true,
+  "native_gui_window": "not_run",
+  "native_ime": "not_run",
+  "external_provider": "not_run",
+  "binary": {
+    "path": "/home/lightjunction/.cache/magpie-rs-build/cli/release/magpie",
+    "sha256": "e3463d7717d0f8a73b5ea6d63d363e9835ce1c81dc0afbdb5c83bbf3696b86f1"
+  },
+  "test_binary": {
+    "path": "/home/lightjunction/.cache/magpie-rs-build/gui/release/deps/magpie_desktop-b12b688a45b217dd",
+    "sha256": "977968b4fa74ec22316de01e34b8efd83609d2f38b6e1eff05dc10fc85c4dd78"
+  },
+  "codex": {
+    "path": "/home/lightjunction/.codex/packages/standalone/releases/0.165.0-x86_64-unknown-linux-musl/bin/codex",
+    "sha256": "c06a67fd8ac76508dc78bd99ce20c9f317b8d568beda59485f3f4134df9962d5"
+  },
+  "source_input_context": {
+    "source_root": "/home/lightjunction/Documents/GITHUB/magpie-rs/generated/magpie-rs-source",
+    "parent_label": "business cd781def365e6055b83ac1c29d9c355cf269c767; UI actions r1 with isolated native worker; component libtest release build 2026-10-29",
+    "observed_inputs_sha256": {
+      "Cargo.toml": "f7b713377efb6d8b6bca910f2cffff9827b1d9f62366a6bc1514963f65712985",
+      "Cargo.lock": "31bd5212cb7623543661b28b4029c710bde28749a868ebfff43cd8dbcf7682ed",
+      "apps/desktop/Cargo.toml": "d5a7c503c5fbd9f9e7d6801578d76eddd3d53b105417c0f015859c42edf07cc4",
+      "apps/desktop/Cargo.lock": "26ba22e8e78e4945f00ef88d7493fc99982302910436d3c25863c58ec3e62976",
+      "apps/desktop/src/lib.rs": "f039be062605d9adcbc1cef255a8f369b1c48f7491830c9347bc6bd6441d338a",
+      "apps/desktop/src/actions_state.rs": "390c61e5ded46b239f8214735bad807213b2d5f9808849e0e1cf37ac06b15a84",
+      "apps/desktop/src/cli_bridge.rs": "1847696e35775b8a4f304e371ab08b8c33519d5f113621b7f2ac232a1021b193",
+      "apps/desktop/src/config_stamp.rs": "5a56ab306daae484292135b0e69031a9100c789b1790ce454f22939a1c1229dc",
+      "apps/desktop/src/snapshot.rs": "45efe86b826acf46140745ab994a4e7be0d59d2181282487700e44c338c66f46",
+      "crates/magpie-cli/src/main.rs": "420e79fd4495aa9031b275517bfa3cd65a6af80f96c7f47cc1c23e4c8f88f5cd",
+      "crates/magpie-core/src/agents.rs": "d945cb6c4f14539deb2d52207208b639d5abcddf234c8aff45be9fc4044de44a",
+      "crates/magpie-core/src/codex_transaction.rs": "5db38f52521727e61c0ee0d04d8c4a65c943ca57fc1fc4f989e857e0b847a71f",
+      "crates/magpie-service/src/forward.rs": "ca5c17949a7f624e778cf3d4246d519d826fbdd01bfce1be93206b1f3d187bd3",
+      "tests/native_codex.py": "59a3207d906e3d8d241b6f6552a9f8194ccd5a2c9226b342b980217ade3c53ee",
+      "tests/desktop_actions.py": "66a7cad5b3192fda9530c011b44c46fb632ea936fa38fa4c5dd7eb96097a3377"
+    },
+    "binary_source_match": "parent_build_provenance_required"
+  },
+  "cases": [
+    {
+      "case": "existing",
+      "passed": true,
+      "cleanup_errors": [],
+      "original_config_sha256": "6cfb9ea6d941b09370f68c64ce0dfb709704d9b6249624bd92745bbceaae1dda",
+      "codex_version": "codex-cli 0.165.0",
+      "cli_version": "magpie 0.2.0",
+      "source_commit": "cd781def365e6055b83ac1c29d9c355cf269c767",
+      "forward_fixture_sha256": "131e33eda5a0998631bce1385ede432d83c91e24484802c024d34d31e89cc434",
+      "connected_config_sha256": "411edb8ff0711f946540ce39e4425459f8b144619901041bf6149d064289a2ad",
+      "codex_exit_code": 0,
+      "marker_received": true,
+      "event_types": [
+        "thread.started",
+        "item.completed",
+        "turn.started",
+        "item.completed",
+        "turn.completed"
+      ],
+      "provider_requests": [
+        {
+          "path": "/v1/responses",
+          "model": "native-fixture",
+          "stream": true,
+          "provider_key_correct": true
+        }
+      ],
+      "gateway_stopped_before_disconnect": true,
+      "worker_exit_code": 0,
+      "original_bytes_or_absence_restored": true,
+      "worker_roundtrip_passed": true,
+      "native_codex_passed": true,
+      "duration_seconds": 1.279
+    },
+    {
+      "case": "missing",
+      "passed": true,
+      "cleanup_errors": [],
+      "original_config_sha256": null,
+      "codex_version": "codex-cli 0.165.0",
+      "cli_version": "magpie 0.2.0",
+      "source_commit": "cd781def365e6055b83ac1c29d9c355cf269c767",
+      "forward_fixture_sha256": "12b210c26c87f6ef94e50644ea77d3e7becb324cad7ae05c57ebd7652a242d25",
+      "connected_config_sha256": "1f638de2b6abfa143f7c7cea8885060ea4004e9d51c3712f7ebec4fc489cae9c",
+      "codex_exit_code": 0,
+      "marker_received": true,
+      "event_types": [
+        "thread.started",
+        "item.completed",
+        "turn.started",
+        "item.completed",
+        "turn.completed"
+      ],
+      "provider_requests": [
+        {
+          "path": "/v1/responses",
+          "model": "native-fixture",
+          "stream": true,
+          "provider_key_correct": true
+        }
+      ],
+      "gateway_stopped_before_disconnect": true,
+      "worker_exit_code": 0,
+      "original_bytes_or_absence_restored": true,
+      "worker_roundtrip_passed": true,
+      "native_codex_passed": true,
+      "duration_seconds": 1.234
+    }
+  ],
+  "fixture_module_sha256": "59a3207d906e3d8d241b6f6552a9f8194ccd5a2c9226b342b980217ade3c53ee",
+  "marker_sha256": "340044b9c0aa664f21674215292c8a712fdc49b6a99f3386da2f8e96dcca0297",
+  "duration_seconds": 3.131
+}

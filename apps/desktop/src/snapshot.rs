@@ -73,10 +73,9 @@ impl Snapshot {
     pub fn retain_last_readable(&mut self, previous: &Self) {
         for agent in &mut self.agents {
             if agent.settings.is_some()
-                || agent
-                    .config
-                    .as_ref()
-                    .is_none_or(|config| config.fields_readable)
+                || agent.config.as_ref().is_none_or(|config| {
+                    config.fields_readable || config.state == ConfigFileState::Missing
+                })
             {
                 continue;
             }
@@ -90,5 +89,56 @@ impl Snapshot {
                 agent.last_known = true;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn snapshot(state: ConfigFileState, readable: bool) -> Snapshot {
+        Snapshot {
+            agents: vec![Agent {
+                id: "codex",
+                name: "Codex",
+                icon: None,
+                executable: PathBuf::from("/fixture/codex"),
+                config: Some(Config {
+                    path: Some(PathBuf::from("/fixture/config.toml")),
+                    state,
+                    error_line: None,
+                    fields_readable: readable,
+                }),
+                settings: readable.then(|| ModelSettings {
+                    model: Some("local/old".into()),
+                    provider: Some("magpie".into()),
+                    effort: Some("high".into()),
+                }),
+                last_known: false,
+            }],
+        }
+    }
+    #[test]
+    fn restored_missing_file_has_no_old_managed_model() {
+        let old = snapshot(ConfigFileState::ValidToml, true);
+        let mut restored = snapshot(ConfigFileState::Missing, false);
+        restored.retain_last_readable(&old);
+        assert!(restored.agents[0].settings.is_none());
+        assert!(!restored.agents[0].last_known);
+    }
+    #[test]
+    fn failed_read_retains_old_values_with_stale_marker() {
+        let old = snapshot(ConfigFileState::ValidToml, true);
+        let mut unreadable = snapshot(ConfigFileState::InvalidToml, false);
+        unreadable.retain_last_readable(&old);
+        assert!(unreadable.agents[0].last_known);
+        assert_eq!(
+            unreadable.agents[0]
+                .settings
+                .as_ref()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("local/old")
+        );
     }
 }

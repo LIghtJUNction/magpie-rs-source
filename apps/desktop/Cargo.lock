@@ -2710,9 +2710,17 @@ dependencies = [
 name = "magpie-desktop"
 version = "0.2.0"
 dependencies = [
+ "accesskit",
+ "async-io",
+ "async-process",
+ "futures-lite",
  "gpui",
  "gpui_platform",
  "magpie-core",
+ "rustix",
+ "serde",
+ "serde_json",
+ "unicode-segmentation",
 ]
 
 [[package]]
