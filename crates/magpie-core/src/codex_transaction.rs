@@ -10,8 +10,9 @@
 //! another Unix user/group. Symlink components and nonregular files are refused.
 //!
 //! A persistent `lock-v2` inode is locked through the OS and hardlinked as `lock`
-//! before mutation. Closing the descriptor (including on process death) releases
-//! the lock; neither name is ever unlinked by this protocol. The legacy name
+//! before mutation. Normal guard release explicitly unlocks it. On process death,
+//! the lock remains until all inherited descriptors close. Neither name is ever
+//! unlinked by this protocol. The legacy name
 //! prevents older `create_new` clients from entering. An existing legacy lock
 //! without that exact hardlink relationship remains busy and is never adopted.
 //!
@@ -534,6 +535,14 @@ mod native {
         path: PathBuf,
         identity: (u64, u64),
         _file: File,
+    }
+
+    impl Drop for Lock {
+        fn drop(&mut self) {
+            // Another thread's child may still hold the same description after
+            // fork; close alone would leave our completed transaction locked.
+            let _ = flock(&self._file, FlockOperation::NonBlockingUnlock);
+        }
     }
 
     struct Stage {
@@ -2109,6 +2118,45 @@ mod native {
                 flock(&delayed, FlockOperation::Unlock).expect("release delayed owner");
             }
             assert!(check_lock_names(&target, identity).expect("persistent aliases"));
+        }
+
+        #[test]
+        fn normal_release_unlocks_a_retained_shared_description() {
+            let fixture = Fixture::new(Some(ORIGINAL));
+            let target = fixture.target();
+            let _descriptor_scope = test_support::descriptor_scope();
+            let first = acquire_lock(&target, true).expect("acquire first guard");
+            let identity = first.identity;
+            let inherited = first
+                ._file
+                .try_clone()
+                .expect("duplicate locked description");
+
+            assert!(
+                matches!(acquire_lock(&target, false), Err(Error::LockBusy)),
+                "another open must remain excluded while the first guard lives"
+            );
+            drop(first);
+            let second = acquire_lock(&target, false)
+                .expect("normal release must unlock even with a duplicate still open");
+            assert_eq!(second.identity, identity);
+            drop(inherited);
+            assert!(
+                matches!(acquire_lock(&target, false), Err(Error::LockBusy)),
+                "closing the old duplicate must not release the new owner"
+            );
+            assert!(check_lock_names(&target, identity).expect("persistent aliases"));
+            drop(second);
+
+            fixture.connect();
+            disconnect(&fixture.config).expect("disconnect after ordinary lock handoff");
+            assert_eq!(fixture.bytes().as_deref(), Some(ORIGINAL));
+            for name in [LOCK_NAME, LEGACY_LOCK_NAME] {
+                let meta = fs::metadata(target.state.join(name)).expect("persistent lock name");
+                assert_eq!((meta.dev(), meta.ino()), identity);
+                assert_eq!(meta.nlink(), 2);
+            }
+            fixture.assert_private();
         }
 
         #[test]

@@ -1,0 +1,22 @@
+{
+  "date": "2026-10-29",
+  "base_commit": "e57bb89eadc6fb6530edd2e145b521f935cb11ee",
+  "source_sha256": "1f4eb6bd52157e05509667a9a3a146248312cb916bed86f42e4519d1d0601621",
+  "before": "retained duplicated open-file description causes subsequent acquire LockBusy after original guard drops",
+  "after": "guard explicitly unlocks before close; duplicated description no longer blocks subsequent guard; active guard remains exclusive",
+  "verification": {
+    "independent_core_lib_parallel": 36,
+    "independent_codex_transaction_tests": 49,
+    "combined_candidate_core_parallel_runs": 10,
+    "passed_each": 74,
+    "ignored_each": 2,
+    "combined_candidate_workspace_parallel": 289,
+    "workspace_ignored": 5
+  },
+  "limitations": [
+    "Linux synthetic fixtures only",
+    "Pro original LockBusy has no retained holder trace and causal attribution remains unproven",
+    "SIGKILL cannot execute Drop and inherited descriptors may hold lock until closed",
+    "other platforms and real power loss not verified"
+  ]
+}
