@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Magpie Rust
+GenericName=AI Agent Manager
+Comment=Early preview of the Magpie Rust desktop
+Exec=magpie-desktop
+Icon=magpie-rs
+Terminal=false
+Categories=Development;
+StartupNotify=true

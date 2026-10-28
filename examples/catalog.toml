@@ -1,0 +1,5 @@
+# A static model directory. Listing a model does not enable request forwarding.
+[[providers]]
+id = "local"
+name = "Local inference"
+models = ["example-model"]

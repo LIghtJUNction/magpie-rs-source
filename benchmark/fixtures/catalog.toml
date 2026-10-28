@@ -1,0 +1,14 @@
+[[providers]]
+id = "fixture-0"
+name = "Synthetic provider 0"
+models = ["model-0", "model-1", "model-2", "model-3", "model-4", "model-5", "model-6", "model-7", "model-8", "model-9", "model-10", "model-11", "model-12", "model-13", "model-14", "model-15", "model-16", "model-17", "model-18", "model-19"]
+
+[[providers]]
+id = "fixture-1"
+name = "Synthetic provider 1"
+models = ["model-0", "model-1", "model-2", "model-3", "model-4", "model-5", "model-6", "model-7", "model-8", "model-9", "model-10", "model-11", "model-12", "model-13", "model-14", "model-15", "model-16", "model-17", "model-18", "model-19"]
+
+[[providers]]
+id = "fixture-2"
+name = "Synthetic provider 2"
+models = ["model-0", "model-1", "model-2", "model-3", "model-4", "model-5", "model-6", "model-7", "model-8", "model-9", "model-10", "model-11", "model-12", "model-13", "model-14", "model-15", "model-16", "model-17", "model-18", "model-19"]

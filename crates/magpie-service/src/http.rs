@@ -12,7 +12,6 @@ const HEALTH_BODY: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     "\"}"
 );
-const MODELS_BODY: &str = "{\"object\":\"list\",\"data\":[]}";
 const NOT_IMPLEMENTED_BODY: &str =
     "{\"error\":{\"code\":\"not_implemented\",\"message\":\"Gateway route is not implemented\"}}";
 
@@ -41,7 +40,7 @@ enum RequestError {
     HeadersTooLarge,
 }
 
-pub(super) fn handle_connection(mut stream: TcpStream, limits: GatewayLimits) {
+pub(super) fn handle_connection(mut stream: TcpStream, limits: GatewayLimits, models_json: &str) {
     let _ = stream.set_read_timeout(Some(SOCKET_TIMEOUT));
     let _ = stream.set_write_timeout(Some(SOCKET_TIMEOUT));
 
@@ -51,7 +50,7 @@ pub(super) fn handle_connection(mut stream: TcpStream, limits: GatewayLimits) {
     };
 
     match request {
-        Ok(Some(request)) => respond_to_request(&mut stream, request),
+        Ok(Some(request)) => respond_to_request(&mut stream, request, models_json),
         Ok(None) => {}
         Err(RequestError::BadRequest) => write_response(
             &mut stream,
@@ -216,7 +215,7 @@ fn read_header(reader: &mut impl BufRead) -> Result<Option<Vec<u8>>, HeaderError
     }
 }
 
-fn respond_to_request(stream: &mut TcpStream, request: Request) {
+fn respond_to_request(stream: &mut TcpStream, request: Request, models_json: &str) {
     let head_only = request.method == Method::Head;
     if request.method == Method::Other {
         write_response(
@@ -248,7 +247,7 @@ fn respond_to_request(stream: &mut TcpStream, request: Request) {
                 head_only,
             );
         } else {
-            write_response(stream, 200, "OK", MODELS_BODY, head_only);
+            write_response(stream, 200, "OK", models_json, head_only);
         }
     } else if request.path.starts_with("/v1/") || request.path.starts_with("/v1beta/") {
         write_response(

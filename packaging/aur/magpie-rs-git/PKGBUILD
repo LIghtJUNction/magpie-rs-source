@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: 0BSD
+# Maintainer: Magpie Rust contributors
+pkgname=magpie-rs-git
+pkgver=0.2.0
+pkgrel=1
+pkgdesc='Magpie Rust development preview: CLI and GPUI desktop'
+arch=('x86_64')
+url='https://github.com/LIghtJUNction/magpie-rs'
+license=('MIT')
+depends=('glibc' 'gcc-libs' 'fontconfig' 'freetype2' 'libxcb'
+         'libxkbcommon' 'libxkbcommon-x11' 'libx11' 'libxi' 'libxrandr' 'wayland'
+         'vulkan-icd-loader' 'libxcursor' 'openssl' 'zlib')
+makedepends=('git' 'cargo' 'clang' 'cmake' 'pkgconf' 'python' 'wayland-protocols')
+provides=('magpie' 'magpie-rs')
+conflicts=('magpie' 'magpie-git' 'magpie-bin' 'magpie-rs' 'magpie-rs-bin' 'magpie-rs-cli')
+source=('magpie-rs-source::git+https://github.com/LIghtJUNction/magpie-rs-source.git#branch=main')
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "${srcdir}/magpie-rs-source"
+  local description
+  if description="$(git describe --long --tags --match 'v[0-9]*' 2>/dev/null)"; then
+    printf '%s\n' "$description" | sed -E 's/^v//; s/-([0-9]+)-g/.r\1.g/; s/-/./g'
+  else
+    printf '0.2.0.r%s.g%s\n' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+  fi
+}
+
+_target_dir() {
+  printf '%s' "${MAGPIE_RS_TARGET_DIR:-${XDG_CACHE_HOME:-${HOME}/.cache}/magpie-rs-build/aur-git}"
+}
+
+build() {
+  cd "${srcdir}/magpie-rs-source"
+  export CARGO_TARGET_DIR="$(_target_dir)"
+  export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-2}"
+  cargo build --release --locked --package magpie-cli
+  cargo build --release --locked --manifest-path apps/desktop/Cargo.toml
+}
+
+check() {
+  "$(_target_dir)/release/magpie" --version
+  "$(_target_dir)/release/magpie-desktop" --version
+}
+
+package() {
+  cd "${srcdir}/magpie-rs-source"
+  local target="$(_target_dir)"
+  install -Dm755 "${target}/release/magpie" "${pkgdir}/usr/bin/magpie"
+  install -Dm755 "${target}/release/magpie-desktop" "${pkgdir}/usr/bin/magpie-desktop"
+  install -Dm644 packaging/linux/magpie-rs.desktop "${pkgdir}/usr/share/applications/magpie-rs.desktop"
+  install -Dm644 packaging/linux/magpie-rs.svg "${pkgdir}/usr/share/icons/hicolor/scalable/apps/magpie-rs.svg"
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

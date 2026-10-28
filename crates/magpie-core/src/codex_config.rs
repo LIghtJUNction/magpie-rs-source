@@ -64,6 +64,49 @@ struct LoadedConfig {
     exists: bool,
 }
 
+/// The explicit top-level Codex model settings, without credentials or other fields.
+///
+/// Missing or nonstring fields remain `None`; values are never inferred from
+/// defaults, profiles, or provider definitions.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CodexSelection {
+    /// The configured model ID, exactly as stored.
+    pub model: Option<String>,
+    /// The configured provider ID, exactly as stored.
+    pub model_provider: Option<String>,
+    /// The configured reasoning effort, exactly as stored.
+    pub model_reasoning_effort: Option<String>,
+}
+
+/// Reads only the selected model, provider, and effort from a bounded Codex config.
+///
+/// Returns `None` when the file is missing. A valid file with no explicit string
+/// selections returns `Some(CodexSelection::default())`. Uses the same regular
+/// file, symlink, UTF-8, TOML, and 4 MiB checks as config inspection and previews.
+///
+/// # Errors
+///
+/// Returns a config error for unsafe, unreadable, oversized, or malformed files.
+/// Parse diagnostics contain a line number without source excerpts.
+pub fn read_selection(path: &Path) -> Result<Option<CodexSelection>, CodexConfigError> {
+    load(path).map(|loaded| {
+        loaded.map(|loaded| {
+            let selected = |name| {
+                loaded
+                    .document
+                    .get(name)
+                    .and_then(Item::as_str)
+                    .map(str::to_owned)
+            };
+            CodexSelection {
+                model: selected("model"),
+                model_provider: selected("model_provider"),
+                model_reasoning_effort: selected("model_reasoning_effort"),
+            }
+        })
+    })
+}
+
 pub fn inspect_file(path: &Path) -> Result<bool, CodexConfigError> {
     load(path).map(|loaded| loaded.is_some())
 }
@@ -239,5 +282,151 @@ fn push_change(
             before,
             after: after.to_owned(),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
+
+    struct Fixture {
+        root: PathBuf,
+        config: PathBuf,
+    }
+
+    impl Fixture {
+        fn new(contents: &[u8]) -> Self {
+            let sequence = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("test clock is after the Unix epoch")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "magpie-selection-{}-{timestamp}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir(&root).expect("create isolated config directory");
+            let config = root.join("config.toml");
+            fs::write(&config, contents).expect("write isolated Codex config");
+            Self { root, config }
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn selection_preserves_configured_strings_and_excludes_secret_fields() {
+        let original = br#"model = "vendor/selected-model"
+model_provider = "my-provider"
+model_reasoning_effort = "high"
+api_key = "fixture-secret-root"
+[model_providers.my-provider]
+name = "Fixture provider"
+api_key = "fixture-secret-provider"
+[model_providers.my-provider.http_headers]
+Authorization = "Bearer fixture-secret-header"
+[profiles.other]
+model = "other-model"
+model_reasoning_effort = "low"
+"#;
+        let fixture = Fixture::new(original);
+        let selection = read_selection(&fixture.config)
+            .expect("read valid config")
+            .expect("config exists");
+        assert_eq!(
+            selection,
+            CodexSelection {
+                model: Some("vendor/selected-model".to_owned()),
+                model_provider: Some("my-provider".to_owned()),
+                model_reasoning_effort: Some("high".to_owned()),
+            }
+        );
+        assert!(!format!("{selection:?}").contains("fixture-secret"));
+        assert_eq!(
+            fs::read(&fixture.config).expect("read unchanged fixture"),
+            original
+        );
+    }
+
+    #[test]
+    fn selections_are_optional_and_never_inferred_or_coerced() {
+        let fixture = Fixture::new(
+            br#"model = 123
+model_reasoning_effort = ["high"]
+model_provider = "native"
+[model_providers.native]
+model = "not-a-top-level-selection"
+api_key = "fixture-secret"
+"#,
+        );
+        assert_eq!(
+            read_selection(&fixture.config).expect("read valid TOML"),
+            Some(CodexSelection {
+                model_provider: Some("native".to_owned()),
+                ..CodexSelection::default()
+            })
+        );
+        let empty = Fixture::new(b"# native defaults\n");
+        assert_eq!(
+            read_selection(&empty.config).expect("read config without selections"),
+            Some(CodexSelection::default())
+        );
+        assert_eq!(
+            read_selection(&empty.root.join("missing.toml")).expect("missing config is allowed"),
+            None
+        );
+    }
+
+    #[test]
+    fn malformed_config_diagnostics_never_include_secrets_or_source() {
+        let fixture = Fixture::new(
+            b"model='selected'\napi_key='fixture-secret-root'\nmodel_provider=\"fixture-secret-unclosed\n",
+        );
+        let error = read_selection(&fixture.config).expect_err("malformed TOML must fail");
+        assert_eq!(error, CodexConfigError::InvalidToml { line: Some(3) });
+        let diagnostics = format!("{error} {error:?}");
+        assert!(!diagnostics.contains("fixture-secret"));
+        assert!(!diagnostics.contains("api_key"));
+        assert!(diagnostics.contains("line 3"));
+    }
+
+    #[test]
+    fn selection_uses_the_existing_file_and_encoding_limits() {
+        let fixture = Fixture::new(b"\xfffixture-secret");
+        assert_eq!(
+            read_selection(&fixture.config),
+            Err(CodexConfigError::InvalidUtf8)
+        );
+        assert_eq!(
+            read_selection(&fixture.root),
+            Err(CodexConfigError::NotAFile)
+        );
+        File::create(&fixture.config)
+            .expect("replace owned fixture")
+            .set_len(MAX_CONFIG_BYTES + 1)
+            .expect("create oversized sparse fixture");
+        assert_eq!(
+            read_selection(&fixture.config),
+            Err(CodexConfigError::TooLarge)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selection_refuses_symlinks_instead_of_following_them() {
+        let fixture = Fixture::new(b"model='selected'\napi_key='fixture-secret'");
+        let link = fixture.root.join("linked.toml");
+        std::os::unix::fs::symlink(&fixture.config, &link).expect("link owned fixture");
+        assert_eq!(read_selection(&link), Err(CodexConfigError::Symlink));
     }
 }

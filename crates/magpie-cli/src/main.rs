@@ -62,6 +62,8 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
         }
         "agents" => agents_command(args),
         "config" => config_command(args),
+        "models" => models_command(args),
+        "gui" => gui_command(args),
         "serve" => serve_command(args),
         "status" => status_command(args),
         _ => Err("unknown command; try 'magpie --help'".to_owned()),
@@ -71,16 +73,36 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
 fn agents_command(mut args: impl Iterator<Item = String>) -> Result<(), String> {
     match args.next().as_deref() {
         None => {
-            print_agent_status(&agents::discover_codex());
+            let installed = agents::discover_installed_agents();
+            if installed.is_empty() {
+                println!("No supported agents found on PATH");
+            }
+            for agent in installed {
+                if agent.id == "codex" {
+                    print_agent_status(&agents::discover_codex());
+                } else {
+                    println!(
+                        "{}\n  binary: {}\n  config: not checked",
+                        agent.name,
+                        agent.executable.display()
+                    );
+                }
+            }
             Ok(())
         }
         Some("--json") => {
             reject_extra_args(args)?;
-            let discovery = agents::discover_codex();
+            let items = agents::discover_installed_agents().iter().map(|agent| {
+                if agent.id == "codex" {
+                    agent_json(&agents::discover_codex())
+                } else {
+                    format!("{{\"id\":\"{}\",\"name\":\"{}\",\"installed\":true,\"binary_path\":{},\"config_path\":null,\"config_state\":\"not_checked\"}}", agent.id, agent.name, optional_json_path(Some(&agent.executable)))
+                }
+            }).collect::<Vec<_>>().join(",");
             println!(
                 "{{\"version\":\"{}\",\"items\":[{}]}}",
                 json_escape(magpie_core::VERSION),
-                agent_json(&discovery),
+                items,
             );
             Ok(())
         }
@@ -232,7 +254,7 @@ fn agent_json(discovery: &CodexDiscovery) -> String {
     let binary_path = optional_json_path(discovery.executable.as_deref());
     let config_path = optional_json_path(discovery.config_path.as_deref());
     format!(
-        "{{\"id\":\"codex\",\"installed\":{},\"binary_path\":{},\"config_path\":{},\"config_state\":\"{}\",\"config_error_line\":{}}}",
+        "{{\"id\":\"codex\",\"name\":\"Codex\",\"installed\":{},\"binary_path\":{},\"config_path\":{},\"config_state\":\"{}\",\"config_error_line\":{},\"model\":{},\"model_provider\":{},\"reasoning_effort\":{}}}",
         discovery.executable.is_some(),
         binary_path,
         config_path,
@@ -241,7 +263,16 @@ fn agent_json(discovery: &CodexDiscovery) -> String {
             .config_error_line
             .map(|line| line.to_string())
             .unwrap_or_else(|| "null".to_owned()),
+        optional_json_string(discovery.selection.model.as_deref()),
+        optional_json_string(discovery.selection.model_provider.as_deref()),
+        optional_json_string(discovery.selection.model_reasoning_effort.as_deref()),
     )
+}
+
+fn optional_json_string(value: Option<&str>) -> String {
+    value
+        .map(|value| format!("\"{}\"", json_escape(value)))
+        .unwrap_or_else(|| "null".to_owned())
 }
 
 fn optional_json_path(path: Option<&std::path::Path>) -> String {
@@ -265,6 +296,15 @@ fn print_agent_status(discovery: &CodexDiscovery) {
     }
     if let Some(line) = discovery.config_error_line {
         println!("  TOML: invalid near line {line}");
+    }
+    for (label, value) in [
+        ("model", &discovery.selection.model),
+        ("provider", &discovery.selection.model_provider),
+        ("effort", &discovery.selection.model_reasoning_effort),
+    ] {
+        if let Some(value) = value {
+            println!("  {label}: {value}");
+        }
     }
 }
 
@@ -309,7 +349,7 @@ fn status_command(mut args: impl Iterator<Item = String>) -> Result<(), String> 
 
     if json {
         println!(
-            "{{\"version\":\"{}\",\"gateway\":\"not_started\",\"gateway_bind\":\"{}\",\"os\":\"{}\",\"arch\":\"{}\",\"config_dir\":\"{}\"}}",
+            "{{\"version\":\"{}\",\"gateway\":\"not_checked\",\"gateway_bind\":\"{}\",\"os\":\"{}\",\"arch\":\"{}\",\"config_dir\":\"{}\"}}",
             json_escape(magpie_core::VERSION),
             json_escape(&gateway_bind.to_string()),
             json_escape(os),
@@ -318,7 +358,7 @@ fn status_command(mut args: impl Iterator<Item = String>) -> Result<(), String> 
         );
     } else {
         println!("magpie {}", magpie_core::VERSION);
-        println!("gateway: not started");
+        println!("gateway: not checked (use GET /health on the listener)");
         println!("gateway bind: {gateway_bind}");
         println!("platform: {os}/{arch}");
         println!("config: {}", config_dir.display());
@@ -328,21 +368,39 @@ fn status_command(mut args: impl Iterator<Item = String>) -> Result<(), String> 
 }
 
 fn serve_command(mut args: impl Iterator<Item = String>) -> Result<(), String> {
-    let address = match args.next() {
-        None => magpie_service::default_gateway_addr(),
-        Some(option) if option == "--listen" => args
-            .next()
-            .ok_or_else(|| "--listen requires a loopback socket address".to_owned())?
-            .parse::<std::net::SocketAddr>()
-            .map_err(|_| "invalid Gateway socket address".to_owned())?,
-        Some(_) => return Err("usage: magpie serve [--listen 127.0.0.1:PORT]".to_owned()),
-    };
-    reject_extra_args(args)?;
-    let server = magpie_service::GatewayServer::bind_with_limits(
+    let mut address = None;
+    let mut catalog_path = None;
+    while let Some(option) = args.next() {
+        match option.as_str() {
+            "--listen" if address.is_none() => {
+                address = Some(
+                    args.next()
+                        .ok_or_else(|| "--listen requires a loopback socket address".to_owned())?
+                        .parse::<std::net::SocketAddr>()
+                        .map_err(|_| "invalid Gateway socket address".to_owned())?,
+                );
+            }
+            "--catalog" if catalog_path.is_none() => {
+                catalog_path = Some(
+                    args.next()
+                        .ok_or_else(|| "--catalog requires a path".to_owned())?,
+                );
+            }
+            _ => {
+                return Err(
+                    "usage: magpie serve [--listen 127.0.0.1:PORT] [--catalog PATH]".to_owned(),
+                );
+            }
+        }
+    }
+    let address = address.unwrap_or_else(magpie_service::default_gateway_addr);
+    let catalog = load_catalog(catalog_path.as_deref())?;
+    let server = magpie_service::GatewayServer::bind_with_catalog(
         address,
         magpie_service::GatewayLimits::default(),
+        catalog,
     )
-    .map_err(|_| "gateway_bind_failed: cannot bind the local Gateway".to_owned())?;
+    .map_err(|error| format!("gateway_bind_failed: cannot bind {address}: {error}"))?;
     let address = server
         .local_addr()
         .map_err(|_| "gateway_bind_failed: cannot inspect the local Gateway address".to_owned())?;
@@ -350,6 +408,56 @@ fn serve_command(mut args: impl Iterator<Item = String>) -> Result<(), String> {
     server
         .run()
         .map_err(|_| "gateway_runtime_error: the local Gateway stopped unexpectedly".to_owned())
+}
+
+fn load_catalog(path: Option<&str>) -> Result<magpie_core::catalog::Catalog, String> {
+    match path {
+        Some(path) => magpie_core::catalog::Catalog::load(std::path::Path::new(path))
+            .map_err(|error| format!("catalog_error: {error}")),
+        None => Ok(magpie_core::catalog::Catalog::default()),
+    }
+}
+
+fn models_command(mut args: impl Iterator<Item = String>) -> Result<(), String> {
+    let mut path = None;
+    let mut json = false;
+    while let Some(option) = args.next() {
+        match option.as_str() {
+            "--catalog" if path.is_none() => {
+                path = Some(
+                    args.next()
+                        .ok_or_else(|| "--catalog requires a path".to_owned())?,
+                );
+            }
+            "--json" if !json => json = true,
+            _ => return Err("usage: magpie models [--catalog PATH] [--json]".to_owned()),
+        }
+    }
+    let catalog = load_catalog(path.as_deref())?;
+    println!("{}", catalog.models_json());
+    Ok(())
+}
+
+fn gui_command(mut args: impl Iterator<Item = String>) -> Result<(), String> {
+    match args.next().as_deref() {
+        None | Some("agents") => reject_extra_args(args)?,
+        Some(_) => return Err("usage: magpie gui [agents]".to_owned()),
+    }
+    let sibling = env::current_exe().ok().and_then(|path| {
+        path.parent()
+            .map(|parent| parent.join(format!("magpie-desktop{}", env::consts::EXE_SUFFIX)))
+    });
+    let program = sibling
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| std::path::PathBuf::from("magpie-desktop"));
+    let status = std::process::Command::new(program)
+        .status()
+        .map_err(|error| format!("gui_unavailable: install the GPUI desktop package: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("gui_failed: desktop process exited with {status}"))
+    }
 }
 
 fn reject_extra_args(mut args: impl Iterator<Item = String>) -> Result<(), String> {
@@ -380,7 +488,7 @@ fn json_escape(value: &str) -> String {
 
 fn print_help() {
     println!(
-        "magpie {}\n\nUsage:\n  magpie <command> [options]\n\nCommands:\n  agents [--json]       Discover Codex and inspect its config path\n  agents status codex   Show Codex discovery status\n  agents connect codex  Preview a reversible config change (requires --dry-run)\n  config path [--json]  Show the configuration directory\n  serve [--listen ADDR] Run the loopback Gateway without opening the GUI\n  status [--json]       Show version and target platform\n  --help                Show this help\n  --version             Show version",
+        "magpie {}\n\nUsage:\n  magpie <command> [options]\n\nCommands:\n  agents [--json]       Discover Codex and inspect its config path\n  agents status codex   Show Codex discovery status\n  agents connect codex  Preview a reversible config change (requires --dry-run)\n  config path [--json]  Show the configuration directory\n  models [--catalog PATH] [--json]  List configured provider/model IDs\n  serve [--listen ADDR] [--catalog PATH]  Run the loopback Gateway\n  gui [agents]          Open the GPUI desktop application\n  status [--json]       Show version and target platform\n  --help                Show this help\n  --version             Show version",
         magpie_core::VERSION
     );
 }

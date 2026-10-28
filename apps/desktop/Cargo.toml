@@ -3,13 +3,12 @@ resolver = "3"
 
 [package]
 name = "magpie-desktop"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 
 [dependencies]
 magpie-core = { path = "../../crates/magpie-core" }
-magpie-service = { path = "../../crates/magpie-service" }
 gpui = { git = "https://github.com/zed-industries/zed", rev = "37faef81f74fc1bb08be9939c4cffc8ede6ced2f", default-features = false }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "37faef81f74fc1bb08be9939c4cffc8ede6ced2f", default-features = false, features = ["font-kit", "wayland", "x11"] }
 

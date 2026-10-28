@@ -1,0 +1,207 @@
+name: Build release packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Source commit SHA or tag (for the final build use v0.2.0)
+        required: true
+        type: string
+      version:
+        description: Package version without v (early preview)
+        required: true
+        default: 0.2.0
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    name: Resolve one source commit
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - id: source
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          python scripts/package-release.py --version "$RELEASE_VERSION" --check-version
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  cli:
+    name: CLI / ${{ matrix.target }}
+    needs: source
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+          - runner: windows-2025
+            target: aarch64-pc-windows-msvc
+    defaults:
+      run:
+        shell: bash
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+      RELEASE_TARGET: ${{ matrix.target }}
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+    steps:
+      - name: Set build paths
+        run: |
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/magpie-rs-target" >> "$GITHUB_ENV"
+          echo "RELEASE_OUT=$RUNNER_TEMP/magpie-rs-dist" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Select current stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustup target add "$RELEASE_TARGET"
+          rustc -Vv
+          cargo -V
+      - name: Linux packaging tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes dpkg-dev libarchive-tools zstd
+      - name: Windows NSIS
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\NSIS\makensis.exe")) {
+            choco install nsis --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          "${env:ProgramFiles(x86)}\NSIS" | Out-File -FilePath $env:GITHUB_PATH -Append
+      - name: Build native CLI
+        run: |
+          python scripts/package-release.py --version "$RELEASE_VERSION" --check-version
+          cargo build --release --locked --package magpie-cli --target "$RELEASE_TARGET"
+      - name: CLI smoke check
+        if: matrix.target != 'aarch64-pc-windows-msvc'
+        run: |
+          extension=""
+          if [[ "$RUNNER_OS" == "Windows" ]]; then extension=".exe"; fi
+          "$CARGO_TARGET_DIR/$RELEASE_TARGET/release/magpie$extension" --help
+      - name: Create archives and native installers
+        run: |
+          extension=""
+          if [[ "$RUNNER_OS" == "Windows" ]]; then extension=".exe"; fi
+          native=(--native-packages)
+          if [[ "$RELEASE_TARGET" == "aarch64-pc-windows-msvc" ]]; then native=(); fi
+          python scripts/package-release.py \
+            --version "$RELEASE_VERSION" --target "$RELEASE_TARGET" \
+            --binary "$CARGO_TARGET_DIR/$RELEASE_TARGET/release/magpie$extension" \
+            --out-dir "$RELEASE_OUT" "${native[@]}"
+      - name: Upload packages for parent repository
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: magpie-rs-${{ inputs.version }}-${{ matrix.target }}-cli
+          path: ${{ env.RELEASE_OUT }}/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  desktop:
+    name: GPUI desktop / ${{ matrix.target }}
+    needs: source
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: windows-2025
+            target: x86_64-pc-windows-msvc
+    defaults:
+      run:
+        shell: bash
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+      RELEASE_TARGET: ${{ matrix.target }}
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+    steps:
+      - name: Set build paths
+        run: |
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/magpie-rs-desktop-target" >> "$GITHUB_ENV"
+          echo "RELEASE_OUT=$RUNNER_TEMP/magpie-rs-desktop-dist" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: Select current stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustup target add "$RELEASE_TARGET"
+          rustc -Vv
+      - name: Windows desktop packaging prerequisites
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\NSIS\makensis.exe")) {
+            choco install nsis --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          "${env:ProgramFiles(x86)}\NSIS" | Out-File -FilePath $env:GITHUB_PATH -Append
+          if (-not (Test-Path "$env:ProgramFiles\LLVM\bin\libclang.dll")) {
+            choco install llvm --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          "LIBCLANG_PATH=$env:ProgramFiles\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - name: Build desktop and sibling CLI
+        run: |
+          python scripts/package-release.py --version "$RELEASE_VERSION" --check-version
+          cargo build --release --locked --package magpie-cli --target "$RELEASE_TARGET"
+          cargo build --manifest-path apps/desktop/Cargo.toml --release --locked --target "$RELEASE_TARGET"
+      - name: Create GUI archive and native installer
+        run: |
+          extension=""
+          if [[ "$RUNNER_OS" == "Windows" ]]; then extension=".exe"; fi
+          python scripts/package-release.py \
+            --version "$RELEASE_VERSION" --target "$RELEASE_TARGET" \
+            --binary "$CARGO_TARGET_DIR/$RELEASE_TARGET/release/magpie$extension" \
+            --desktop-binary "$CARGO_TARGET_DIR/$RELEASE_TARGET/release/magpie-desktop$extension" \
+            --out-dir "$RELEASE_OUT" --native-packages
+      - name: Upload desktop packages for parent repository
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: magpie-rs-${{ inputs.version }}-${{ matrix.target }}-gui
+          path: ${{ env.RELEASE_OUT }}/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

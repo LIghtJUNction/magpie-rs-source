@@ -2701,25 +2701,17 @@ checksum = "fc04a4c58212d57930a24bf47d3fa87485264a3a054e9c10e042eb373573ad3c"
 
 [[package]]
 name = "magpie-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "toml_edit 0.25.17+spec-1.1.0",
 ]
 
 [[package]]
 name = "magpie-desktop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gpui",
  "gpui_platform",
- "magpie-core",
- "magpie-service",
-]
-
-[[package]]
-name = "magpie-service"
-version = "0.1.0"
-dependencies = [
  "magpie-core",
 ]
 

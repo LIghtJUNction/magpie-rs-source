@@ -26,7 +26,7 @@ dependencies = [
 
 [[package]]
 name = "magpie-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "magpie-core",
  "magpie-service",
@@ -34,14 +34,14 @@ dependencies = [
 
 [[package]]
 name = "magpie-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "toml_edit",
 ]
 
 [[package]]
 name = "magpie-service"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "magpie-core",
 ]

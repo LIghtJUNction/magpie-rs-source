@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: 0BSD
+# Maintainer: Magpie Rust contributors
+pkgname=magpie-rs-bin
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc='Magpie Rust early preview: CLI and GPUI desktop'
+arch=('x86_64')
+url='https://github.com/LIghtJUNction/magpie-rs'
+license=('MIT')
+depends=('glibc>=2.44' 'gcc-libs' 'fontconfig' 'freetype2' 'libxcb'
+         'libxkbcommon' 'libxkbcommon-x11' 'libx11' 'libxi' 'libxrandr' 'wayland'
+         'vulkan-icd-loader' 'libxcursor' 'openssl' 'zlib')
+provides=('magpie' 'magpie-rs')
+conflicts=('magpie' 'magpie-git' 'magpie-bin' 'magpie-rs' 'magpie-rs-git' 'magpie-rs-cli')
+source=("https://github.com/LIghtJUNction/magpie-rs/releases/download/v${pkgver}/magpie-rs-${pkgver}-x86_64-unknown-linux-gnu.tar.gz"
+        "https://github.com/LIghtJUNction/magpie-rs/releases/download/v${pkgver}/magpie-rs-gui-${pkgver}-x86_64-unknown-linux-gnu.tar.gz")
+sha256sums=('@CLI_SHA256@' '@GUI_SHA256@')
+
+package() {
+  local cli="${srcdir}/magpie-rs-${pkgver}-x86_64-unknown-linux-gnu"
+  local gui="${srcdir}/magpie-rs-gui-${pkgver}-x86_64-unknown-linux-gnu"
+  install -Dm755 "${cli}/bin/magpie" "${pkgdir}/usr/bin/magpie"
+  install -Dm755 "${gui}/bin/magpie-desktop" "${pkgdir}/usr/bin/magpie-desktop"
+  install -Dm644 "${gui}/share/applications/magpie-rs.desktop" \
+    "${pkgdir}/usr/share/applications/magpie-rs.desktop"
+  install -Dm644 "${gui}/share/icons/hicolor/scalable/apps/magpie-rs.svg" \
+    "${pkgdir}/usr/share/icons/hicolor/scalable/apps/magpie-rs.svg"
+  install -Dm644 "${cli}/LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+  install -Dm644 "${cli}/BUILD-METADATA.json" "${pkgdir}/usr/share/doc/${pkgname}/CLI-BUILD-METADATA.json"
+  install -Dm644 "${gui}/BUILD-METADATA.json" "${pkgdir}/usr/share/doc/${pkgname}/GUI-BUILD-METADATA.json"
+}

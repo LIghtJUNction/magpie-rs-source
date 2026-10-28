@@ -62,7 +62,7 @@ def source_digest(root: Path) -> str:
         path
         for path in root.rglob("*")
         if path.is_file()
-        and "benchmark" not in path.relative_to(root).parts
+        and (path.parent == root or path.relative_to(root).parts[0] == "crates")
         and (path.suffix in {".rs", ".toml"} or path.name == "Cargo.lock")
         and "target" not in path.parts
     )
@@ -143,11 +143,14 @@ def validate(case: str, code: int, stdout: bytes, stderr: bytes, fixture: Path) 
             or not item["installed"]
             or item["config_state"] != "valid_toml"
             or item["config_path"] != str(fixture / "codex" / "config.toml")
+            or item["model"] != "fixture/provider-model"
+            or item["model_provider"] is not None
+            or item["reasoning_effort"] is not None
         ):
             raise RuntimeError(f"{case}: incorrect discovery result {value!r}")
     elif case == "status_json":
         value = json.loads(text)
-        if value["gateway"] != "not_started" or not value["config_dir"]:
+        if value["gateway"] != "not_checked" or not value["config_dir"]:
             raise RuntimeError(f"{case}: incorrect status result {value!r}")
     elif case == "config_path_json":
         value = json.loads(text)
@@ -288,6 +291,7 @@ def main() -> int:
         "timestamp_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
         "git_head": git_head(root),
         "source_tree_sha256": source_digest(root),
+        "source_scope": "workspace Cargo manifests/lock and crates Rust/TOML files; excludes independent GPUI app",
         "binary": str(binary),
         "binary_size_bytes": binary.stat().st_size,
         "binary_sha256": sha256(binary.read_bytes()),
@@ -299,7 +303,7 @@ def main() -> int:
         "machine": machine,
         "measurement": {
             "boundary": "parent fork to stdout/stderr EOF and wait4 child exit",
-            "rss_source": "Linux wait4 ru_maxrss for the CLI process, converted from KiB",
+            "rss_source": "Linux wait4 ru_maxrss across fork and exec, converted from KiB; includes Python child before exec and is an upper bound, not target-only CLI RSS",
             "warmup_runs_per_case": options.warmup,
             "cold_cache_runs": 0,
             "serial_cases": True,

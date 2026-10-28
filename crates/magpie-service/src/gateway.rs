@@ -3,6 +3,8 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
+use magpie_core::catalog::Catalog;
+
 #[path = "http.rs"]
 mod http;
 
@@ -38,6 +40,7 @@ impl Default for GatewayLimits {
 pub struct GatewayServer {
     listener: TcpListener,
     limits: GatewayLimits,
+    models_json: Arc<str>,
 }
 
 impl GatewayServer {
@@ -59,6 +62,21 @@ impl GatewayServer {
     ///
     /// Returns an error if the address is not loopback or cannot be bound.
     pub fn bind_with_limits(addr: SocketAddr, limits: GatewayLimits) -> io::Result<Self> {
+        Self::bind_with_catalog(addr, limits, Catalog::default())
+    }
+
+    /// Binds a loopback listener serving an immutable configured model catalog.
+    ///
+    /// The model list is prepared once and shared among request workers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the address is not loopback or cannot be bound.
+    pub fn bind_with_catalog(
+        addr: SocketAddr,
+        limits: GatewayLimits,
+        catalog: Catalog,
+    ) -> io::Result<Self> {
         if !addr.ip().is_loopback() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -66,7 +84,11 @@ impl GatewayServer {
             ));
         }
         let listener = TcpListener::bind(addr)?;
-        Ok(Self { listener, limits })
+        Ok(Self {
+            listener,
+            limits,
+            models_json: Arc::from(catalog.models_json()),
+        })
     }
 
     /// Returns the address selected by the operating system.
@@ -92,6 +114,7 @@ impl GatewayServer {
         for index in 0..worker_count {
             let receiver = Arc::clone(&receiver);
             let limits = self.limits;
+            let models_json = Arc::clone(&self.models_json);
             thread::Builder::new()
                 .name(format!("magpie-gateway-{index}"))
                 .stack_size(512 * 1024)
@@ -106,7 +129,7 @@ impl GatewayServer {
                         let Ok(stream) = stream else {
                             break;
                         };
-                        http::handle_connection(stream, limits);
+                        http::handle_connection(stream, limits, &models_json);
                     }
                 })?;
         }

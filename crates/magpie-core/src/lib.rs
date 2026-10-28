@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod catalog;
 pub mod codex_config;
 pub mod gateway;
 pub mod paths;
