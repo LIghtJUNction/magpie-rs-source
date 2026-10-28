@@ -9,12 +9,18 @@
 //! The containing directory must already exist and must not be writable by
 //! another Unix user/group. Symlink components and nonregular files are refused.
 //!
-//! `create_new` provides a cooperative lock. Exact bytes AND file identity are
-//! checked again immediately before atomic replacement. Portable filesystem
+//! A persistent `lock-v2` inode is locked through the OS and hardlinked as `lock`
+//! before mutation. Closing the descriptor (including on process death) releases
+//! the lock; neither name is ever unlinked by this protocol. The legacy name
+//! prevents older `create_new` clients from entering. An existing legacy lock
+//! without that exact hardlink relationship remains busy and is never adopted.
+//!
+//! Exact bytes AND file identity are checked again before atomic replacement.
+//! Portable filesystem
 //! rename is not compare-and-swap: a noncooperating writer can still win the
 //! interval between that check and rename. Agent quiescence and native filesystem
 //! integration tests remain required before shipping automatic configuration
-//! mutation. Stale locks are deliberately not broken automatically.
+//! mutation.
 //!
 //! All new plaintext fragments, including staging files, stay in the private
 //! same-filesystem state directory and count against its storage limit. Abandoned
@@ -79,7 +85,7 @@ impl fmt::Display for TransactionError {
             Self::Read => "configuration or recovery state could not be read",
             Self::Write => "transaction data could not be persisted before target replacement",
             Self::LockBusy => {
-                "another transaction or a stale cooperative lock blocks this operation"
+                "another transaction or an unrecognized legacy lock blocks this operation"
             }
             Self::UnknownProvider => {
                 "an unowned Magpie provider already exists; explicit reconciliation is required"
@@ -236,12 +242,74 @@ pub fn connection_status(path: &Path) -> Result<ConnectionStatus, TransactionErr
 pub mod test_support {
     use super::TransactionError;
     use std::cell::RefCell;
+    use std::marker::PhantomData;
     use std::path::{Path, PathBuf};
+    use std::rc::Rc;
+    use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
     pub const CRASH_EXIT: i32 = 86;
 
+    // CLOEXEC closes inherited descriptors at exec, not fork. Keep test-worker
+    // spawning out of parent descriptor lifetimes without serializing
+    // independent transactions or the lifetime of a paused worker.
+    static FORK_GATE: RwLock<()> = RwLock::new(());
+
+    struct DescriptorScopes {
+        depth: usize,
+        guard: Option<RwLockReadGuard<'static, ()>>,
+    }
+
+    thread_local! {
+        static DESCRIPTOR_SCOPES: RefCell<DescriptorScopes> = const {
+            RefCell::new(DescriptorScopes { depth: 0, guard: None })
+        };
+    }
+
+    /// Prevent unrelated test workers from inheriting this thread's lock FDs.
+    #[derive(Debug)]
+    pub struct DescriptorScope(PhantomData<Rc<()>>);
+
+    /// Nestable on one thread; operations on different threads share the gate.
+    pub fn descriptor_scope() -> DescriptorScope {
+        DESCRIPTOR_SCOPES.with(|scopes| {
+            let mut scopes = scopes.borrow_mut();
+            if scopes.depth == 0 {
+                scopes.guard = Some(FORK_GATE.read().expect("test fork gate poisoned"));
+            }
+            scopes.depth += 1;
+        });
+        DescriptorScope(PhantomData)
+    }
+
+    impl Drop for DescriptorScope {
+        fn drop(&mut self) {
+            DESCRIPTOR_SCOPES.with(|scopes| {
+                let mut scopes = scopes.borrow_mut();
+                scopes.depth -= 1;
+                if scopes.depth == 0 {
+                    scopes.guard = None;
+                }
+            });
+        }
+    }
+
+    /// Hold only through Command::spawn, releasing before waiting on the worker.
+    pub fn spawn_scope() -> RwLockWriteGuard<'static, ()> {
+        DESCRIPTOR_SCOPES.with(|scopes| {
+            assert_eq!(
+                scopes.borrow().depth,
+                0,
+                "a test must close its transaction descriptors before spawning a worker"
+            );
+        });
+        FORK_GATE.write().expect("test fork gate poisoned")
+    }
+
     #[derive(Clone, Copy, PartialEq, Eq)]
     pub enum Point {
+        LockCreated,
+        LockAcquired,
+        LegacyLockLinked,
         StageSynced,
         ImageSynced,
         BeforeInstall,
@@ -251,6 +319,8 @@ pub mod test_support {
     pub enum Action {
         Fail,
         Exit,
+        /// Notify the parent, which kills this process without running Drop.
+        Pause,
     }
 
     struct Fault {
@@ -293,6 +363,14 @@ pub mod test_support {
         match action {
             Some(Action::Fail) => Err(TransactionError::Write),
             Some(Action::Exit) => std::process::exit(CRASH_EXIT),
+            Some(Action::Pause) => {
+                use std::io::Write;
+                println!("magpie-transaction-checkpoint");
+                std::io::stdout().flush().expect("flush fixture checkpoint");
+                loop {
+                    std::thread::park();
+                }
+            }
             None => Ok(()),
         }
     }
@@ -301,6 +379,7 @@ pub mod test_support {
 #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
 mod native {
     use super::{ConnectionStatus, DisconnectOutcome, OWNED_FIELDS, TransactionError as Error};
+    use rustix::fs::{FlockOperation, flock};
     use std::ffi::OsStr;
     use std::fs::{self, DirBuilder, File, Metadata, OpenOptions};
     use std::io::{Read, Write};
@@ -316,6 +395,8 @@ mod native {
     const MAX_JOURNAL_BYTES: u64 = 16 * 1024;
     const MAX_STATE_BYTES: u64 = 128 * 1024 * 1024;
     const MAX_STATE_ENTRIES: usize = 256;
+    const LOCK_NAME: &str = "lock-v2";
+    const LEGACY_LOCK_NAME: &str = "lock";
     const PROVIDER_KEYS: [&str; 5] = [
         "name",
         "base_url",
@@ -455,19 +536,6 @@ mod native {
         _file: File,
     }
 
-    impl Drop for Lock {
-        fn drop(&mut self) {
-            if let Ok(meta) = fs::symlink_metadata(&self.path) {
-                if !meta.file_type().is_symlink() && (meta.dev(), meta.ino()) == self.identity {
-                    let _ = fs::remove_file(&self.path);
-                    if let Some(parent) = self.path.parent() {
-                        let _ = sync_dir(parent);
-                    }
-                }
-            }
-        }
-    }
-
     struct Stage {
         path: PathBuf,
         identity: (u64, u64),
@@ -487,10 +555,12 @@ mod native {
     }
 
     pub(super) fn prepare(path: &Path, model: &str, gateway: SocketAddr) -> Result<Plan, Error> {
+        #[cfg(test)]
+        let _descriptor_scope = super::test_support::descriptor_scope();
         validate_model(model)?;
         validate_gateway(gateway)?;
         let target = target(path, true)?;
-        check_no_lock(&target)?;
+        let lock = existing_lock(&target)?;
         require_inactive(read_journal(&target)?.as_ref())?;
         let original = read_config(&target.path, true)?;
         let connected = build_connected(original.bytes.as_deref(), model, gateway)?;
@@ -501,7 +571,7 @@ mod native {
             .enumerate()
             .filter_map(|(index, name)| (!owned_equal(&before, &after, index)).then_some(*name))
             .collect();
-        check_no_lock(&target)?;
+        recheck_read_lock(&target, lock.as_ref())?;
         Ok(Plan {
             target,
             original,
@@ -511,6 +581,8 @@ mod native {
     }
 
     pub(super) fn commit(plan: Plan) -> Result<ConnectionStatus, Error> {
+        #[cfg(test)]
+        let _descriptor_scope = super::test_support::descriptor_scope();
         let target = plan.target;
         recheck_parent(&target, true)?;
         let _lock = acquire_lock(&target, true)?;
@@ -572,8 +644,10 @@ mod native {
     }
 
     pub(super) fn status(path: &Path) -> Result<ConnectionStatus, Error> {
+        #[cfg(test)]
+        let _descriptor_scope = super::test_support::descriptor_scope();
         let target = target(path, false)?;
-        check_no_lock(&target)?;
+        let lock = existing_lock(&target)?;
         let result = match read_journal(&target)? {
             None => ConnectionStatus::Unmanaged,
             Some(journal) => match journal.phase {
@@ -585,11 +659,13 @@ mod native {
                 }
             },
         };
-        check_no_lock(&target)?;
+        recheck_read_lock(&target, lock.as_ref())?;
         Ok(result)
     }
 
     pub(super) fn disconnect(path: &Path) -> Result<DisconnectOutcome, Error> {
+        #[cfg(test)]
+        let _descriptor_scope = super::test_support::descriptor_scope();
         let target = target(path, true)?;
         let _lock = acquire_lock(&target, false)?;
         let mut journal = read_journal(&target)?.ok_or(Error::NotManaged)?;
@@ -707,6 +783,11 @@ mod native {
             if let Some(staged) = staged.as_mut() {
                 install_stage(staged, &target.path)?;
             } else {
+                #[cfg(test)]
+                super::test_support::checkpoint(
+                    super::test_support::Point::BeforeInstall,
+                    &target.path,
+                )?;
                 fs::remove_file(&target.path).map_err(|_| Error::Write)?;
             }
             sync_dir(&target.parent).map_err(|_| Error::CommitUncertain)?;
@@ -1176,17 +1257,6 @@ mod native {
         }
     }
 
-    fn check_no_lock(target: &Target) -> Result<(), Error> {
-        if state_exists(target)? {
-            match fs::symlink_metadata(target.state.join("lock")) {
-                Ok(_) => return Err(Error::LockBusy),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
-                Err(_) => return Err(Error::Read),
-            }
-        }
-        Ok(())
-    }
-
     fn acquire_lock(target: &Target, create: bool) -> Result<Lock, Error> {
         if !state_exists(target)? {
             if !create {
@@ -1199,28 +1269,163 @@ mod native {
             }
             state_exists(target)?;
         }
-        let path = target.state.join("lock");
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-            .map_err(|error| {
+        let guard = if let Some(lock) = existing_lock(target)? {
+            lock
+        } else {
+            // Count both permanent directory entries before creating either.
+            // A crash here can leave a valid, empty lock-v2 without its alias.
+            ensure_budget(target, 0, 2)?;
+            let path = target.state.join(LOCK_NAME);
+            match OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+            {
+                Ok(file) => {
+                    #[cfg(test)]
+                    super::test_support::checkpoint(
+                        super::test_support::Point::LockCreated,
+                        &target.state,
+                    )?;
+                    lock_file(target, file)?
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    existing_lock(target)?.ok_or(Error::OriginalChanged)?
+                }
+                Err(_) => return Err(Error::Write),
+            }
+        };
+        #[cfg(test)]
+        super::test_support::checkpoint(super::test_support::Point::LockAcquired, &target.state)?;
+        if !check_lock_names(target, guard.identity)? {
+            ensure_budget(target, 0, 1)?;
+            // link(2) publishes the legacy gate atomically without replacing
+            // any old lock. Both names must bind the inode we actually locked.
+            fs::hard_link(&guard.path, target.state.join(LEGACY_LOCK_NAME)).map_err(|error| {
                 if error.kind() == std::io::ErrorKind::AlreadyExists {
                     Error::LockBusy
                 } else {
                     Error::Write
                 }
             })?;
-        let meta = file.metadata().map_err(|_| Error::Write)?;
-        let guard = Lock {
-            path,
-            identity: (meta.dev(), meta.ino()),
-            _file: file,
-        };
+            #[cfg(test)]
+            super::test_support::checkpoint(
+                super::test_support::Point::LegacyLockLinked,
+                &target.state,
+            )?;
+        }
+        if !check_lock_names(target, guard.identity)? {
+            return Err(Error::OriginalChanged);
+        }
         guard._file.sync_all().map_err(|_| Error::Write)?;
         sync_dir(&target.state)?;
         Ok(guard)
+    }
+
+    fn optional_meta(path: &Path) -> Result<Option<Metadata>, Error> {
+        match fs::symlink_metadata(path) {
+            Ok(meta) => Ok(Some(meta)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(Error::Read),
+        }
+    }
+
+    fn checked_lock_meta(meta: &Metadata) -> Result<(), Error> {
+        if meta.file_type().is_symlink() {
+            return Err(Error::Symlink);
+        }
+        if !meta.is_file() || !(1..=2).contains(&meta.nlink()) {
+            return Err(Error::NotAFile);
+        }
+        if meta.mode() & 0o077 != 0 || meta.len() != 0 {
+            return Err(Error::StateInvalid);
+        }
+        if meta.mode() & 0o600 != 0o600 {
+            return Err(Error::ReadOnly);
+        }
+        Ok(())
+    }
+
+    // The only accepted hardlinks in private state are this exact protocol
+    // pair. An old empty lock has no proof of ownership or process lifetime.
+    fn check_lock_names(target: &Target, identity: (u64, u64)) -> Result<bool, Error> {
+        let named = optional_meta(&target.state.join(LOCK_NAME))?.ok_or(Error::OriginalChanged)?;
+        checked_lock_meta(&named)?;
+        if (named.dev(), named.ino()) != identity {
+            return Err(Error::OriginalChanged);
+        }
+        match optional_meta(&target.state.join(LEGACY_LOCK_NAME))? {
+            Some(legacy)
+                if !legacy.file_type().is_symlink() && (legacy.dev(), legacy.ino()) == identity =>
+            {
+                checked_lock_meta(&legacy)?;
+                if named.nlink() != 2 || legacy.nlink() != 2 {
+                    return Err(Error::StateInvalid);
+                }
+                Ok(true)
+            }
+            Some(_) => Err(Error::LockBusy),
+            None if named.nlink() == 1 => Ok(false),
+            None => Err(Error::StateInvalid),
+        }
+    }
+
+    fn lock_file(target: &Target, file: File) -> Result<Lock, Error> {
+        let meta = file.metadata().map_err(|_| Error::Read)?;
+        checked_lock_meta(&meta)?;
+        flock(&file, FlockOperation::NonBlockingLockExclusive).map_err(|error| {
+            if error == rustix::io::Errno::WOULDBLOCK {
+                Error::LockBusy
+            } else {
+                Error::Write
+            }
+        })?;
+        let guard = Lock {
+            path: target.state.join(LOCK_NAME),
+            identity: (meta.dev(), meta.ino()),
+            _file: file,
+        };
+        check_lock_names(target, guard.identity)?;
+        Ok(guard)
+    }
+
+    fn existing_lock(target: &Target) -> Result<Option<Lock>, Error> {
+        if !state_exists(target)? {
+            return Ok(None);
+        }
+        let path = target.state.join(LOCK_NAME);
+        let Some(meta) = optional_meta(&path)? else {
+            return if optional_meta(&target.state.join(LEGACY_LOCK_NAME))?.is_some() {
+                Err(Error::LockBusy)
+            } else {
+                Ok(None)
+            };
+        };
+        checked_lock_meta(&meta)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(read_flags()?)
+            .open(&path)
+            .map_err(|_| Error::Read)?;
+        let opened = file.metadata().map_err(|_| Error::Read)?;
+        if (opened.dev(), opened.ino()) != (meta.dev(), meta.ino()) {
+            return Err(Error::OriginalChanged);
+        }
+        lock_file(target, file).map(Some)
+    }
+
+    fn recheck_read_lock(target: &Target, lock: Option<&Lock>) -> Result<(), Error> {
+        if let Some(lock) = lock {
+            check_lock_names(target, lock.identity)?;
+        } else if existing_lock(target)?.is_some() {
+            // Read-only preparation/status must not create lock files. If a
+            // writer established the protocol meanwhile, discard that read.
+            return Err(Error::OriginalChanged);
+        }
+        Ok(())
     }
 
     fn require_inactive(journal: Option<&Journal>) -> Result<(), Error> {
@@ -1504,10 +1709,19 @@ mod native {
             }
             let entry = entry.map_err(|_| Error::Read)?;
             let meta = fs::symlink_metadata(entry.path()).map_err(|_| Error::Read)?;
+            let lock_entry =
+                entry.file_name() == LOCK_NAME || entry.file_name() == LEGACY_LOCK_NAME;
+            if lock_entry {
+                checked_lock_meta(&meta)?;
+                let identity = (meta.dev(), meta.ino());
+                if !check_lock_names(target, identity)? && entry.file_name() == LEGACY_LOCK_NAME {
+                    return Err(Error::StateInvalid);
+                }
+            }
             if meta.file_type().is_symlink()
                 || !meta.is_file()
                 || meta.mode() & 0o077 != 0
-                || meta.nlink() != 1
+                || (!lock_entry && meta.nlink() != 1)
             {
                 return Err(Error::StateInvalid);
             }
@@ -1559,5 +1773,571 @@ mod native {
             result.push(char::from(DIGITS[(byte & 15) as usize]));
         }
         result
+    }
+
+    #[cfg(test)]
+    mod lock_tests {
+        use super::super::test_support;
+        use super::*;
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        use std::os::unix::process::ExitStatusExt;
+        use std::process::{Child, Command, Stdio};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        const ORIGINAL: &[u8] = b"# isolated lock fixture\nmodel = 'user/original' # retained\nmodel_provider = 'user'\nunknown_extension = ['a', 'b']\n\n[model_providers.user]\nname = 'synthetic'\nenv_key = 'SYNTHETIC_REFERENCE'\n";
+        const MODEL: &str = "fixture/transaction-lock";
+        const WORKER_ROOT: &str = "MAGPIE_V2_LOCK_TEST_ROOT";
+        const WORKER_OPERATION: &str = "MAGPIE_V2_LOCK_TEST_OPERATION";
+        const WORKER_POINT: &str = "MAGPIE_V2_LOCK_TEST_POINT";
+        const WORKER_OCCURRENCE: &str = "MAGPIE_V2_LOCK_TEST_OCCURRENCE";
+
+        struct Fixture {
+            root: PathBuf,
+            config: PathBuf,
+        }
+
+        impl Fixture {
+            fn new(original: Option<&[u8]>) -> Self {
+                let root = std::env::temp_dir()
+                    .canonicalize()
+                    .expect("canonical temporary directory")
+                    .join(format!("magpie-lock-v2-{}", nonce()));
+                DirBuilder::new()
+                    .mode(0o700)
+                    .create(&root)
+                    .expect("create private synthetic fixture");
+                let config = root.join("config.toml");
+                if let Some(bytes) = original {
+                    write_private(&config, bytes);
+                }
+                Self { root, config }
+            }
+
+            fn target(&self) -> Target {
+                target(&self.config, true).expect("valid fixture target")
+            }
+
+            fn state(&self) -> PathBuf {
+                self.root.join(".config.toml.magpie-state")
+            }
+
+            fn connect(&self) {
+                let plan = prepare(&self.config, MODEL, endpoint()).expect("prepare fixture");
+                assert_eq!(commit(plan), Ok(ConnectionStatus::Connected));
+            }
+
+            fn bytes(&self) -> Option<Vec<u8>> {
+                match fs::read(&self.config) {
+                    Ok(bytes) => Some(bytes),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => panic!("read fixture: {error}"),
+                }
+            }
+
+            fn usage(&self) -> (u64, usize) {
+                fs::read_dir(self.state())
+                    .expect("fixture state entries")
+                    .fold((0, 0), |(bytes, count), entry| {
+                        let meta = entry.expect("fixture entry").metadata().expect("metadata");
+                        (bytes + meta.len(), count + 1)
+                    })
+            }
+
+            fn assert_private(&self) {
+                assert_eq!(
+                    fs::metadata(self.state()).expect("state metadata").mode() & 0o777,
+                    0o700
+                );
+                for entry in fs::read_dir(self.state()).expect("state entries") {
+                    assert_eq!(
+                        entry.expect("entry").metadata().expect("metadata").mode() & 0o777,
+                        0o600
+                    );
+                }
+                if self.config.exists() {
+                    assert_eq!(
+                        fs::metadata(&self.config).expect("config metadata").mode() & 0o777,
+                        0o600
+                    );
+                }
+            }
+        }
+
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.root);
+            }
+        }
+
+        fn write_private(path: &Path, bytes: &[u8]) {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)
+                .expect("create private fixture file");
+            file.write_all(bytes).expect("write fixture file");
+        }
+
+        fn endpoint() -> SocketAddr {
+            "127.0.0.1:3425"
+                .parse()
+                .expect("synthetic loopback endpoint")
+        }
+
+        struct Worker(Child);
+
+        impl Worker {
+            fn paused_at(
+                fixture: &Fixture,
+                operation: &str,
+                point: &str,
+                occurrence: usize,
+            ) -> Self {
+                // Strip the crate name: this module is also compiled by the
+                // existing integration test's #[path] inclusion.
+                let module = module_path!().split_once("::").expect("test module").1;
+                let child = {
+                    let _spawn_scope = test_support::spawn_scope();
+                    Command::new(std::env::current_exe().expect("test executable"))
+                        .args([
+                            "--exact",
+                            &format!("{module}::subprocess_worker"),
+                            "--ignored",
+                            "--nocapture",
+                        ])
+                        .env(WORKER_ROOT, &fixture.root)
+                        .env(WORKER_OPERATION, operation)
+                        .env(WORKER_POINT, point)
+                        .env(WORKER_OCCURRENCE, occurrence.to_string())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::null())
+                        .spawn()
+                        .expect("spawn isolated transaction worker")
+                };
+                let mut worker = Self(child);
+                let stdout = worker.0.stdout.take().expect("worker stdout");
+                let (ready_tx, ready_rx) = mpsc::channel();
+                std::thread::spawn(move || {
+                    let ready = BufReader::new(stdout)
+                        .lines()
+                        .map_while(Result::ok)
+                        .any(|line| line.contains("magpie-transaction-checkpoint"));
+                    let _ = ready_tx.send(ready);
+                });
+                assert_eq!(
+                    ready_rx.recv_timeout(Duration::from_secs(15)),
+                    Ok(true),
+                    "worker must reach {operation}/{point}/{occurrence}"
+                );
+                worker
+            }
+
+            fn kill(mut self) {
+                self.0.kill().expect("SIGKILL paused transaction");
+                let status = self.0.wait().expect("reap killed transaction");
+                assert_eq!(status.signal(), Some(9), "worker was killed without Drop");
+            }
+        }
+
+        impl Drop for Worker {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        #[test]
+        #[ignore = "spawned with a private synthetic fixture by lock tests"]
+        fn subprocess_worker() {
+            let root = PathBuf::from(std::env::var_os(WORKER_ROOT).expect("fixture root"));
+            assert_eq!(
+                root.parent(),
+                Some(
+                    std::env::temp_dir()
+                        .canonicalize()
+                        .expect("temporary directory")
+                        .as_path()
+                )
+            );
+            assert!(
+                root.file_name()
+                    .expect("fixture name")
+                    .to_str()
+                    .expect("ASCII fixture name")
+                    .starts_with("magpie-lock-v2-")
+            );
+            let config = root.join("config.toml");
+            let state = root.join(".config.toml.magpie-state");
+            use test_support::{Action, Point};
+            let (point, path) = match std::env::var(WORKER_POINT).expect("point").as_str() {
+                "created" => (Point::LockCreated, &state),
+                "acquired" => (Point::LockAcquired, &state),
+                "linked" => (Point::LegacyLockLinked, &state),
+                "stage" => (Point::StageSynced, &state),
+                "image" => (Point::ImageSynced, &state),
+                "install" => (Point::BeforeInstall, &config),
+                "parent-sync" => (Point::BeforeDirectorySync, &root),
+                point => panic!("unknown fixture point {point}"),
+            };
+            let occurrence = std::env::var(WORKER_OCCURRENCE)
+                .expect("occurrence")
+                .parse()
+                .expect("numeric occurrence");
+            test_support::arm(point, path, occurrence, Action::Pause);
+            match std::env::var(WORKER_OPERATION).expect("operation").as_str() {
+                "connect" => {
+                    let plan = prepare(&config, MODEL, endpoint()).expect("prepare worker");
+                    commit(plan).expect("commit worker");
+                }
+                "disconnect" => {
+                    disconnect(&config).expect("disconnect worker");
+                }
+                operation => panic!("unknown fixture operation {operation}"),
+            }
+            panic!("worker did not reach its checkpoint");
+        }
+
+        #[test]
+        fn sigkill_connect_releases_lock_and_exposes_recoverable_journal() {
+            for original in [Some(ORIGINAL), None] {
+                for (point, occurrence, expected) in [
+                    ("created", 1, ConnectionStatus::Unmanaged),
+                    ("acquired", 1, ConnectionStatus::Unmanaged),
+                    ("linked", 1, ConnectionStatus::Unmanaged),
+                    ("stage", 1, ConnectionStatus::Unmanaged),
+                    ("image", 1, ConnectionStatus::Unmanaged),
+                    ("install", 1, ConnectionStatus::RecoveryRequired),
+                    ("parent-sync", 2, ConnectionStatus::RecoveryRequired),
+                ] {
+                    let fixture = Fixture::new(original);
+                    Worker::paused_at(&fixture, "connect", point, occurrence).kill();
+                    assert_eq!(status(&fixture.config), Ok(expected), "connect/{point}");
+                    if expected == ConnectionStatus::RecoveryRequired {
+                        disconnect(&fixture.config).expect("recover interrupted connect");
+                    }
+                    assert_eq!(fixture.bytes().as_deref(), original, "connect/{point}");
+                    fixture.connect();
+                    disconnect(&fixture.config).expect("disconnect after killed connect");
+                    assert_eq!(fixture.bytes().as_deref(), original);
+                    fixture.assert_private();
+                }
+            }
+        }
+
+        #[test]
+        fn sigkill_disconnect_can_resume_without_removing_either_lock_name() {
+            for original in [Some(ORIGINAL), None] {
+                for (point, occurrence, expected) in [
+                    ("acquired", 1, ConnectionStatus::Connected),
+                    ("image", 1, ConnectionStatus::Connected),
+                    ("stage", 1, ConnectionStatus::Connected),
+                    ("stage", 2, ConnectionStatus::RecoveryRequired),
+                    ("install", 1, ConnectionStatus::RecoveryRequired),
+                    ("parent-sync", 1, ConnectionStatus::RecoveryRequired),
+                ] {
+                    let fixture = Fixture::new(original);
+                    fixture.connect();
+                    let before = fs::metadata(fixture.state().join(LOCK_NAME)).expect("lock");
+                    Worker::paused_at(&fixture, "disconnect", point, occurrence).kill();
+                    assert_eq!(status(&fixture.config), Ok(expected), "disconnect/{point}");
+                    disconnect(&fixture.config).expect("resume killed disconnect");
+                    assert_eq!(fixture.bytes().as_deref(), original, "disconnect/{point}");
+                    assert_eq!(status(&fixture.config), Ok(ConnectionStatus::Unmanaged));
+                    let after = fs::metadata(fixture.state().join(LOCK_NAME)).expect("lock");
+                    assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+                    assert_eq!(after.nlink(), 2);
+                    fixture.assert_private();
+                }
+            }
+        }
+
+        #[test]
+        fn live_child_excludes_readers_writers_and_legacy_create_new_clients() {
+            let fixture = Fixture::new(Some(ORIGINAL));
+            let competing_plan =
+                prepare(&fixture.config, MODEL, endpoint()).expect("prepare competing writer");
+            let worker = Worker::paused_at(&fixture, "connect", "stage", 1);
+            assert_eq!(status(&fixture.config), Err(Error::LockBusy));
+            assert!(matches!(
+                prepare(&fixture.config, MODEL, endpoint()),
+                Err(Error::LockBusy)
+            ));
+            assert_eq!(commit(competing_plan), Err(Error::LockBusy));
+            assert_eq!(disconnect(&fixture.config), Err(Error::LockBusy));
+            assert_eq!(
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(fixture.state().join(LEGACY_LOCK_NAME))
+                    .expect_err("legacy writer must be excluded")
+                    .kind(),
+                std::io::ErrorKind::AlreadyExists
+            );
+            assert_eq!(fixture.bytes().as_deref(), Some(ORIGINAL));
+            worker.kill();
+            assert_eq!(status(&fixture.config), Ok(ConnectionStatus::Unmanaged));
+            fixture.connect();
+        }
+
+        #[test]
+        fn delayed_open_descriptor_and_successive_owners_use_the_same_inode() {
+            let fixture = Fixture::new(Some(ORIGINAL));
+            let target = fixture.target();
+            let _descriptor_scope = test_support::descriptor_scope();
+            let first = acquire_lock(&target, true).expect("first owner");
+            let delayed = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(target.state.join(LEGACY_LOCK_NAME))
+                .expect("open the same inode before the first owner exits");
+            let identity = first.identity;
+            drop(first);
+            for _ in 0..8 {
+                let next = acquire_lock(&target, false).expect("successive owner");
+                assert_eq!(next.identity, identity);
+                assert_eq!(
+                    flock(&delayed, FlockOperation::NonBlockingLockExclusive),
+                    Err(rustix::io::Errno::WOULDBLOCK)
+                );
+                drop(next);
+                flock(&delayed, FlockOperation::NonBlockingLockExclusive)
+                    .expect("delayed descriptor becomes owner");
+                assert_eq!(status(&fixture.config), Err(Error::LockBusy));
+                flock(&delayed, FlockOperation::Unlock).expect("release delayed owner");
+            }
+            assert!(check_lock_names(&target, identity).expect("persistent aliases"));
+        }
+
+        #[test]
+        fn ordinary_lock_initialization_errors_release_the_descriptor() {
+            use test_support::{Action, Point};
+            for point in [
+                Point::LockCreated,
+                Point::LockAcquired,
+                Point::LegacyLockLinked,
+            ] {
+                let fixture = Fixture::new(Some(ORIGINAL));
+                let target = fixture.target();
+                test_support::arm(point, &target.state, 1, Action::Fail);
+                {
+                    let _descriptor_scope = test_support::descriptor_scope();
+                    assert!(matches!(acquire_lock(&target, true), Err(Error::Write)));
+                }
+                assert_eq!(status(&fixture.config), Ok(ConnectionStatus::Unmanaged));
+                fixture.connect();
+                disconnect(&fixture.config).expect("disconnect after initialization failure");
+                assert_eq!(fixture.bytes().as_deref(), Some(ORIGINAL));
+            }
+        }
+
+        #[test]
+        fn unknown_legacy_locks_remain_untouched_with_or_without_v2_initialization() {
+            for initialized in [false, true] {
+                for contents in [b"".as_slice(), b"unknown prior owner".as_slice()] {
+                    let fixture = Fixture::new(Some(ORIGINAL));
+                    if initialized {
+                        Worker::paused_at(&fixture, "connect", "created", 1).kill();
+                    } else {
+                        DirBuilder::new()
+                            .mode(0o700)
+                            .create(fixture.state())
+                            .expect("state");
+                    }
+                    let legacy = fixture.state().join(LEGACY_LOCK_NAME);
+                    write_private(&legacy, contents);
+                    let before = fs::symlink_metadata(&legacy).expect("legacy metadata");
+                    assert_eq!(status(&fixture.config), Err(Error::LockBusy));
+                    assert!(matches!(
+                        prepare(&fixture.config, MODEL, endpoint()),
+                        Err(Error::LockBusy)
+                    ));
+                    assert_eq!(disconnect(&fixture.config), Err(Error::LockBusy));
+                    let after = fs::symlink_metadata(&legacy).expect("legacy metadata");
+                    assert_eq!(fs::read(&legacy).expect("legacy bytes"), contents);
+                    assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+                    assert_eq!(fixture.bytes().as_deref(), Some(ORIGINAL));
+                    assert_eq!(fixture.state().join(LOCK_NAME).exists(), initialized);
+                }
+            }
+        }
+
+        #[test]
+        fn interrupted_gate_publication_does_not_adopt_a_racing_legacy_owner() {
+            let fixture = Fixture::new(Some(ORIGINAL));
+            let plan = prepare(&fixture.config, MODEL, endpoint()).expect("prepare");
+            let worker = Worker::paused_at(&fixture, "connect", "acquired", 1);
+            let legacy = fixture.state().join(LEGACY_LOCK_NAME);
+            write_private(&legacy, b"legacy owner acquired before the v2 gate");
+            worker.kill();
+            assert_eq!(commit(plan), Err(Error::LockBusy));
+            assert_eq!(fixture.bytes().as_deref(), Some(ORIGINAL));
+            assert_eq!(
+                fs::read(legacy).expect("legacy bytes"),
+                b"legacy owner acquired before the v2 gate"
+            );
+        }
+
+        #[test]
+        fn unsafe_lock_files_and_unrecognized_hardlinks_are_rejected() {
+            for fault in ["symlink", "extra-link", "public", "read-only", "nonempty"] {
+                let fixture = Fixture::new(Some(ORIGINAL));
+                fixture.connect();
+                let lock = fixture.state().join(LOCK_NAME);
+                match fault {
+                    "symlink" => {
+                        fs::remove_file(&lock).expect("test-only alias replacement");
+                        symlink(fixture.state().join(LEGACY_LOCK_NAME), &lock).expect("symlink");
+                    }
+                    "extra-link" => {
+                        fs::hard_link(&lock, fixture.root.join("third-link")).expect("third link");
+                    }
+                    "public" => {
+                        fs::set_permissions(&lock, fs::Permissions::from_mode(0o644))
+                            .expect("public lock");
+                    }
+                    "read-only" => {
+                        fs::set_permissions(&lock, fs::Permissions::from_mode(0o400))
+                            .expect("read-only lock");
+                    }
+                    "nonempty" => fs::write(&lock, b"unknown").expect("unknown lock bytes"),
+                    _ => unreachable!("fixture fault"),
+                }
+                let before = fixture.bytes();
+                assert!(status(&fixture.config).is_err(), "{fault}");
+                assert!(disconnect(&fixture.config).is_err(), "{fault}");
+                assert_eq!(fixture.bytes(), before, "{fault}");
+            }
+        }
+
+        #[test]
+        fn killed_disconnect_preserves_external_unknown_fields_and_drift() {
+            let fixture = Fixture::new(Some(ORIGINAL));
+            fixture.connect();
+            Worker::paused_at(&fixture, "disconnect", "image", 1).kill();
+            let mut current = parse(fixture.bytes().as_deref().expect("config")).expect("TOML");
+            current["model"] = value("user/later");
+            current["unknown_after_connect"] = value("retain");
+            current["model_providers"]["magpie"]["http_headers"]["X-Fixture"] = value("retain");
+            fs::write(&fixture.config, current.to_string()).expect("external edit");
+            let outcome = disconnect(&fixture.config).expect("selective recovery");
+            assert_eq!(outcome.restored_fields, 6);
+            assert_eq!(outcome.preserved_fields, 1);
+            let restored = parse(fixture.bytes().as_deref().expect("config")).expect("TOML");
+            assert_eq!(restored["model"].as_str(), Some("user/later"));
+            assert_eq!(restored["unknown_after_connect"].as_str(), Some("retain"));
+            let extension: Vec<_> = restored["unknown_extension"]
+                .as_array()
+                .expect("unknown array retained")
+                .iter()
+                .map(Value::as_str)
+                .collect();
+            assert_eq!(extension, [Some("a"), Some("b")]);
+            assert_eq!(
+                restored["model_providers"]["magpie"]["http_headers"]["X-Fixture"].as_str(),
+                Some("retain")
+            );
+            fixture.assert_private();
+        }
+
+        #[test]
+        fn ambiguous_recovery_after_sigkill_keeps_target_and_pending_journal() {
+            let fixture = Fixture::new(Some(ORIGINAL));
+            Worker::paused_at(&fixture, "connect", "parent-sync", 2).kill();
+            let external = [
+                b"# external edit after crash\n".as_slice(),
+                &fixture.bytes().expect("config"),
+            ]
+            .concat();
+            fs::write(&fixture.config, &external).expect("external change");
+            let journal = fs::read(fixture.state().join("journal.toml")).expect("journal");
+            assert_eq!(
+                status(&fixture.config),
+                Ok(ConnectionStatus::RecoveryRequired)
+            );
+            assert_eq!(disconnect(&fixture.config), Err(Error::RecoveryRequired));
+            assert_eq!(fixture.bytes(), Some(external));
+            assert_eq!(
+                fs::read(fixture.state().join("journal.toml")).expect("journal"),
+                journal
+            );
+        }
+
+        #[test]
+        fn permanent_locks_and_killed_fragments_remain_inside_storage_budgets() {
+            for byte_limit in [true, false] {
+                let fixture = Fixture::new(Some(ORIGINAL));
+                fixture.connect();
+                Worker::paused_at(&fixture, "disconnect", "parent-sync", 1).kill();
+                let padding = fixture.state().join("unknown-operator-data");
+                if byte_limit {
+                    write_private(&padding, b"");
+                    let used = fixture.usage().0;
+                    OpenOptions::new()
+                        .write(true)
+                        .open(&padding)
+                        .expect("sparse padding")
+                        .set_len(MAX_STATE_BYTES - used)
+                        .expect("128 MiB logical state, without allocating its contents");
+                } else {
+                    for index in fixture.usage().1..MAX_STATE_ENTRIES {
+                        write_private(&fixture.state().join(format!("unknown-{index}")), b"retain");
+                    }
+                }
+                let before = fixture.usage();
+                assert_eq!(
+                    status(&fixture.config),
+                    Ok(ConnectionStatus::RecoveryRequired)
+                );
+                assert_eq!(disconnect(&fixture.config), Err(Error::StorageLimit));
+                assert_eq!(fixture.usage(), before, "refusal creates no fragments");
+                assert_eq!(fixture.bytes().as_deref(), Some(ORIGINAL));
+                let target = fixture.target();
+                let journal = read_journal(&target)
+                    .expect("journal")
+                    .expect("pending journal");
+                assert!(journal.phase == Phase::DisconnectPrepared);
+                if byte_limit {
+                    fs::remove_file(&padding).expect("remove test padding");
+                } else {
+                    // Only delete fixture files this test created.
+                    for entry in fs::read_dir(fixture.state()).expect("entries") {
+                        let entry = entry.expect("entry");
+                        if entry.file_name().to_string_lossy().starts_with("unknown-") {
+                            assert_eq!(fs::read(entry.path()).expect("unknown bytes"), b"retain");
+                            fs::remove_file(entry.path()).expect("remove fixture padding");
+                        }
+                    }
+                }
+                disconnect(&fixture.config).expect("recover with room for journal");
+                fixture.assert_private();
+            }
+        }
+
+        #[test]
+        fn initializing_the_permanent_pair_reserves_both_directory_entries() {
+            let fixture = Fixture::new(Some(ORIGINAL));
+            DirBuilder::new()
+                .mode(0o700)
+                .create(fixture.state())
+                .expect("state");
+            for index in 0..MAX_STATE_ENTRIES - 1 {
+                write_private(&fixture.state().join(format!("unknown-{index}")), b"retain");
+            }
+            let before = fixture.usage();
+            let target = fixture.target();
+            {
+                let _descriptor_scope = test_support::descriptor_scope();
+                assert!(matches!(
+                    acquire_lock(&target, true),
+                    Err(Error::StorageLimit)
+                ));
+            }
+            assert_eq!(fixture.usage(), before);
+            assert!(!fixture.state().join(LOCK_NAME).exists());
+            assert!(!fixture.state().join(LEGACY_LOCK_NAME).exists());
+        }
     }
 }

@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-29",
+  "scope": "linux_local_synthetic_codex_transaction_and_gpui_scene",
+  "input_sha256": {
+    "Cargo.lock": "3e4d2469bc95d15ca07d5e9ffcb83878cdafc53ed4c757435e722ddb57ce528d",
+    "apps/desktop/Cargo.toml": "b8287197736e9ac036a99634453c7f534aaed16f658380e65593d747323ec377",
+    "apps/desktop/Cargo.lock": "0ca78a7d9000dfb395274b3739a34642bc1fcbf880a9a52ec8ceb672c069035d",
+    "apps/desktop/examples/render_preview.rs": "ab80d51dfca31541c8ac62bbd48ae7f4ebf0f6aa027977eb427b098816114a0a",
+    "apps/desktop/src/ui.rs": "f1b2b020ceae2c321e7f281ffdb0095077187daa405b94a64ee53abd76877bed",
+    "crates/magpie-core/Cargo.toml": "31416ec610dda25a74feec673d0178c33348ec010f49b93aa1c495e2c03d3c2b",
+    "crates/magpie-core/src/codex_transaction.rs": "3b02381e0bae6abc574a6278b34f911532990b83415345bd068caffa6441a6d2",
+    "crates/magpie-core/tests/codex_transaction.rs": "604b09d1f3a791f1020f00f21f495de458584efe16e82ba02eaeb37315696224"
+  },
+  "codex_lock": {
+    "mechanism": "OS file lock, persistent same-inode legacy gate, SIGKILL releases kernel lock",
+    "core_lock_tests": {
+      "passed": 12,
+      "ignored_worker_entrypoints": 1
+    },
+    "transaction_integration_tests": {
+      "passed": 48,
+      "ignored_worker_entrypoints": 2
+    },
+    "full_workspace_parallel_with_other_in_progress_files": {
+      "passed": 152,
+      "ignored_worker_entrypoints": 4
+    },
+    "core_all_targets_clippy": "passed",
+    "limitations": [
+      "Linux synthetic fixtures only",
+      "macOS and Android native lock behavior unverified",
+      "Windows configuration writes remain unimplemented",
+      "unknown legacy locks are retained"
+    ]
+  },
+  "desktop": {
+    "component_tests_passed": 59,
+    "ignored_worker_entrypoints": 1,
+    "visual_test_all_targets_clippy": "passed",
+    "gpui_scene": "900x560 zh-CN light, synthetic, headless native Scene; previous r2 UI rejected",
+    "scene_sha256": "777d6aff0ec457e63c8e8e89a17ccd15b48a2d38ce7995eb8a0b43342cd23c56",
+    "native_window_input_and_user_visual_approval": "not established"
+  },
+  "notes": [
+    "The Scene is an older rejected design, not the current Pro redesign.",
+    "Ignored entries are worker subprocess entry points exercised by their parent tests.",
+    "Other uncommitted sources were present during the full-workspace run."
+  ]
+}

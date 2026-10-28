@@ -1,13 +1,11 @@
 #![cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
 
-use magpie_core::codex_transaction::{
-    ConnectionStatus, TransactionError, commit_connect, connection_status, disconnect,
-    prepare_connect,
-};
+use magpie_core::codex_transaction as public_transaction;
+use magpie_core::codex_transaction::{ConnectionStatus, TransactionError};
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::Write;
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt, symlink};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -19,6 +17,34 @@ use toml_edit::{DocumentMut, Item, value};
 pub mod crash_candidate;
 
 use crash_candidate::test_support::{self, Action, Point};
+
+// Keep the harness's fork/exec window outside any open transaction descriptor.
+// Operations on independent fixtures retain concurrent shared read access.
+fn prepare_connect(
+    path: &Path,
+    model: &str,
+    gateway: SocketAddr,
+) -> Result<public_transaction::PreparedConnect, TransactionError> {
+    let _scope = test_support::descriptor_scope();
+    public_transaction::prepare_connect(path, model, gateway)
+}
+
+fn commit_connect(
+    plan: public_transaction::PreparedConnect,
+) -> Result<ConnectionStatus, TransactionError> {
+    let _scope = test_support::descriptor_scope();
+    public_transaction::commit_connect(plan)
+}
+
+fn connection_status(path: &Path) -> Result<ConnectionStatus, TransactionError> {
+    let _scope = test_support::descriptor_scope();
+    public_transaction::connection_status(path)
+}
+
+fn disconnect(path: &Path) -> Result<public_transaction::DisconnectOutcome, TransactionError> {
+    let _scope = test_support::descriptor_scope();
+    public_transaction::disconnect(path)
+}
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 const STATE_BYTE_LIMIT: u64 = 128 * 1024 * 1024;
@@ -131,14 +157,22 @@ fn endpoint() -> SocketAddr {
 }
 
 fn crash_at(fixture: &Fixture, operation: &str, point: &str, occurrence: usize) {
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
         .args(["--exact", "transaction_crash_worker", "--ignored"])
         .env("MAGPIE_TRANSACTION_TEST_ROOT", &fixture.directory)
         .env("MAGPIE_TRANSACTION_TEST_OPERATION", operation)
         .env("MAGPIE_TRANSACTION_TEST_POINT", point)
-        .env("MAGPIE_TRANSACTION_TEST_OCCURRENCE", occurrence.to_string())
-        .output()
-        .unwrap();
+        .env("MAGPIE_TRANSACTION_TEST_OCCURRENCE", occurrence.to_string());
+    let child = {
+        let _scope = test_support::spawn_scope();
+        command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    let output = child.wait_with_output().unwrap();
     assert_eq!(
         output.status.code(),
         Some(test_support::CRASH_EXIT),
@@ -147,13 +181,8 @@ fn crash_at(fixture: &Fixture, operation: &str, point: &str, occurrence: usize) 
     );
     assert!(
         fixture.state().join("lock").is_file(),
-        "abrupt exit must leave the cooperative lock for manual review",
+        "the persistent lock names remain after an abrupt exit",
     );
-}
-
-fn clear_fixture_stale_lock(fixture: &Fixture) {
-    // Only the test's exited child held this lock. Production never breaks it.
-    fs::remove_file(fixture.state().join("lock")).unwrap();
 }
 
 fn state_usage(fixture: &Fixture) -> (u64, usize) {
@@ -309,7 +338,13 @@ fn connect_disconnect_restores_exact_original_bytes_and_uses_private_files() {
         connection_status(&fixture.config).unwrap(),
         ConnectionStatus::Unmanaged
     );
-    assert!(!fixture.state().join("lock").exists());
+    let legacy_lock = fs::metadata(fixture.state().join("lock")).unwrap();
+    let native_lock = fs::metadata(fixture.state().join("lock-v2")).unwrap();
+    assert_eq!(
+        (legacy_lock.dev(), legacy_lock.ino()),
+        (native_lock.dev(), native_lock.ino())
+    );
+    assert_eq!(native_lock.nlink(), 2);
     assert!(fs::read_dir(&fixture.directory).unwrap().all(|entry| {
         !entry
             .unwrap()
@@ -963,7 +998,6 @@ fn recovery_syncs_parent_before_finalizing_replaced_or_removed_target() {
         let fixture = Fixture::new(original);
         fixture.connect();
         crash_at(&fixture, "disconnect", "parent-sync", 1);
-        clear_fixture_stale_lock(&fixture);
         assert_eq!(
             fs::read(&fixture.config).ok().as_deref(),
             original,
@@ -1002,16 +1036,21 @@ fn abrupt_connect_fragments_stay_private_counted_and_unknown_files_survive() {
     for point in ["stage", "image", "stage"] {
         crash_at(&fixture, "connect", point, 1);
         assert_eq!(
-            connection_status(&fixture.config).unwrap_err(),
-            TransactionError::LockBusy,
+            connection_status(&fixture.config).unwrap(),
+            ConnectionStatus::Unmanaged,
         );
-        clear_fixture_stale_lock(&fixture);
         assert_eq!(fixture.text(), ORIGINAL);
         assert!(!fixture.state().join("journal.toml").exists());
     }
     let fragments: Vec<_> = fs::read_dir(fixture.state())
         .unwrap()
         .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            !matches!(
+                path.file_name().and_then(|name| name.to_str()),
+                Some("lock" | "lock-v2")
+            )
+        })
         .collect();
     assert_eq!(fragments.len(), 4, "three stages and one complete image");
     for path in &fragments {
@@ -1060,7 +1099,6 @@ fn pending_disconnect_reserves_replacement_and_final_journal_before_writing() {
     fixture.connect();
     let connected = fixture.text();
     crash_at(&fixture, "disconnect", "stage", 2);
-    clear_fixture_stale_lock(&fixture);
     assert_eq!(fixture.text(), connected, "replacement has not happened");
     assert_eq!(
         fixture.journal()["phase"].as_str(),
@@ -1094,15 +1132,14 @@ fn pending_disconnect_after_replacement_checks_journal_space_and_entry_limit() {
         let fixture = Fixture::new(Some(ORIGINAL.as_bytes()));
         fixture.connect();
         crash_at(&fixture, "disconnect", "parent-sync", 1);
-        clear_fixture_stale_lock(&fixture);
         let mut unknown = Vec::new();
         if byte_limit {
             unknown.push(fill_state_bytes(&fixture, 0));
         } else {
             let existing = state_usage(&fixture).1;
-            // The next lock takes the remaining entry; publishing a journal
-            // needs one more slot even though it will replace the old journal.
-            for index in existing..STATE_ENTRY_LIMIT - 1 {
+            // Both lock entries are permanent; publishing a journal needs
+            // one extra slot even though it replaces the old journal.
+            for index in existing..STATE_ENTRY_LIMIT {
                 let path = fixture.state().join(format!("unknown-{index}"));
                 write_private(&path, b"retain");
                 unknown.push(path);
@@ -1132,12 +1169,10 @@ fn pending_disconnect_after_replacement_checks_journal_space_and_entry_limit() {
 fn interrupted_connect_abort_journal_is_also_budgeted() {
     let fixture = Fixture::new(Some(ORIGINAL.as_bytes()));
     crash_at(&fixture, "connect", "install", 1);
-    clear_fixture_stale_lock(&fixture);
     assert_eq!(fixture.text(), ORIGINAL);
     assert_eq!(fixture.journal()["phase"].as_str(), Some("prepared"));
     // Interrupt recovery itself after it writes its abort-journal stage.
     crash_at(&fixture, "disconnect", "stage", 1);
-    clear_fixture_stale_lock(&fixture);
     let padding = fill_state_bytes(&fixture, 0);
     let before = state_usage(&fixture);
     assert_eq!(
@@ -1159,7 +1194,6 @@ fn interrupted_connect_after_replacement_reserves_all_disconnect_fragments() {
     // First parent sync creates the state directory; second follows the target
     // replacement, while the durable journal still says prepared.
     crash_at(&fixture, "connect", "parent-sync", 2);
-    clear_fixture_stale_lock(&fixture);
     let connected = fixture.text();
     assert_ne!(connected, ORIGINAL);
     assert_eq!(fixture.journal()["phase"].as_str(), Some("prepared"));
