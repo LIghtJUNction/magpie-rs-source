@@ -324,7 +324,11 @@ class Gateway:
         if health.get("mode") != "forward_candidate" or health.get("status") != "ok":
             raise RuntimeError("gateway_not_forward_candidate")
         limits = health.get("limits", {})
-        if limits != {"active_requests": 4, "waiting_requests": 0, "connections": 16}:
+        expected = {"active_requests": ACTIVE_CAP, "waiting_requests": 0, "connections": 16}
+        if not isinstance(limits, dict) or any(
+            type(limits.get(key)) is not int or limits[key] != value
+            for key, value in expected.items()
+        ):
             raise RuntimeError("candidate_admission_limits_changed")
         models = get_json(self.address, "/v1/models", max(.01, deadline - time.monotonic()))
         if sorted(item["id"] for item in models.get("data", [])) != ["local/bench"]:

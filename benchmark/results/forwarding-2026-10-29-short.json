@@ -641,5 +641,5 @@
   ],
   "performance_verdict": "baseline only; no performance pass or A/B claim",
   "runner_source_availability": "original runner bytes were not retained; runner was subsequently revised, so this historical sample cannot be exactly replayed",
-  "current_runner_sha256": "832ccb80298c6db3b7645cd48ea517cea605e0c57ca772435b2ed9ee5e4153e3"
+  "runner_sha_after_initial_safety_revision": "832ccb80298c6db3b7645cd48ea517cea605e0c57ca772435b2ed9ee5e4153e3"
 }
