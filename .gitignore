@@ -1,0 +1,4 @@
+/target/
+/apps/desktop/target/
+__pycache__/
+*.py[cod]

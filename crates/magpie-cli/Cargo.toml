@@ -1,0 +1,17 @@
+[package]
+name = "magpie-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "magpie"
+path = "src/main.rs"
+
+[dependencies]
+magpie-core.workspace = true
+magpie-service.workspace = true
+
+[lints]
+workspace = true
