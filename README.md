@@ -2,7 +2,7 @@
 
 Rust implementation for the `magpie-rs` Recipkg project. Version 0.2.0 is an
 early preview with a standalone CLI, loopback model catalog, and GPUI Agent
-status window. The full product contract remains under active implementation. The current desktop design was rejected in user review and is awaiting a Pro redesign; this source checkpoint is not a desktop release.
+status window. The full product contract remains under active implementation. The Pro desktop redesign is integrated and has passed the local Linux build and Clippy checks; user visual acceptance is pending. This source checkpoint is not a desktop release.
 
 ## Install
 
@@ -67,3 +67,9 @@ catalog request p50 at 0.090 ms, and idle gateway RSS/PSS medians at 2,976/779 K
 host-specific baselines for the implemented paths, not cross-platform or
 upstream-inference measurements. Method and limitations are documented in
 [`benchmark/README.md`](benchmark/README.md).
+
+The corrected CLI benchmark (`cli-0.2.0-2026-10-28-corrected-rss-v2.json`)
+measured warm process-start p50 at 1.49–1.57 ms and peak-RSS medians at
+2.52–2.57 MiB across four synthetic CLI cases. RSS uses a separate GNU time
+child, excluding Python parent memory. This corrects the measurement method;
+it is not a software memory optimization or a comparison against full Magpie.

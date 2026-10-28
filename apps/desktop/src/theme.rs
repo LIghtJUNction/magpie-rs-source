@@ -8,6 +8,7 @@ pub enum Appearance {
     Dark,
 }
 
+/// Opaque color tokens: no blur, gradients, animation, or extra GPU effects.
 #[derive(Clone, Copy)]
 pub struct Palette {
     pub background: u32,
@@ -19,6 +20,9 @@ pub struct Palette {
     pub accent: u32,
     pub selected: u32,
     pub warning: u32,
+    pub warning_bg: u32,
+    pub danger: u32,
+    pub danger_bg: u32,
 }
 
 impl Palette {
@@ -33,27 +37,33 @@ impl Palette {
         };
         if dark {
             Self {
-                background: 0x1b1b1f,
-                surface: 0x232327,
-                inset: 0x2c2b31,
-                border: 0x37363d,
-                text: 0xeae9ee,
-                muted: 0xa4a1ad,
-                accent: 0xc5b4ee,
-                selected: 0x373041,
-                warning: 0xe8ba80,
+                background: 0x171b19,
+                surface: 0x202622,
+                inset: 0x29312c,
+                border: 0x384139,
+                text: 0xeef1eb,
+                muted: 0xacb7ae,
+                accent: 0xa8ceb4,
+                selected: 0x2c4034,
+                warning: 0xf3c784,
+                warning_bg: 0x3c3020,
+                danger: 0xffb5a9,
+                danger_bg: 0x432d29,
             }
         } else {
             Self {
-                background: 0xf5f5f7,
+                background: 0xf6f5f2,
                 surface: 0xffffff,
-                inset: 0xf0f0f3,
-                border: 0xe1e0e6,
-                text: 0x25242b,
-                muted: 0x6f6c79,
-                accent: 0x7148a5,
-                selected: 0xeee8f6,
-                warning: 0x8e591e,
+                inset: 0xf1f0ec,
+                border: 0xe0ded8,
+                text: 0x232420,
+                muted: 0x62665f,
+                accent: 0x32634a,
+                selected: 0xe6eee8,
+                warning: 0x7c4d14,
+                warning_bg: 0xfff1d9,
+                danger: 0x9a3729,
+                danger_bg: 0xfceae5,
             }
         }
     }
