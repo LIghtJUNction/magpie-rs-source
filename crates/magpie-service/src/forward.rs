@@ -1,6 +1,10 @@
-//! Bounded, same-protocol local-provider candidate. Not the full gateway contract.
-//! No prompt/response logging, protocol translation, account routing, or Usage claims.
+//! Bounded local-provider candidate with optional, explicitly selected translation.
+//! Not the full gateway contract: no account routing, prompt logging, or Usage accounting.
 
+use crate::protocol::{
+    self, ErrorCategory, ErrorKind, FinishReason, GatewayError, Limits, Outcome, Protocol,
+    ResponseContext, SseConverter, StreamBatch,
+};
 use bytes::{Bytes, BytesMut};
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use http_body_util::{BodyExt, Full, StreamBody, combinators::UnsyncBoxBody};
@@ -24,7 +28,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore},
@@ -47,12 +51,18 @@ type Body = UnsyncBoxBody<Bytes, io::Error>;
 type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
 
 /// Public configuration only. The credential itself is never stored here.
+///
+/// Optional JSON `upstream_protocol`: `openai_chat`, `openai_responses`,
+/// `anthropic_messages`, or `gemini`. Omission retains native forwarding and
+/// legacy Bearer authentication. `base_url` remains the literal loopback `/v1`
+/// URL; Gemini endpoints are selected on the same origin under `/v1beta`.
 #[derive(Clone, Debug)]
 pub struct ForwardConfig {
     provider_id: String,
     upstream: SocketAddr,
     models: Vec<String>,
     api_key_env: Option<String>,
+    upstream_protocol: Option<Protocol>,
 }
 
 impl ForwardConfig {
@@ -91,6 +101,7 @@ impl ForwardConfig {
                 "base_url",
                 "models",
                 "api_key_env",
+                "upstream_protocol",
             ]
             .contains(&key.as_str())
         }) || object.get("version").and_then(Value::as_u64) != Some(1)
@@ -146,11 +157,23 @@ impl ForwardConfig {
                 Some(name.to_owned())
             }
         };
+        let upstream_protocol = match value.get("upstream_protocol") {
+            None => None,
+            Some(Value::String(name)) => Some(match name.as_str() {
+                "openai_chat" => Protocol::OpenAiChat,
+                "openai_responses" => Protocol::OpenAiResponses,
+                "anthropic_messages" => Protocol::AnthropicMessages,
+                "gemini" => Protocol::Gemini,
+                _ => return Err(invalid("forward_config_invalid_upstream_protocol")),
+            }),
+            Some(_) => return Err(invalid("forward_config_invalid_upstream_protocol")),
+        };
         Ok(Self {
             provider_id,
             upstream,
             models,
             api_key_env,
+            upstream_protocol,
         })
     }
 
@@ -217,10 +240,21 @@ impl ForwardServer {
             if secret.is_empty() || secret.len() > 4096 {
                 return Err(invalid("provider_credential_invalid"));
             }
-            let mut value = header::HeaderValue::from_str(&format!("Bearer {secret}"))
+            let (name, secret) = match self.config.upstream_protocol {
+                Some(Protocol::AnthropicMessages) => ("x-api-key", secret),
+                Some(Protocol::Gemini) => ("x-goog-api-key", secret),
+                _ => ("authorization", format!("Bearer {secret}")),
+            };
+            let mut value = header::HeaderValue::from_str(&secret)
                 .map_err(|_| invalid("provider_credential_invalid"))?;
             value.set_sensitive(true);
-            defaults.insert(header::AUTHORIZATION, value);
+            defaults.insert(header::HeaderName::from_static(name), value);
+        }
+        if self.config.upstream_protocol == Some(Protocol::AnthropicMessages) {
+            defaults.insert(
+                "anthropic-version",
+                header::HeaderValue::from_static("2023-06-01"),
+            );
         }
         let client = reqwest::Client::builder()
             .default_headers(defaults)
@@ -234,14 +268,15 @@ impl ForwardServer {
             .http1_only()
             .build()
             .map_err(|_| invalid("provider_transport_initialization_failed"))?;
+        let requests = Arc::new(Semaphore::new(ACTIVE_LIMIT));
+        let connections = Arc::new(Semaphore::new(CONNECTION_LIMIT));
         let state = Arc::new(State {
             config: self.config,
             address,
             client,
-            requests: Arc::new(Semaphore::new(ACTIVE_LIMIT)),
+            requests,
             stats: Arc::new(Stats::default()),
         });
-        let connections = Arc::new(Semaphore::new(CONNECTION_LIMIT));
         let listener = tokio::net::TcpListener::from_std(self.listener)?;
         loop {
             // A permit is acquired before accept: live connection tasks are bounded.
@@ -282,6 +317,7 @@ struct Stats {
     completed: AtomicU64,
     failed: AtomicU64,
     cancelled: AtomicU64,
+    next_request: AtomicU64,
 }
 struct State {
     config: ForwardConfig,
@@ -325,6 +361,135 @@ impl Drop for Attempt {
     }
 }
 
+struct EntryRoute {
+    protocol: Protocol,
+    // Gemini owns model/stream selection in the URL, never in the JSON body.
+    gemini: Option<(String, bool)>,
+}
+
+impl EntryRoute {
+    fn parse(path: &str) -> Option<Self> {
+        let protocol = match path {
+            "/v1/chat/completions" => Protocol::OpenAiChat,
+            "/v1/responses" => Protocol::OpenAiResponses,
+            "/v1/messages" => Protocol::AnthropicMessages,
+            _ => {
+                let (model, action) = path.strip_prefix("/v1beta/models/")?.rsplit_once(':')?;
+                let stream = match action {
+                    "generateContent" => false,
+                    "streamGenerateContent" => true,
+                    _ => return None,
+                };
+                let mut decoded = Vec::with_capacity(model.len());
+                let mut bytes = model.bytes();
+                while let Some(byte) = bytes.next() {
+                    decoded.push(if byte == b'%' {
+                        let high = (bytes.next()? as char).to_digit(16)?;
+                        let low = (bytes.next()? as char).to_digit(16)?;
+                        (high * 16 + low) as u8
+                    } else {
+                        byte
+                    });
+                }
+                let model = String::from_utf8(decoded).ok()?;
+                if !valid_id(&model) {
+                    return None;
+                }
+                return Some(Self {
+                    protocol: Protocol::Gemini,
+                    gemini: Some((model, stream)),
+                });
+            }
+        };
+        Some(Self {
+            protocol,
+            gemini: None,
+        })
+    }
+}
+
+fn upstream_url(upstream: SocketAddr, protocol: Protocol, model: &str, stream: bool) -> String {
+    match protocol {
+        Protocol::OpenAiChat => format!("http://{upstream}/v1/chat/completions"),
+        Protocol::OpenAiResponses => format!("http://{upstream}/v1/responses"),
+        Protocol::AnthropicMessages => format!("http://{upstream}/v1/messages"),
+        Protocol::Gemini => {
+            // Model IDs are bounded ASCII. Encode a single path parameter so a
+            // slash, colon or dot segment cannot select another HTTP endpoint.
+            let encoded: String = model
+                .bytes()
+                .map(|byte| {
+                    if byte.is_ascii_alphanumeric() || b"_-".contains(&byte) {
+                        (byte as char).to_string()
+                    } else {
+                        format!("%{byte:02X}")
+                    }
+                })
+                .collect();
+            let action = if stream {
+                "streamGenerateContent?alt=sse"
+            } else {
+                "generateContent"
+            };
+            format!("http://{upstream}/v1beta/models/{encoded}:{action}")
+        }
+    }
+}
+
+fn response_context(state: &State, model: &str) -> ResponseContext {
+    let created = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let sequence = state.stats.next_request.fetch_add(1, Ordering::Relaxed);
+    ResponseContext {
+        id: format!("magpie_{}_{created}_{sequence}", std::process::id()),
+        model: model.to_owned(),
+        created,
+    }
+}
+
+fn outcome_success(outcome: &Outcome, client: Protocol) -> bool {
+    match outcome {
+        Outcome::Finished(FinishReason::Length | FinishReason::ContentFilter)
+            if client == Protocol::OpenAiResponses =>
+        {
+            false
+        }
+        Outcome::Finished(_) => true,
+        _ => false,
+    }
+}
+
+fn error_category(status: StatusCode) -> ErrorCategory {
+    match status {
+        StatusCode::UNAUTHORIZED => ErrorCategory::Authentication,
+        StatusCode::FORBIDDEN => ErrorCategory::Permission,
+        StatusCode::NOT_FOUND => ErrorCategory::ModelNotFound,
+        StatusCode::TOO_MANY_REQUESTS => ErrorCategory::RateLimit,
+        StatusCode::REQUEST_TIMEOUT | StatusCode::GATEWAY_TIMEOUT => ErrorCategory::Timeout,
+        status if status.is_client_error() => ErrorCategory::Compatibility,
+        _ => ErrorCategory::UpstreamServer,
+    }
+}
+
+fn protocol_error(
+    protocol: Protocol,
+    status: StatusCode,
+    category: ErrorCategory,
+) -> Response<Body> {
+    json_response(
+        status,
+        protocol::error_body(
+            protocol,
+            &GatewayError {
+                category,
+                status: status.as_u16(),
+            },
+        ),
+    )
+}
+
 async fn handle(
     request: Request<Incoming>,
     state: Arc<State>,
@@ -332,6 +497,33 @@ async fn handle(
     Ok(handle_inner(request, state).await)
 }
 async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Response<Body> {
+    let route = EntryRoute::parse(request.uri().path());
+    let client = route
+        .as_ref()
+        .map_or(Protocol::OpenAiChat, |route| route.protocol);
+    let typed_errors = state.config.upstream_protocol.is_some()
+        || matches!(client, Protocol::AnthropicMessages | Protocol::Gemini);
+    let error = |status: StatusCode, code: &'static str| {
+        if typed_errors {
+            let category = match code {
+                "upstream_transport_error" => ErrorCategory::Network,
+                "upstream_content_type_mismatch"
+                | "upstream_json_incomplete_or_too_large"
+                | "converted_response_too_large" => ErrorCategory::Compatibility,
+                "upstream_http_error" if status.is_client_error() => match status {
+                    StatusCode::UNAUTHORIZED
+                    | StatusCode::FORBIDDEN
+                    | StatusCode::NOT_FOUND
+                    | StatusCode::TOO_MANY_REQUESTS => error_category(status),
+                    _ => ErrorCategory::UpstreamClient,
+                },
+                _ => error_category(status),
+            };
+            protocol_error(client, status, category)
+        } else {
+            error(status, code)
+        }
+    };
     // Real peer was checked at accept. Untrusted proxy/browser headers do not grant local privilege.
     let headers = request.headers();
     if headers.contains_key(header::ORIGIN)
@@ -363,7 +555,12 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
         );
     }
     let path = request.uri().path().to_owned();
-    if request.uri().query().is_some() {
+    if request.uri().query().is_some()
+        && !(route
+            .as_ref()
+            .is_some_and(|route| route.gemini.as_ref().is_some_and(|(_, stream)| *stream))
+            && request.uri().query() == Some("alt=sse"))
+    {
         return error(StatusCode::BAD_REQUEST, "query_not_supported");
     }
     if request.method() == hyper::Method::GET {
@@ -371,7 +568,8 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
             "/health" => json_response(
                 StatusCode::OK,
                 json!({"status":"ok","mode":"forward_candidate",
-                "provider_health":"not_probed","limits":{"active_requests":ACTIVE_LIMIT,"waiting_requests":0,"connections":CONNECTION_LIMIT},
+                "provider_health":"not_probed","limits":{"active_requests":ACTIVE_LIMIT,"waiting_requests":0,"connections":CONNECTION_LIMIT,
+                    "request_bytes":REQUEST_LIMIT,"json_response_bytes":JSON_RESPONSE_LIMIT,"sse_event_bytes":EVENT_LIMIT,"forward_chunk_bytes":CHUNK_LIMIT},
                 "counter_semantics":"upstream_protocol_completion_not_client_delivery_or_usage",
                 "transport_counters":{"active":state.stats.active.load(Ordering::Relaxed),
                     "completed":state.stats.completed.load(Ordering::Relaxed),"failed":state.stats.failed.load(Ordering::Relaxed),
@@ -384,9 +582,9 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
     if request.method() != hyper::Method::POST {
         return error(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
     }
-    if !["/v1/responses", "/v1/chat/completions"].contains(&path.as_str()) {
+    let Some(route) = route else {
         return error(StatusCode::NOT_IMPLEMENTED, "endpoint_not_implemented");
-    }
+    };
     if headers.contains_key(header::CONTENT_ENCODING)
         || !headers
             .get(header::CONTENT_TYPE)
@@ -420,15 +618,23 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
         Ok(value) => value,
         Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_json"),
     };
-    let Some(object) = value.as_object_mut() else {
+    let Some(object) = value.as_object() else {
         return error(StatusCode::BAD_REQUEST, "json_object_required");
     };
-    let Some(public_model) = object
-        .get("model")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-    else {
-        return error(StatusCode::BAD_REQUEST, "model_required");
+    let public_model = match &route.gemini {
+        Some((model, _)) => {
+            if object.contains_key("model") || object.contains_key("stream") {
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    "gemini_model_and_stream_are_url_fields",
+                );
+            }
+            model.clone()
+        }
+        None => match object.get("model").and_then(Value::as_str) {
+            Some(model) => model.to_owned(),
+            None => return error(StatusCode::BAD_REQUEST, "model_required"),
+        },
     };
     let Some(model) = public_model
         .strip_prefix(&format!("{}/", state.config.provider_id))
@@ -437,10 +643,11 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
     else {
         return error(StatusCode::NOT_FOUND, "model_not_found");
     };
-    let stream = match object.get("stream") {
-        None => false,
-        Some(Value::Bool(value)) => *value,
-        Some(_) => {
+    let stream = match (route.gemini.as_ref(), object.get("stream")) {
+        (Some((_, stream)), _) => *stream,
+        (None, None) => false,
+        (None, Some(Value::Bool(value))) => *value,
+        (None, Some(_)) => {
             return attributed(
                 error(StatusCode::BAD_REQUEST, "stream_must_be_boolean"),
                 &state.config.provider_id,
@@ -448,11 +655,56 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
             );
         }
     };
-    object.insert("model".into(), Value::String(model));
+    let provider = state.config.upstream_protocol.unwrap_or(client);
+    let translated = provider != client;
+    if provider == Protocol::Gemini && matches!(model.as_str(), "." | "..") {
+        return attributed(
+            error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_gemini_model"),
+            &state.config.provider_id,
+            &public_model,
+        );
+    }
+    if translated {
+        value = match protocol::convert_request(client, provider, &value, &model) {
+            Ok(value) => value,
+            Err(failure) => {
+                let status = match failure.kind {
+                    ErrorKind::InvalidInput | ErrorKind::InvalidJson | ErrorKind::InvalidUtf8 => {
+                        StatusCode::BAD_REQUEST
+                    }
+                    ErrorKind::LimitExceeded => StatusCode::PAYLOAD_TOO_LARGE,
+                    _ => StatusCode::UNPROCESSABLE_ENTITY,
+                };
+                return attributed(
+                    protocol_error(client, status, ErrorCategory::Compatibility),
+                    &state.config.provider_id,
+                    &public_model,
+                );
+            }
+        };
+        if provider != Protocol::Gemini {
+            value["stream"] = json!(stream);
+        }
+        if stream && provider == Protocol::OpenAiChat {
+            value["stream_options"] = json!({"include_usage":true});
+        }
+    } else if client != Protocol::Gemini {
+        value["model"] = Value::String(model.clone());
+    }
     let payload = match serde_json::to_vec(&value) {
         Ok(payload) => payload,
         Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_json"),
     };
+    if payload.len() > REQUEST_LIMIT {
+        return attributed(
+            error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "converted_request_body_too_large",
+            ),
+            &state.config.provider_id,
+            &public_model,
+        );
+    }
     // Both request bytes and parsed values are bounded and released before response streaming.
     drop(bytes);
     drop(value);
@@ -462,7 +714,12 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
         IDLE_TIMEOUT,
         state
             .client
-            .post(format!("http://{}{path}", state.config.upstream))
+            .post(upstream_url(
+                state.config.upstream,
+                provider,
+                &model,
+                stream,
+            ))
             .header(header::CONTENT_TYPE, "application/json")
             .header(
                 header::ACCEPT,
@@ -478,10 +735,21 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
     .await;
     let upstream = match upstream {
         Ok(Ok(response)) => response,
-        Ok(Err(_)) => {
+        Ok(Err(failure)) => {
             attempt.finish(false);
             return attributed(
-                error(StatusCode::BAD_GATEWAY, "upstream_transport_error"),
+                error(
+                    if typed_errors && failure.is_timeout() {
+                        StatusCode::GATEWAY_TIMEOUT
+                    } else {
+                        StatusCode::BAD_GATEWAY
+                    },
+                    if typed_errors && failure.is_timeout() {
+                        "upstream_header_timeout"
+                    } else {
+                        "upstream_transport_error"
+                    },
+                ),
                 &state.config.provider_id,
                 &public_model,
             );
@@ -539,6 +807,68 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
         );
     }
     if !stream {
+        if translated || matches!(client, Protocol::AnthropicMessages | Protocol::Gemini) {
+            let context = response_context(&state, &public_model);
+            let collected = timeout_at(deadline, read_json_bytes(upstream)).await;
+            let bytes = match collected {
+                Ok(Ok(bytes)) => bytes,
+                failure => {
+                    attempt.finish(false);
+                    let (status, category) = match failure {
+                        Err(_) | Ok(Err(ResponseReadError::Timeout)) => {
+                            (StatusCode::GATEWAY_TIMEOUT, ErrorCategory::Timeout)
+                        }
+                        Ok(Err(ResponseReadError::Network)) => {
+                            (StatusCode::BAD_GATEWAY, ErrorCategory::Network)
+                        }
+                        _ => (StatusCode::BAD_GATEWAY, ErrorCategory::Compatibility),
+                    };
+                    return attributed(
+                        protocol_error(client, status, category),
+                        &state.config.provider_id,
+                        &public_model,
+                    );
+                }
+            };
+            let converted = serde_json::from_slice::<Value>(&bytes)
+                .ok()
+                .and_then(|value| {
+                    protocol::convert_response(provider, client, &value, &context).ok()
+                });
+            let response = match converted {
+                Some(converted) => {
+                    if let Outcome::Failed(category) = converted.outcome {
+                        attempt.finish(false);
+                        protocol_error(client, StatusCode::BAD_GATEWAY, category)
+                    } else {
+                        let success = outcome_success(&converted.outcome, client);
+                        match serde_json::to_vec(&converted.body) {
+                            Ok(bytes) if bytes.len() <= JSON_RESPONSE_LIMIT => {
+                                attempt.finish(success);
+                                bytes_response(
+                                    StatusCode::OK,
+                                    "application/json",
+                                    Bytes::from(bytes),
+                                )
+                            }
+                            _ => {
+                                attempt.finish(false);
+                                error(StatusCode::BAD_GATEWAY, "converted_response_too_large")
+                            }
+                        }
+                    }
+                }
+                None => {
+                    attempt.finish(false);
+                    protocol_error(
+                        client,
+                        StatusCode::BAD_GATEWAY,
+                        ErrorCategory::Compatibility,
+                    )
+                }
+            };
+            return attributed(response, &state.config.provider_id, &public_model);
+        }
         let collected = timeout_at(deadline, read_json_response(upstream)).await;
         let validated = collected.ok().and_then(Result::ok).and_then(|bytes| {
             protocol_response_outcome(&bytes, path == "/v1/responses")
@@ -566,12 +896,104 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
             }
         };
     }
+    if translated {
+        let limits = Limits {
+            max_chunk_bytes: CHUNK_LIMIT,
+            max_event_bytes: EVENT_LIMIT,
+            max_output_bytes: JSON_RESPONSE_LIMIT,
+            ..Limits::default()
+        };
+        let converter = match SseConverter::new(
+            provider,
+            client,
+            response_context(&state, &public_model),
+            limits,
+        ) {
+            Ok(converter) => converter,
+            Err(_) => {
+                attempt.finish(false);
+                return attributed(
+                    protocol_error(
+                        client,
+                        StatusCode::BAD_GATEWAY,
+                        ErrorCategory::Compatibility,
+                    ),
+                    &state.config.provider_id,
+                    &public_model,
+                );
+            }
+        };
+        let context = ConvertedStreamContext {
+            upstream: Some(Box::pin(upstream.bytes_stream())),
+            pending: Bytes::new(),
+            output: Bytes::new(),
+            frames: Vec::new().into_iter(),
+            converter,
+            client,
+            attempt,
+            deadline,
+            stopped: false,
+        };
+        let stream = futures_util::stream::unfold(context, |mut context| async move {
+            loop {
+                if !context.output.is_empty() {
+                    let length = context.output.len().min(CHUNK_LIMIT);
+                    let bytes = context.output.split_to(length);
+                    return Some((Ok(bytes), context));
+                }
+                if let Some(frame) = context.frames.next() {
+                    context.output = Bytes::from(frame);
+                    continue;
+                }
+                if context.stopped {
+                    return None;
+                }
+                if !context.pending.is_empty() {
+                    let length = context.pending.len().min(CHUNK_LIMIT);
+                    let bytes = context.pending.split_to(length);
+                    match context.converter.push(&bytes) {
+                        Ok(batch) => context.accept(batch),
+                        Err(_) => {
+                            if !context.fail(ErrorCategory::Compatibility) {
+                                return Some((Err(transport_error()), context));
+                            }
+                        }
+                    }
+                    continue;
+                }
+                let limit = context.deadline.min(Instant::now() + IDLE_TIMEOUT);
+                let upstream = context.upstream.as_mut()?;
+                match timeout_at(limit, upstream.next()).await {
+                    Ok(Some(Ok(bytes))) => context.pending = bytes,
+                    Ok(None) => match context.converter.finish() {
+                        Ok(batch) => context.accept(batch),
+                        Err(_) => {
+                            if !context.fail(ErrorCategory::Compatibility) {
+                                return Some((Err(transport_error()), context));
+                            }
+                        }
+                    },
+                    failure => {
+                        let category = match failure {
+                            Err(_) => ErrorCategory::Timeout,
+                            Ok(Some(Err(error))) if error.is_timeout() => ErrorCategory::Timeout,
+                            _ => ErrorCategory::Network,
+                        };
+                        if !context.fail(category) {
+                            return Some((Err(transport_error()), context));
+                        }
+                    }
+                }
+            }
+        });
+        return stream_response(stream, &state.config.provider_id, &public_model);
+    }
     let context = StreamContext {
         upstream: Some(Box::pin(upstream.bytes_stream())),
         pending: Bytes::new(),
         output: Bytes::new(),
         attempt,
-        parser: SseCompletion::new(path == "/v1/responses"),
+        parser: SseCompletion::for_protocol(client),
         deadline,
         stopped: false,
     };
@@ -612,6 +1034,10 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
                     Ok(Some(Ok(bytes))) => {
                         context.pending = bytes;
                     }
+                    Ok(None) if context.parser.finish_native() => {
+                        context.attempt.finish(context.parser.successful);
+                        return None;
+                    }
                     _ => {
                         context.attempt.finish(false);
                         context.stopped = true;
@@ -645,6 +1071,14 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
             }
         }
     });
+    stream_response(stream, &state.config.provider_id, &public_model)
+}
+
+fn stream_response(
+    stream: impl Stream<Item = Result<Bytes, io::Error>> + Send + 'static,
+    provider: &str,
+    model: &str,
+) -> Response<Body> {
     let body = StreamBody::new(stream.map_ok(Frame::data)).boxed_unsync();
     let mut response = Response::new(body);
     response.headers_mut().insert(
@@ -655,7 +1089,7 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
         header::CACHE_CONTROL,
         header::HeaderValue::from_static("no-store"),
     );
-    attributed(response, &state.config.provider_id, &public_model)
+    attributed(response, provider, model)
 }
 
 async fn read_request(body: &mut Incoming) -> Result<Vec<u8>, &'static str> {
@@ -672,24 +1106,41 @@ async fn read_request(body: &mut Incoming) -> Result<Vec<u8>, &'static str> {
     Ok(bytes)
 }
 async fn read_json_response(response: reqwest::Response) -> Result<Bytes, ()> {
+    let bytes = read_json_bytes(response).await.map_err(|_| ())?;
+    let value: Value = serde_json::from_slice(&bytes).map_err(|_| ())?;
+    if !value.is_object() || value.get("error").is_some_and(|error| !error.is_null()) {
+        return Err(());
+    }
+    Ok(bytes)
+}
+
+enum ResponseReadError {
+    Limit,
+    Network,
+    Timeout,
+}
+
+async fn read_json_bytes(response: reqwest::Response) -> Result<Bytes, ResponseReadError> {
     if response
         .content_length()
         .is_some_and(|n| n > JSON_RESPONSE_LIMIT as u64)
     {
-        return Err(());
+        return Err(ResponseReadError::Limit);
     }
     let mut stream = response.bytes_stream();
     let mut bytes = BytesMut::new();
     while let Some(data) = stream.next().await {
-        let data = data.map_err(|_| ())?;
+        let data = data.map_err(|failure| {
+            if failure.is_timeout() {
+                ResponseReadError::Timeout
+            } else {
+                ResponseReadError::Network
+            }
+        })?;
         if bytes.len().saturating_add(data.len()) > JSON_RESPONSE_LIMIT {
-            return Err(());
+            return Err(ResponseReadError::Limit);
         }
         bytes.extend_from_slice(&data);
-    }
-    let value: Value = serde_json::from_slice(&bytes).map_err(|_| ())?;
-    if !value.is_object() || value.get("error").is_some_and(|error| !error.is_null()) {
-        return Err(());
     }
     Ok(bytes.freeze())
 }
@@ -744,6 +1195,62 @@ fn valid_finish_reason(value: &Value) -> bool {
     )
 }
 
+struct ConvertedStreamContext {
+    upstream: Option<ByteStream>,
+    pending: Bytes,
+    output: Bytes,
+    frames: std::vec::IntoIter<Vec<u8>>,
+    converter: SseConverter,
+    client: Protocol,
+    attempt: Attempt,
+    deadline: Instant,
+    stopped: bool,
+}
+
+impl ConvertedStreamContext {
+    fn accept(&mut self, batch: StreamBatch) {
+        self.frames = batch.frames.into_iter();
+        if let Some(end) = batch.end {
+            self.attempt
+                .finish(outcome_success(&end.outcome, self.client));
+            self.stopped = true;
+            self.upstream = None;
+            self.pending = Bytes::new();
+        }
+    }
+
+    fn fail(&mut self, category: ErrorCategory) -> bool {
+        self.upstream = None;
+        self.pending = Bytes::new();
+        self.stopped = true;
+        self.attempt.finish(false);
+        match self.converter.abort(GatewayError {
+            category,
+            status: if category == ErrorCategory::Timeout {
+                504
+            } else {
+                502
+            },
+        }) {
+            Ok(batch) => {
+                self.frames = batch.frames.into_iter();
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+impl Drop for ConvertedStreamContext {
+    fn drop(&mut self) {
+        if !self.attempt.finished {
+            // Dropping the HTTP body drops this state: no detached producer or
+            // queue survives a caller disconnect. Attempt records cancellation.
+            let _ = self.converter.cancel();
+        }
+    }
+}
+
 struct StreamContext {
     upstream: Option<ByteStream>,
     pending: Bytes,
@@ -761,8 +1268,11 @@ struct SseCompletion {
     cr_ends_event: bool,
     first_event: bool,
     responses: bool,
+    protocol: Protocol,
     completed: bool,
     successful: bool,
+    native_started: bool,
+    native_finished: bool,
     started_choices: [bool; 128],
     finished_choices: [bool; 128],
 }
@@ -775,11 +1285,129 @@ impl SseCompletion {
             cr_ends_event: false,
             first_event: true,
             responses,
+            protocol: if responses {
+                Protocol::OpenAiResponses
+            } else {
+                Protocol::OpenAiChat
+            },
             completed: false,
             successful: false,
+            native_started: false,
+            native_finished: false,
             started_choices: [false; 128],
             finished_choices: [false; 128],
         }
+    }
+    fn for_protocol(protocol: Protocol) -> Self {
+        Self {
+            protocol,
+            ..Self::new(protocol == Protocol::OpenAiResponses)
+        }
+    }
+    fn finish_native(&mut self) -> bool {
+        if self.protocol == Protocol::Gemini && self.native_finished && self.event.is_empty() {
+            self.completed = true;
+            self.successful = true;
+            true
+        } else {
+            false
+        }
+    }
+    fn observe_native(&mut self, value: &Value, event_type: Option<&str>) -> Result<(), ()> {
+        if value.get("error").is_some_and(|error| !error.is_null()) {
+            return Err(());
+        }
+        if self.protocol == Protocol::Gemini {
+            if let Some(candidates) = value.get("candidates").and_then(Value::as_array) {
+                for candidate in candidates {
+                    let index = candidate.get("index").and_then(Value::as_u64).unwrap_or(0);
+                    if index >= 128 {
+                        return Err(());
+                    }
+                    self.started_choices[index as usize] = true;
+                    if let Some(reason) = candidate.get("finishReason").filter(|v| !v.is_null()) {
+                        if !matches!(
+                            reason.as_str(),
+                            Some("STOP" | "MAX_TOKENS" | "SAFETY" | "RECITATION")
+                        ) {
+                            return Err(());
+                        }
+                        self.finished_choices[index as usize] = true;
+                    }
+                }
+                self.native_finished = self.started_choices.iter().any(|started| *started)
+                    && self
+                        .started_choices
+                        .iter()
+                        .zip(self.finished_choices)
+                        .all(|(started, finished)| !*started || finished);
+            }
+            return Ok(());
+        }
+        let kind = value.get("type").and_then(Value::as_str).ok_or(())?;
+        if event_type.is_some_and(|event| event != kind) {
+            return Err(());
+        }
+        match kind {
+            "ping" => {}
+            "message_start" if !self.native_started => {
+                let message = value.get("message").ok_or(())?;
+                if message.get("type").and_then(Value::as_str) != Some("message")
+                    || message.get("role").and_then(Value::as_str) != Some("assistant")
+                    || message.get("error").is_some_and(|error| !error.is_null())
+                {
+                    return Err(());
+                }
+                self.native_started = true;
+            }
+            "content_block_start" | "content_block_delta" | "content_block_stop"
+                if self.native_started && !self.native_finished =>
+            {
+                let index = value
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .filter(|i| *i < 128)
+                    .ok_or(())? as usize;
+                match kind {
+                    "content_block_start" if !self.started_choices[index] => {
+                        self.started_choices[index] = true;
+                    }
+                    "content_block_delta"
+                        if self.started_choices[index] && !self.finished_choices[index] => {}
+                    "content_block_stop"
+                        if self.started_choices[index] && !self.finished_choices[index] =>
+                    {
+                        self.finished_choices[index] = true;
+                    }
+                    _ => return Err(()),
+                }
+            }
+            "message_delta" if self.native_started && !self.native_finished => {
+                if let Some(reason) = value.pointer("/delta/stop_reason").filter(|v| !v.is_null()) {
+                    if !matches!(
+                        reason.as_str(),
+                        Some("end_turn" | "max_tokens" | "stop_sequence" | "tool_use")
+                    ) {
+                        return Err(());
+                    }
+                    if self
+                        .started_choices
+                        .iter()
+                        .zip(self.finished_choices)
+                        .any(|(started, finished)| *started && !finished)
+                    {
+                        return Err(());
+                    }
+                    self.native_finished = true;
+                }
+            }
+            "message_stop" if self.native_started && self.native_finished => {
+                self.completed = true;
+                self.successful = true;
+            }
+            _ => return Err(()),
+        }
+        Ok(())
     }
     fn push(&mut self, byte: u8) -> Result<Option<Bytes>, ()> {
         if self.pending_cr {
@@ -845,7 +1473,14 @@ impl SseCompletion {
                 .collect::<Vec<_>>()
                 .join("\n");
             if !data.is_empty() {
-                if !self.responses && data == "[DONE]" {
+                if matches!(
+                    self.protocol,
+                    Protocol::AnthropicMessages | Protocol::Gemini
+                ) {
+                    let value: Value = serde_json::from_str(&data).map_err(|_| ())?;
+                    let event_type = event_type.map(str::to_owned);
+                    self.observe_native(&value, event_type.as_deref())?;
+                } else if !self.responses && data == "[DONE]" {
                     if !self.started_choices.iter().any(|started| *started)
                         || self
                             .started_choices

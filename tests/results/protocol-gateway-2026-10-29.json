@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-29",
+  "tested_source_base": "4545f18e4617b4d5124004b16d81deea15f7684e",
+  "input_sha256": {
+    "crates/magpie-service/src/lib.rs": "d69d7f6ca3ee531db6aff8ee66bc7cae1026d7fe941c0449540c578900be3d84",
+    "crates/magpie-service/src/forward.rs": "a9d9fbbfcc889f5c252805e7cf1c50dc962c832b1d2f3fb9fe3711581c299e86",
+    "crates/magpie-service/src/protocol.rs": "dd46878cd4bba498caedd5ed3542730892ce0e2def3a94e8a8d5f0d08c1f698f",
+    "crates/magpie-service/tests/forward_protocol_http.rs": "652e62bc96fda858ade1e731bce5b0343bad803d9b09ca95ebd7f5294011808c",
+    "crates/magpie-service/src/protocol/model.rs": "03d250131d549afa63f233a754f7d3fced201f2692a2a7895848bec19b06aeab",
+    "crates/magpie-service/src/protocol/request.rs": "222462f2730352800fbef88d33fd87f1285234a1fa745be57567b56aae3680d1",
+    "crates/magpie-service/src/protocol/response.rs": "f621f3345633e13094e9503e60f571c5f3535b9730a5ed6569c8cebfdacab42f",
+    "crates/magpie-service/src/protocol/stream.rs": "169983e5c2c18e4519fe4e385fb2ba22634ef66edb1571bbf05d48cc23fb768f",
+    "crates/magpie-service/src/protocol/tests.rs": "7024c214822d0188cb3f545b9be359a6c538634157ac3d4680efb66a8a1605a1"
+  },
+  "tests": {
+    "service_all_targets": {
+      "passed": 54
+    },
+    "service_all_targets_clippy": "passed",
+    "service_format_check": "passed"
+  },
+  "scope": "Linux loopback synthetic upstream and credentials; bounded pure conversion and actual HTTP/SSE gateway",
+  "coverage": "four protocol request/response conversions including 12 directed protocol pairs in unit tests; selected cross-protocol JSON/SSE, tools, cancellation and error-redaction TCP tests",
+  "not_checked": [
+    "all official protocol fields",
+    "external providers or accounts",
+    "all streaming event variations",
+    "performance improvement",
+    "provider store integration",
+    "other operating systems",
+    "complete product acceptance"
+  ]
+}
