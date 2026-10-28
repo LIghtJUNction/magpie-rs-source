@@ -128,6 +128,64 @@ fn original_39_candidate_and_empty_streams_paths_and_codes_match_exactly() {
 }
 
 #[test]
+fn original_40_pairs_and_default_home_match_recorded_streams() {
+    let goldens =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/legacy_agent_candidates_40");
+    for line in include_str!("fixtures/legacy_agent_candidates_40/cases.tsv")
+        .lines()
+        .skip(1)
+    {
+        let fields: Vec<_> = line.split('\t').collect();
+        assert_eq!(fields.len(), 8, "case {line}");
+        let programs: Vec<_> = fields[3].split(',').filter(|name| *name != "-").collect();
+        let fixture = Fixture::new(&programs, false);
+        let default_home = fields[1] == "default";
+        let codex_home = fixture
+            .root
+            .join(if default_home { "home/.codex" } else { "codex" });
+        let directory_exists = fields[2] == "1";
+        if directory_exists {
+            fs::create_dir(&codex_home).unwrap();
+        }
+        let mut command = fixture.command(&[fields[4]]);
+        if default_home {
+            command.env_remove("CODEX_HOME");
+        }
+        let output = command.output().unwrap();
+        let mut expected = fs::read(goldens.join(fields[6])).unwrap();
+        if !default_home {
+            expected = String::from_utf8(expected)
+                .unwrap()
+                .replace(
+                    "/fixture/codex/config.toml",
+                    codex_home.join("config.toml").to_str().unwrap(),
+                )
+                .into_bytes();
+        }
+        assert_eq!(output.stdout, expected, "observation {} stdout", fields[0]);
+        assert_eq!(
+            output.stderr,
+            fs::read(goldens.join(fields[7])).unwrap(),
+            "observation {} stderr",
+            fields[0]
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(fields[5].parse().unwrap()),
+            "observation {} exit",
+            fields[0]
+        );
+        assert_eq!(codex_home.is_dir(), directory_exists);
+        if directory_exists {
+            assert!(fs::read_dir(&codex_home).unwrap().next().is_none());
+        }
+        assert!(!fixture.root.join("called").exists());
+        assert!(!fixture.root.join("home/.claude").exists());
+        assert!(!fixture.root.join("home/.gemini").exists());
+    }
+}
+
+#[test]
 fn populated_settings_retain_the_existing_status_display() {
     let fixture = Fixture::new(&["claude", "codex", "gemini"], true);
     let config = fixture.root.join("codex/config.toml");
@@ -174,14 +232,16 @@ fn existing_claude_gemini_or_codex_account_state_stays_outside_the_new_slice() {
 }
 
 #[test]
-fn unobserved_candidate_combinations_keep_the_previous_display() {
+fn unobserved_directory_combinations_keep_the_previous_display() {
     for programs in [
+        &["claude"][..],
+        &["gemini"][..],
         &["claude", "codex"][..],
         &["claude", "gemini"][..],
         &["codex", "gemini"][..],
         &["opencode"][..],
     ] {
-        let fixture = Fixture::new(programs, false);
+        let fixture = Fixture::new(programs, true);
         for command in ["agents", "ls"] {
             let output = fixture.run(&[command]);
             assert!(output.status.success());
@@ -217,9 +277,9 @@ fn candidates_do_not_change_json_order_or_schema() {
 fn unobserved_home_resolution_and_agent_environment_keep_the_existing_display() {
     let fixture = Fixture::new(&["codex"], false);
     let mut commands = Vec::new();
-    let mut default_home = fixture.command(&["ls"]);
-    default_home.env_remove("CODEX_HOME");
-    commands.push(default_home);
+    let mut empty_home = fixture.command(&["ls"]);
+    empty_home.env("CODEX_HOME", "");
+    commands.push(empty_home);
     let mut relative_home = fixture.command(&["ls"]);
     relative_home.env("CODEX_HOME", "relative-codex");
     commands.push(relative_home);

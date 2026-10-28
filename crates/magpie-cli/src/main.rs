@@ -158,7 +158,7 @@ fn render_original_agent_text(command: legacy_agent_display::TextCommand) -> Res
         .map_err(|_| {
             "agent_discovery_incomplete: Codex directory cannot be inspected".to_owned()
         })?;
-    // Observation 39 covers Linux with absent Claude/Gemini state and an
+    // Observations 39/40 cover Linux with absent Claude/Gemini state and an
     // absent/empty Codex directory. Existing state or inspection uncertainty
     // retains the preceding renderer/fallback, including configured Codex.
     let candidate_home = env::var_os("HOME").map(std::path::PathBuf::from);
@@ -172,6 +172,14 @@ fn render_original_agent_text(command: legacy_agent_display::TextCommand) -> Res
             })
     });
     let output = match candidate_path {
+        Some(path) if env::var_os("CODEX_HOME").is_none() => {
+            legacy_agent_display::render_unconfigured_default_home(
+                command,
+                &discovery.report,
+                &directory,
+                path,
+            )
+        }
         Some(path) => legacy_agent_display::render_unconfigured_candidates(
             command,
             &discovery.report,
@@ -203,7 +211,7 @@ fn render_original_agent_text(command: legacy_agent_display::TextCommand) -> Res
 
 fn observed_candidate_environment() -> bool {
     cfg!(target_os = "linux")
-        && env::var_os("CODEX_HOME").is_some_and(|path| std::path::Path::new(&path).is_absolute())
+        && env::var_os("CODEX_HOME").is_none_or(|path| std::path::Path::new(&path).is_absolute())
         && !env::vars_os().any(|(key, _)| {
             key.to_str().is_some_and(|key| {
                 key != "CODEX_HOME"

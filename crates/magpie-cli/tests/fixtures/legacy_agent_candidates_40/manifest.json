@@ -1,0 +1,1310 @@
+{
+  "evidence_document": "40-original-cli-pairs-default-home.md",
+  "evidence_document_sha256": "bfe8ae99a89ab53cedb6f2f8734e9485d6d0bf2d177d6c981263ce18408a0afa",
+  "original_binary_sha256": "9aa760cbac67f375a810fcf15b9adf04edcb2cc7de64a9ebb0963da15c1d3eb7",
+  "original_version": "0.1.1948",
+  "records": [
+    {
+      "run_number": 4,
+      "scenario": "explicit-empty-absent",
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "explicit",
+      "fake_programs": [],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "8e01e78fb86e3fb8cd2493aeecccde601b3d898c3a9d2e1fd1589b97b854fa0f.bin",
+        "sha256": "8e01e78fb86e3fb8cd2493aeecccde601b3d898c3a9d2e1fd1589b97b854fa0f",
+        "bytes": 2924
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 5,
+      "scenario": "explicit-empty-absent",
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 1,
+      "codex_home_mode": "explicit",
+      "fake_programs": [],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      },
+      "stderr": {
+        "file": "622c0d989a6bf9be2f9d0329b60ab390114c83951484a132b05b796cae36edf0.bin",
+        "sha256": "622c0d989a6bf9be2f9d0329b60ab390114c83951484a132b05b796cae36edf0",
+        "bytes": 50
+      }
+    },
+    {
+      "run_number": 6,
+      "scenario": "explicit-all-three-absent",
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "explicit",
+      "fake_programs": [
+        "claude",
+        "codex",
+        "gemini"
+      ],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "40f695d6158688332fb1075bd648c35bbf6e35ae82feb01eac684631c834407c.bin",
+        "sha256": "40f695d6158688332fb1075bd648c35bbf6e35ae82feb01eac684631c834407c",
+        "bytes": 3147
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 7,
+      "scenario": "explicit-all-three-absent",
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "explicit",
+      "fake_programs": [
+        "claude",
+        "codex",
+        "gemini"
+      ],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "41b980a9f90a3e1b01520d5b6257d1339a26b3040d5faed9c88a2c39bbf75927.bin",
+        "sha256": "41b980a9f90a3e1b01520d5b6257d1339a26b3040d5faed9c88a2c39bbf75927",
+        "bytes": 183
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 8,
+      "scenario": "explicit-claude-codex-absent",
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "explicit",
+      "fake_programs": [
+        "claude",
+        "codex"
+      ],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "03aadd69c05abc4ff413112a30375190d5a27a515f54b1b7fdfeee674e9389bc.bin",
+        "sha256": "03aadd69c05abc4ff413112a30375190d5a27a515f54b1b7fdfeee674e9389bc",
+        "bytes": 3119
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 9,
+      "scenario": "explicit-claude-codex-absent",
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "explicit",
+      "fake_programs": [
+        "claude",
+        "codex"
+      ],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "ec5443a29de06e8ca99628058ec3fa0771654ddfead98fe993d741088aba2041.bin",
+        "sha256": "ec5443a29de06e8ca99628058ec3fa0771654ddfead98fe993d741088aba2041",
+        "bytes": 123
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 10,
+      "scenario": "explicit-claude-gemini-absent",
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "explicit",
+      "fake_programs": [
+        "claude",
+        "gemini"
+      ],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "3e02b77c3ed131e7e9b72c297e31751140725738591811e2199702771b392aa9.bin",
+        "sha256": "3e02b77c3ed131e7e9b72c297e31751140725738591811e2199702771b392aa9",
+        "bytes": 3116
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 11,
+      "scenario": "explicit-claude-gemini-absent",
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "explicit",
+      "fake_programs": [
+        "claude",
+        "gemini"
+      ],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "bdab75de60a3d903adc14646696d3ac4af589d43e02a4363f549c65ef1c4823e.bin",
+        "sha256": "bdab75de60a3d903adc14646696d3ac4af589d43e02a4363f549c65ef1c4823e",
+        "bytes": 120
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 12,
+      "scenario": "explicit-codex-gemini-absent",
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "explicit",
+      "fake_programs": [
+        "codex",
+        "gemini"
+      ],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "5402655e92d427ade945a37d4c88c9899ad1ca080dbb94cf03db07e10b530f7c.bin",
+        "sha256": "5402655e92d427ade945a37d4c88c9899ad1ca080dbb94cf03db07e10b530f7c",
+        "bytes": 3119
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 13,
+      "scenario": "explicit-codex-gemini-absent",
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "explicit",
+      "fake_programs": [
+        "codex",
+        "gemini"
+      ],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "80afbf31c226e370ca2e4b463f3cc6a7f1b890e64d3182a43a92df87f74192fe.bin",
+        "sha256": "80afbf31c226e370ca2e4b463f3cc6a7f1b890e64d3182a43a92df87f74192fe",
+        "bytes": 121
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 14,
+      "scenario": "default-empty-absent",
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "default",
+      "fake_programs": [],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/home/.codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "8e01e78fb86e3fb8cd2493aeecccde601b3d898c3a9d2e1fd1589b97b854fa0f.bin",
+        "sha256": "8e01e78fb86e3fb8cd2493aeecccde601b3d898c3a9d2e1fd1589b97b854fa0f",
+        "bytes": 2924
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 15,
+      "scenario": "default-empty-absent",
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 1,
+      "codex_home_mode": "default",
+      "fake_programs": [],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/home/.codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      },
+      "stderr": {
+        "file": "622c0d989a6bf9be2f9d0329b60ab390114c83951484a132b05b796cae36edf0.bin",
+        "sha256": "622c0d989a6bf9be2f9d0329b60ab390114c83951484a132b05b796cae36edf0",
+        "bytes": 50
+      }
+    },
+    {
+      "run_number": 16,
+      "scenario": "default-claude-absent",
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "default",
+      "fake_programs": [
+        "claude"
+      ],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/home/.codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "e91aa9865d6f314eda7996caf3c9c526add997f4ea82e4b0bd06043a3d6436c4.bin",
+        "sha256": "e91aa9865d6f314eda7996caf3c9c526add997f4ea82e4b0bd06043a3d6436c4",
+        "bytes": 3088
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 17,
+      "scenario": "default-claude-absent",
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "default",
+      "fake_programs": [
+        "claude"
+      ],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/home/.codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "f9351c63315912c811da5bdcfd0f983fbaa0391a3b99f433cb5c076e2e1cf345.bin",
+        "sha256": "f9351c63315912c811da5bdcfd0f983fbaa0391a3b99f433cb5c076e2e1cf345",
+        "bytes": 60
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 18,
+      "scenario": "default-codex-absent",
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "default",
+      "fake_programs": [
+        "codex"
+      ],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/home/.codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "55ccffdf832239067bcce5397df66e15dce79dd15db0a09aa580355cfca5fd5c.bin",
+        "sha256": "55ccffdf832239067bcce5397df66e15dce79dd15db0a09aa580355cfca5fd5c",
+        "bytes": 3085
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 19,
+      "scenario": "default-codex-absent",
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "default",
+      "fake_programs": [
+        "codex"
+      ],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/home/.codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "31e4203d882e6337c216735901434b0989ed87298d86f217dcf13d448836fc5f.bin",
+        "sha256": "31e4203d882e6337c216735901434b0989ed87298d86f217dcf13d448836fc5f",
+        "bytes": 51
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 20,
+      "scenario": "default-gemini-absent",
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "default",
+      "fake_programs": [
+        "gemini"
+      ],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/home/.codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "f8fc901ff64cf45b6ff1230db6af4be2ceacd698cfaf4fe73c491e22c23b68d8.bin",
+        "sha256": "f8fc901ff64cf45b6ff1230db6af4be2ceacd698cfaf4fe73c491e22c23b68d8",
+        "bytes": 2952
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 21,
+      "scenario": "default-gemini-absent",
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "default",
+      "fake_programs": [
+        "gemini"
+      ],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/home/.codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "a7c981ecaec253f00851cd0747a8ce8317ac26c5764ff388adfab11d8a72ab91.bin",
+        "sha256": "a7c981ecaec253f00851cd0747a8ce8317ac26c5764ff388adfab11d8a72ab91",
+        "bytes": 57
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 22,
+      "scenario": "default-claude-codex-absent",
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "default",
+      "fake_programs": [
+        "claude",
+        "codex"
+      ],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/home/.codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "b624794d9140a4baf3f87987b8570656ed05f68bca0bb008b875e3adadbcfedf.bin",
+        "sha256": "b624794d9140a4baf3f87987b8570656ed05f68bca0bb008b875e3adadbcfedf",
+        "bytes": 3113
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 23,
+      "scenario": "default-claude-codex-absent",
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "default",
+      "fake_programs": [
+        "claude",
+        "codex"
+      ],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/home/.codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "de1b940946346263fb0112e46c7c75d80853e1daa308520d8869e094c525d417.bin",
+        "sha256": "de1b940946346263fb0112e46c7c75d80853e1daa308520d8869e094c525d417",
+        "bytes": 117
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 24,
+      "scenario": "default-claude-gemini-absent",
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "default",
+      "fake_programs": [
+        "claude",
+        "gemini"
+      ],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/home/.codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "3e02b77c3ed131e7e9b72c297e31751140725738591811e2199702771b392aa9.bin",
+        "sha256": "3e02b77c3ed131e7e9b72c297e31751140725738591811e2199702771b392aa9",
+        "bytes": 3116
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 25,
+      "scenario": "default-claude-gemini-absent",
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "default",
+      "fake_programs": [
+        "claude",
+        "gemini"
+      ],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/home/.codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "bdab75de60a3d903adc14646696d3ac4af589d43e02a4363f549c65ef1c4823e.bin",
+        "sha256": "bdab75de60a3d903adc14646696d3ac4af589d43e02a4363f549c65ef1c4823e",
+        "bytes": 120
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 26,
+      "scenario": "default-codex-gemini-absent",
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "default",
+      "fake_programs": [
+        "codex",
+        "gemini"
+      ],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/home/.codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "2ee7fa5f4649f5fa1d4d7a400a3402b6e11fd28f6b86f92e0949784f756be3c3.bin",
+        "sha256": "2ee7fa5f4649f5fa1d4d7a400a3402b6e11fd28f6b86f92e0949784f756be3c3",
+        "bytes": 3113
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 27,
+      "scenario": "default-codex-gemini-absent",
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "default",
+      "fake_programs": [
+        "codex",
+        "gemini"
+      ],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/home/.codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "dd009e6b0d88cb747238a85b16599c502007fdb67fc1fb8201748259435926e6.bin",
+        "sha256": "dd009e6b0d88cb747238a85b16599c502007fdb67fc1fb8201748259435926e6",
+        "bytes": 115
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 28,
+      "scenario": "default-all-three-absent",
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "default",
+      "fake_programs": [
+        "claude",
+        "codex",
+        "gemini"
+      ],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/home/.codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "6a441e076883e1997d53d4016ce36a1812c5cd30dc165150941b891734e95e4f.bin",
+        "sha256": "6a441e076883e1997d53d4016ce36a1812c5cd30dc165150941b891734e95e4f",
+        "bytes": 3141
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 29,
+      "scenario": "default-all-three-absent",
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "default",
+      "fake_programs": [
+        "claude",
+        "codex",
+        "gemini"
+      ],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/home/.codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "e7da5595b4988e7f2f17418b3fbc5e9d6e0e1983af89778b1c2c6cb72ed7ecfc.bin",
+        "sha256": "e7da5595b4988e7f2f17418b3fbc5e9d6e0e1983af89778b1c2c6cb72ed7ecfc",
+        "bytes": 177
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 30,
+      "scenario": "default-empty-directory",
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "default",
+      "fake_programs": [],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/home/.codex",
+        "codex_directory_exists": true,
+        "codex_entries": [],
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "155a752eeba36cf18fd61609cd03ed3ae6458872803ad0ec41279b52d10303e0.bin",
+        "sha256": "155a752eeba36cf18fd61609cd03ed3ae6458872803ad0ec41279b52d10303e0",
+        "bytes": 3012
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 31,
+      "scenario": "default-empty-directory",
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "default",
+      "fake_programs": [],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/home/.codex",
+        "codex_directory_exists": true,
+        "codex_entries": [],
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "4133752fea70affd3ff8eda889f6d53fd8732e473e5b5980e42c499a90cfb4e9.bin",
+        "sha256": "4133752fea70affd3ff8eda889f6d53fd8732e473e5b5980e42c499a90cfb4e9",
+        "bytes": 45
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 32,
+      "scenario": "default-codex-directory",
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "default",
+      "fake_programs": [
+        "codex"
+      ],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/home/.codex",
+        "codex_directory_exists": true,
+        "codex_entries": [],
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "55ccffdf832239067bcce5397df66e15dce79dd15db0a09aa580355cfca5fd5c.bin",
+        "sha256": "55ccffdf832239067bcce5397df66e15dce79dd15db0a09aa580355cfca5fd5c",
+        "bytes": 3085
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 33,
+      "scenario": "default-codex-directory",
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "default",
+      "fake_programs": [
+        "codex"
+      ],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/home/.codex",
+        "codex_directory_exists": true,
+        "codex_entries": [],
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "31e4203d882e6337c216735901434b0989ed87298d86f217dcf13d448836fc5f.bin",
+        "sha256": "31e4203d882e6337c216735901434b0989ed87298d86f217dcf13d448836fc5f",
+        "bytes": 51
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 34,
+      "scenario": "default-all-three-directory",
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "default",
+      "fake_programs": [
+        "claude",
+        "codex",
+        "gemini"
+      ],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/home/.codex",
+        "codex_directory_exists": true,
+        "codex_entries": [],
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "6a441e076883e1997d53d4016ce36a1812c5cd30dc165150941b891734e95e4f.bin",
+        "sha256": "6a441e076883e1997d53d4016ce36a1812c5cd30dc165150941b891734e95e4f",
+        "bytes": 3141
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 35,
+      "scenario": "default-all-three-directory",
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "default",
+      "fake_programs": [
+        "claude",
+        "codex",
+        "gemini"
+      ],
+      "tracing_enabled": true,
+      "candidate_state_before": {
+        "codex_home": "/fixture/home/.codex",
+        "codex_directory_exists": true,
+        "codex_entries": [],
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "e7da5595b4988e7f2f17418b3fbc5e9d6e0e1983af89778b1c2c6cb72ed7ecfc.bin",
+        "sha256": "e7da5595b4988e7f2f17418b3fbc5e9d6e0e1983af89778b1c2c6cb72ed7ecfc",
+        "bytes": 177
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 36,
+      "scenario": "explicit-claude-codex-absent-untraced",
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "explicit",
+      "fake_programs": [
+        "claude",
+        "codex"
+      ],
+      "tracing_enabled": false,
+      "candidate_state_before": {
+        "codex_home": "/fixture/codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "03aadd69c05abc4ff413112a30375190d5a27a515f54b1b7fdfeee674e9389bc.bin",
+        "sha256": "03aadd69c05abc4ff413112a30375190d5a27a515f54b1b7fdfeee674e9389bc",
+        "bytes": 3119
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 37,
+      "scenario": "explicit-claude-codex-absent-untraced",
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "explicit",
+      "fake_programs": [
+        "claude",
+        "codex"
+      ],
+      "tracing_enabled": false,
+      "candidate_state_before": {
+        "codex_home": "/fixture/codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "ec5443a29de06e8ca99628058ec3fa0771654ddfead98fe993d741088aba2041.bin",
+        "sha256": "ec5443a29de06e8ca99628058ec3fa0771654ddfead98fe993d741088aba2041",
+        "bytes": 123
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 38,
+      "scenario": "explicit-claude-gemini-absent-untraced",
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "explicit",
+      "fake_programs": [
+        "claude",
+        "gemini"
+      ],
+      "tracing_enabled": false,
+      "candidate_state_before": {
+        "codex_home": "/fixture/codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "3e02b77c3ed131e7e9b72c297e31751140725738591811e2199702771b392aa9.bin",
+        "sha256": "3e02b77c3ed131e7e9b72c297e31751140725738591811e2199702771b392aa9",
+        "bytes": 3116
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 39,
+      "scenario": "explicit-claude-gemini-absent-untraced",
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "explicit",
+      "fake_programs": [
+        "claude",
+        "gemini"
+      ],
+      "tracing_enabled": false,
+      "candidate_state_before": {
+        "codex_home": "/fixture/codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "bdab75de60a3d903adc14646696d3ac4af589d43e02a4363f549c65ef1c4823e.bin",
+        "sha256": "bdab75de60a3d903adc14646696d3ac4af589d43e02a4363f549c65ef1c4823e",
+        "bytes": 120
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 40,
+      "scenario": "explicit-codex-gemini-absent-untraced",
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "explicit",
+      "fake_programs": [
+        "codex",
+        "gemini"
+      ],
+      "tracing_enabled": false,
+      "candidate_state_before": {
+        "codex_home": "/fixture/codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "5402655e92d427ade945a37d4c88c9899ad1ca080dbb94cf03db07e10b530f7c.bin",
+        "sha256": "5402655e92d427ade945a37d4c88c9899ad1ca080dbb94cf03db07e10b530f7c",
+        "bytes": 3119
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 41,
+      "scenario": "explicit-codex-gemini-absent-untraced",
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "explicit",
+      "fake_programs": [
+        "codex",
+        "gemini"
+      ],
+      "tracing_enabled": false,
+      "candidate_state_before": {
+        "codex_home": "/fixture/codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "80afbf31c226e370ca2e4b463f3cc6a7f1b890e64d3182a43a92df87f74192fe.bin",
+        "sha256": "80afbf31c226e370ca2e4b463f3cc6a7f1b890e64d3182a43a92df87f74192fe",
+        "bytes": 121
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 42,
+      "scenario": "default-all-three-absent-untraced",
+      "argv": [
+        "/usr/bin/magpie",
+        "agents"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "default",
+      "fake_programs": [
+        "claude",
+        "codex",
+        "gemini"
+      ],
+      "tracing_enabled": false,
+      "candidate_state_before": {
+        "codex_home": "/fixture/home/.codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "6a441e076883e1997d53d4016ce36a1812c5cd30dc165150941b891734e95e4f.bin",
+        "sha256": "6a441e076883e1997d53d4016ce36a1812c5cd30dc165150941b891734e95e4f",
+        "bytes": 3141
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    },
+    {
+      "run_number": 43,
+      "scenario": "default-all-three-absent-untraced",
+      "argv": [
+        "/usr/bin/magpie",
+        "ls"
+      ],
+      "exit_code": 0,
+      "codex_home_mode": "default",
+      "fake_programs": [
+        "claude",
+        "codex",
+        "gemini"
+      ],
+      "tracing_enabled": false,
+      "candidate_state_before": {
+        "codex_home": "/fixture/home/.codex",
+        "codex_directory_exists": false,
+        "codex_entries": null,
+        "codex_config_exists": false,
+        "claude_directory_exists": false,
+        "gemini_directory_exists": false
+      },
+      "stdout": {
+        "file": "e7da5595b4988e7f2f17418b3fbc5e9d6e0e1983af89778b1c2c6cb72ed7ecfc.bin",
+        "sha256": "e7da5595b4988e7f2f17418b3fbc5e9d6e0e1983af89778b1c2c6cb72ed7ecfc",
+        "bytes": 177
+      },
+      "stderr": {
+        "file": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "bytes": 0
+      }
+    }
+  ]
+}

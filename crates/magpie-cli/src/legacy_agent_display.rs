@@ -1,8 +1,8 @@
 //! The observed Magpie 0.1.1948 `agents`/`ls` text slice, not a discovery adapter.
 //!
-//! Evidence: 36-original-cli-behavior.md and 39-original-cli-candidate-behavior.md.
-//! The latter adds single Claude/Codex/Gemini candidates and the all-three set
-//! without settings. Unobserved combinations/configurations stay out of scope.
+//! Evidence: original CLI observations 36, 39 and 40. These cover empty state,
+//! single/pair/all-three Claude/Codex/Gemini candidates and default Codex HOME.
+//! Unobserved directory combinations/configurations stay out of scope.
 //! Incomplete discovery is never converted into the original empty-`ls` response.
 //!
 //! Callers supply a core report and an explicitly inspected Codex directory;
@@ -208,7 +208,7 @@ pub fn inspect_codex_directory(home: &Path) -> io::Result<CodexDirectory> {
     }
 }
 
-/// Checks the empty state used by observation 39, without reading file contents.
+/// Checks the empty state used by observations 39/40, without reading file contents.
 ///
 /// Claude/Gemini state directories must be absent. Codex may be absent or a
 /// direct empty directory. Any existing state, including an account or unrelated
@@ -255,10 +255,10 @@ pub fn render(
     report: &DiscoveryReport,
     codex_directory: &CodexDirectory,
 ) -> Result<TextOutput, DisplayError> {
-    render_observed(command, report, codex_directory, None)
+    render_observed(command, report, codex_directory, None, false)
 }
 
-/// Renders observation 39's candidates after an empty-state inspection succeeds.
+/// Renders observations 39/40's candidates after an empty-state inspection succeeds.
 ///
 /// The caller must first establish [`inspect_empty_candidate_state`] for the
 /// same explicit HOME/CODEX_HOME. The config path remains available even when
@@ -273,7 +273,36 @@ pub fn render_unconfigured_candidates(
     codex_directory: &CodexDirectory,
     codex_config_path: &Path,
 ) -> Result<TextOutput, DisplayError> {
-    render_observed(command, report, codex_directory, Some(codex_config_path))
+    render_observed(
+        command,
+        report,
+        codex_directory,
+        Some(codex_config_path),
+        false,
+    )
+}
+
+/// Renders observation 40 with CODEX_HOME unset and the default path abbreviated.
+///
+/// The same inspection preconditions as [`render_unconfigured_candidates`] apply;
+/// callers still supply the actual absolute path for validation.
+///
+/// # Errors
+/// Returns the same discovery, combination and path errors as the explicit-home
+/// renderer. Existing settings are outside this observed empty-state slice.
+pub fn render_unconfigured_default_home(
+    command: TextCommand,
+    report: &DiscoveryReport,
+    codex_directory: &CodexDirectory,
+    codex_config_path: &Path,
+) -> Result<TextOutput, DisplayError> {
+    render_observed(
+        command,
+        report,
+        codex_directory,
+        Some(codex_config_path),
+        true,
+    )
 }
 
 fn render_observed(
@@ -281,6 +310,7 @@ fn render_observed(
     report: &DiscoveryReport,
     codex_directory: &CodexDirectory,
     candidate_config_path: Option<&Path>,
+    default_codex_home: bool,
 ) -> Result<TextOutput, DisplayError> {
     if report.agents.len() != ORIGINAL_ORDER.len()
         || ORIGINAL_ORDER.iter().any(|id| {
@@ -351,9 +381,18 @@ fn render_observed(
     if !candidates.is_empty()
         && (!matches!(
             candidates.as_slice(),
-            ["claude"] | ["codex"] | ["gemini"] | ["claude", "codex", "gemini"]
+            ["claude"]
+                | ["codex"]
+                | ["gemini"]
+                | ["claude", "codex"]
+                | ["claude", "gemini"]
+                | ["codex", "gemini"]
+                | ["claude", "codex", "gemini"]
         ) || (matches!(codex_directory, CodexDirectory::Present { .. })
-            && !candidates.contains(&"codex")))
+            && !matches!(
+                candidates.as_slice(),
+                ["codex"] | ["claude", "codex", "gemini"]
+            )))
     {
         return Err(DisplayError::UnobservedCombination);
     }
@@ -375,6 +414,13 @@ fn render_observed(
             CodexDirectory::NotChecked => return Err(DisplayError::IncompleteDiscovery),
         }
     };
+    let config_path = config_path.map(|path| {
+        if default_codex_home {
+            "~/.codex/config.toml"
+        } else {
+            path
+        }
+    });
     let mut rows = Vec::new();
     for id in ORIGINAL_ORDER {
         let definition = report

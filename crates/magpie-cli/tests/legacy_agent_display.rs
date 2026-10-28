@@ -20,6 +20,7 @@ use std::{
 use legacy_agent_display::{
     CodexDirectory, DisplayError, TextCommand, inspect_codex_directory,
     inspect_empty_candidate_state, render, render_unconfigured_candidates,
+    render_unconfigured_default_home,
 };
 use magpie_core::agent_catalog::{
     Detection, DiscoveryInput, DiscoveryReport, ExecutableStyle, NotCheckedReason, ScanLimits,
@@ -520,9 +521,65 @@ fn new_candidate_slice_does_not_accept_uncertain_or_unobserved_states() {
         render_unconfigured_candidates(
             TextCommand::Ls,
             &fixture.report(),
-            &CodexDirectory::Missing,
+            &observed_codex_directory(),
             path
         ),
         Err(DisplayError::UnobservedCombination)
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn pairs_and_default_home_match_all_40_observations_without_substitution() {
+    let goldens =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/legacy_agent_candidates_40");
+    for line in include_str!("fixtures/legacy_agent_candidates_40/cases.tsv")
+        .lines()
+        .skip(1)
+    {
+        let fields: Vec<_> = line.split('\t').collect();
+        assert_eq!(fields.len(), 8, "case {line}");
+        let fixture = Fixture::new();
+        for name in fields[3].split(',').filter(|name| *name != "-") {
+            fixture.executable(name);
+        }
+        let path = PathBuf::from(if fields[1] == "default" {
+            "/fixture/home/.codex/config.toml"
+        } else {
+            "/fixture/codex/config.toml"
+        });
+        let directory = if fields[2] == "1" {
+            CodexDirectory::Present {
+                config_path: path.clone(),
+            }
+        } else {
+            CodexDirectory::Missing
+        };
+        let command = if fields[4] == "agents" {
+            TextCommand::Agents
+        } else {
+            TextCommand::Ls
+        };
+        let report = fixture.report();
+        let renderer = if fields[1] == "default" {
+            render_unconfigured_default_home
+        } else {
+            render_unconfigured_candidates
+        };
+        let output = renderer(command, &report, &directory, &path).unwrap();
+        assert_eq!(
+            output.stdout.as_bytes(),
+            fs::read(goldens.join(fields[6])).unwrap(),
+            "observation {} stdout",
+            fields[0]
+        );
+        assert_eq!(
+            output.stderr.as_bytes(),
+            fs::read(goldens.join(fields[7])).unwrap(),
+            "observation {} stderr",
+            fields[0]
+        );
+        assert_eq!(output.exit_code, fields[5].parse::<u8>().unwrap());
+        assert_eq!(output.unchecked_agent_ids.len(), 48);
+    }
 }

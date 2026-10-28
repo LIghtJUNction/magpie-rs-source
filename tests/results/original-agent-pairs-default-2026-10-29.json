@@ -1,0 +1,60 @@
+{
+  "date": "2026-10-29",
+  "base_commit": "00dc72411d82891d4006548c6b31fb11b3f6ac5a",
+  "input_sha256": {
+    ".gitattributes": "378de057a99a80b5160ee41bb6303d0f7dae57a726a0c53ec1f81e0b4a4220ea",
+    "crates/magpie-cli/src/legacy_agent_display.rs": "2e831e95e32ea48e0e7497f66859f6db4cbee0743e28a6cb14567e45d687c2c3",
+    "crates/magpie-cli/src/main.rs": "599b5e34b1a1003697222adff443af942f0a670d3b1869e2da35c973aecd5a68",
+    "crates/magpie-cli/tests/legacy_agent_candidates.rs": "ff61497de5ef27c3dfdb86d3b19c10ea90e487af421f34c48998e0b5171db8c3",
+    "crates/magpie-cli/tests/legacy_agent_display.rs": "95e82df7e49c220dccdf4744a7bb0351e7b44521fc5e338db686171c5e9cc118",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/03aadd69c05abc4ff413112a30375190d5a27a515f54b1b7fdfeee674e9389bc.bin": "03aadd69c05abc4ff413112a30375190d5a27a515f54b1b7fdfeee674e9389bc",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/155a752eeba36cf18fd61609cd03ed3ae6458872803ad0ec41279b52d10303e0.bin": "155a752eeba36cf18fd61609cd03ed3ae6458872803ad0ec41279b52d10303e0",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/2ee7fa5f4649f5fa1d4d7a400a3402b6e11fd28f6b86f92e0949784f756be3c3.bin": "2ee7fa5f4649f5fa1d4d7a400a3402b6e11fd28f6b86f92e0949784f756be3c3",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/31e4203d882e6337c216735901434b0989ed87298d86f217dcf13d448836fc5f.bin": "31e4203d882e6337c216735901434b0989ed87298d86f217dcf13d448836fc5f",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/3e02b77c3ed131e7e9b72c297e31751140725738591811e2199702771b392aa9.bin": "3e02b77c3ed131e7e9b72c297e31751140725738591811e2199702771b392aa9",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/40f695d6158688332fb1075bd648c35bbf6e35ae82feb01eac684631c834407c.bin": "40f695d6158688332fb1075bd648c35bbf6e35ae82feb01eac684631c834407c",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/4133752fea70affd3ff8eda889f6d53fd8732e473e5b5980e42c499a90cfb4e9.bin": "4133752fea70affd3ff8eda889f6d53fd8732e473e5b5980e42c499a90cfb4e9",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/41b980a9f90a3e1b01520d5b6257d1339a26b3040d5faed9c88a2c39bbf75927.bin": "41b980a9f90a3e1b01520d5b6257d1339a26b3040d5faed9c88a2c39bbf75927",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/5402655e92d427ade945a37d4c88c9899ad1ca080dbb94cf03db07e10b530f7c.bin": "5402655e92d427ade945a37d4c88c9899ad1ca080dbb94cf03db07e10b530f7c",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/55ccffdf832239067bcce5397df66e15dce79dd15db0a09aa580355cfca5fd5c.bin": "55ccffdf832239067bcce5397df66e15dce79dd15db0a09aa580355cfca5fd5c",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/622c0d989a6bf9be2f9d0329b60ab390114c83951484a132b05b796cae36edf0.bin": "622c0d989a6bf9be2f9d0329b60ab390114c83951484a132b05b796cae36edf0",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/6a441e076883e1997d53d4016ce36a1812c5cd30dc165150941b891734e95e4f.bin": "6a441e076883e1997d53d4016ce36a1812c5cd30dc165150941b891734e95e4f",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/80afbf31c226e370ca2e4b463f3cc6a7f1b890e64d3182a43a92df87f74192fe.bin": "80afbf31c226e370ca2e4b463f3cc6a7f1b890e64d3182a43a92df87f74192fe",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/8e01e78fb86e3fb8cd2493aeecccde601b3d898c3a9d2e1fd1589b97b854fa0f.bin": "8e01e78fb86e3fb8cd2493aeecccde601b3d898c3a9d2e1fd1589b97b854fa0f",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/README.md": "c3c16181b898304b7470e46af015371c60377a7c1081eb3e2742522b434a79ab",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/a7c981ecaec253f00851cd0747a8ce8317ac26c5764ff388adfab11d8a72ab91.bin": "a7c981ecaec253f00851cd0747a8ce8317ac26c5764ff388adfab11d8a72ab91",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/b624794d9140a4baf3f87987b8570656ed05f68bca0bb008b875e3adadbcfedf.bin": "b624794d9140a4baf3f87987b8570656ed05f68bca0bb008b875e3adadbcfedf",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/bdab75de60a3d903adc14646696d3ac4af589d43e02a4363f549c65ef1c4823e.bin": "bdab75de60a3d903adc14646696d3ac4af589d43e02a4363f549c65ef1c4823e",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/cases.tsv": "a54a7e3a433454f5de9321ce656dfefe459883494f6f201ceb7853097fecaca8",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/dd009e6b0d88cb747238a85b16599c502007fdb67fc1fb8201748259435926e6.bin": "dd009e6b0d88cb747238a85b16599c502007fdb67fc1fb8201748259435926e6",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/de1b940946346263fb0112e46c7c75d80853e1daa308520d8869e094c525d417.bin": "de1b940946346263fb0112e46c7c75d80853e1daa308520d8869e094c525d417",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.bin": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/e7da5595b4988e7f2f17418b3fbc5e9d6e0e1983af89778b1c2c6cb72ed7ecfc.bin": "e7da5595b4988e7f2f17418b3fbc5e9d6e0e1983af89778b1c2c6cb72ed7ecfc",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/e91aa9865d6f314eda7996caf3c9c526add997f4ea82e4b0bd06043a3d6436c4.bin": "e91aa9865d6f314eda7996caf3c9c526add997f4ea82e4b0bd06043a3d6436c4",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/ec5443a29de06e8ca99628058ec3fa0771654ddfead98fe993d741088aba2041.bin": "ec5443a29de06e8ca99628058ec3fa0771654ddfead98fe993d741088aba2041",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/extract.py": "e24037af60cdea4dbaeec9dc8fc551ae2fcf304fae36ef95f974a60ae468d62a",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/f8fc901ff64cf45b6ff1230db6af4be2ceacd698cfaf4fe73c491e22c23b68d8.bin": "f8fc901ff64cf45b6ff1230db6af4be2ceacd698cfaf4fe73c491e22c23b68d8",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/f9351c63315912c811da5bdcfd0f983fbaa0391a3b99f433cb5c076e2e1cf345.bin": "f9351c63315912c811da5bdcfd0f983fbaa0391a3b99f433cb5c076e2e1cf345",
+    "crates/magpie-cli/tests/fixtures/legacy_agent_candidates_40/manifest.json": "f15e8f0889013f30c35e25aaed6dfdb57eb61b952fe3cdb2cd3a3b2a4eccdc2c"
+  },
+  "original_observation_sha256": "bfe8ae99a89ab53cedb6f2f8734e9485d6d0bf2d177d6c981263ce18408a0afa",
+  "independent_worker_validation": {
+    "original_samples_byte_exact": 40,
+    "cli_tests": 38,
+    "helper_ignored": 1,
+    "fmt": "passed",
+    "clippy": "passed",
+    "previous_behavior_comparisons": 611,
+    "source_and_fixtures_verified_identical_files": 33
+  },
+  "limitations": [
+    "two-candidate plus empty Codex directory not observed",
+    "real configurations and accounts, GPUI, non-Linux platforms not verified"
+  ],
+  "main_integration_validation": {
+    "cli_tests": 38,
+    "helper_ignored": 1,
+    "fmt": "passed",
+    "clippy": "passed"
+  }
+}
