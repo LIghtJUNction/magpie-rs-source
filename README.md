@@ -28,8 +28,8 @@ full requirements and acceptance status.
 
 Reproducible Linux benchmark runners and their raw JSON results are in
 [`benchmark/`](benchmark/). The 2026-10-28 x86_64 run measured the release CLI
-at 577,896 bytes, warm CLI process-start p50 at 1.53–1.74 ms, empty gateway catalog
-request p50 at 0.205 ms, and idle gateway RSS median at 2,972 KiB. These are
+at 577,896 bytes, warm CLI process-start p50 at 1.37–1.85 ms, empty gateway
+catalog request p50 at 0.090 ms, and idle gateway RSS/PSS medians at 2,976/779 KiB. These are
 host-specific baselines for the implemented paths, not cross-platform or
 upstream-inference measurements. Method and limitations are documented in
 [`benchmark/README.md`](benchmark/README.md).
