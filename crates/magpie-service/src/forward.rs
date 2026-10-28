@@ -6,7 +6,7 @@ use crate::protocol::{
     ResponseContext, SseConverter, StreamBatch,
 };
 use bytes::{Bytes, BytesMut};
-use futures_util::{Stream, StreamExt, TryStreamExt};
+use futures_util::{Stream, StreamExt, TryStreamExt, task::AtomicWaker};
 use http_body_util::{BodyExt, Full, StreamBody, combinators::UnsyncBoxBody};
 use hyper::{
     Request, Response, StatusCode,
@@ -26,8 +26,9 @@ use std::{
     pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    task::{Context, Poll},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
@@ -293,22 +294,140 @@ impl ForwardServer {
             tokio::spawn(async move {
                 let _connection_permit = permit;
                 let service = service_fn(move |request| handle(request, state.clone()));
-                let mut builder = http1::Builder::new();
-                builder
-                    .keep_alive(false)
-                    .max_headers(64)
-                    .max_buf_size(32 * 1024)
-                    .timer(TokioTimer::new())
-                    .header_read_timeout(Duration::from_secs(2));
                 // Also bounds a client that stops reading a response forever.
                 let _ = timeout(
                     TOTAL_TIMEOUT + Duration::from_secs(5),
-                    builder.serve_connection(TokioIo::new(socket), service),
+                    serve_forward_connection(TokioIo::new(socket), service),
                 )
                 .await;
             });
         }
     }
+}
+
+async fn serve_forward_connection<I, S>(io: I, service: S) -> Result<(), hyper::Error>
+where
+    I: hyper::rt::Read + hyper::rt::Write + Unpin,
+    S: hyper::service::Service<Request<Incoming>, Response = Response<Body>, Error = Infallible>,
+{
+    let flushed = Arc::new(ResponseFlush::default());
+    let io = FlushObserved {
+        inner: io,
+        flushed: flushed.clone(),
+    };
+    let service = service_fn(move |request| {
+        let response = service.call(request);
+        let flushed = flushed.clone();
+        async move {
+            response
+                .await
+                .map(|response| flush_before_stream_errors(response, flushed))
+        }
+    });
+    let mut builder = http1::Builder::new();
+    builder
+        .keep_alive(false)
+        .max_headers(64)
+        .max_buf_size(32 * 1024)
+        .timer(TokioTimer::new())
+        .header_read_timeout(Duration::from_secs(2));
+    builder.serve_connection(io, service).await
+}
+
+#[derive(Default)]
+struct ResponseFlush {
+    complete: AtomicBool,
+    waiter: AtomicWaker,
+}
+
+struct FlushObserved<I> {
+    inner: I,
+    flushed: Arc<ResponseFlush>,
+}
+
+impl<I: hyper::rt::Read + Unpin> hyper::rt::Read for FlushObserved<I> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: hyper::rt::ReadBufCursor<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
+    }
+}
+
+impl<I: hyper::rt::Write + Unpin> hyper::rt::Write for FlushObserved<I> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.inner).poll_flush(cx);
+        if matches!(result, Poll::Ready(Ok(()))) {
+            this.flushed.complete.store(true, Ordering::Release);
+            this.flushed.waiter.wake();
+        }
+        result
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+fn flush_before_stream_errors(
+    response: Response<Body>,
+    flushed: Arc<ResponseFlush>,
+) -> Response<Body> {
+    if response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        != Some("text/event-stream")
+    {
+        return response;
+    }
+    // Hyper buffers the head and can poll the body before flushing it. An
+    // immediately ready body error would discard that head. Arm only after
+    // constructing the final response, so idle/100-Continue flushes do not count.
+    // Connections serve one response (keep_alive(false)), so one barrier suffices.
+    flushed.complete.store(false, Ordering::Release);
+    let (parts, body) = response.into_parts();
+    let frames = futures_util::stream::unfold(body, move |mut body| {
+        let flushed = flushed.clone();
+        async move {
+            let frame = body.frame().await?;
+            if frame.is_err() {
+                futures_util::future::poll_fn(|cx| {
+                    flushed.waiter.register(cx.waker());
+                    if flushed.complete.load(Ordering::Acquire) {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await;
+            }
+            Some((frame, body))
+        }
+    });
+    Response::from_parts(parts, StreamBody::new(frames).boxed_unsync())
 }
 
 #[derive(Default)]
@@ -1705,6 +1824,151 @@ fn inspected_models(address: SocketAddr) -> io::Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ScheduledIo {
+        request: Bytes,
+        written: Arc<std::sync::Mutex<Vec<u8>>>,
+        max_write: usize,
+        stall_write: bool,
+        stall_flush: bool,
+    }
+
+    impl hyper::rt::Read for ScheduledIo {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            mut buf: hyper::rt::ReadBufCursor<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            let this = self.get_mut();
+            if this.request.is_empty() {
+                return std::task::Poll::Pending;
+            }
+            let length = buf.remaining().min(this.request.len());
+            buf.put_slice(&this.request.split_to(length));
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    impl hyper::rt::Write for ScheduledIo {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            if this.stall_write {
+                this.stall_write = false;
+                cx.waker().wake_by_ref();
+                return std::task::Poll::Pending;
+            }
+            let length = buf.len().min(this.max_write);
+            this.written
+                .lock()
+                .unwrap()
+                .extend_from_slice(&buf[..length]);
+            this.stall_write = true;
+            std::task::Poll::Ready(Ok(length))
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            let this = self.get_mut();
+            if this.stall_flush {
+                this.stall_flush = false;
+                cx.waker().wake_by_ref();
+                return std::task::Poll::Pending;
+            }
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn immediate_sse_error_preserves_complete_response_headers() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for prefix in [b"".as_slice(), b": safe comment\n\n".as_slice()] {
+            for max_write in [usize::MAX, 1, 7] {
+                let written = Arc::new(std::sync::Mutex::new(Vec::new()));
+                let io = ScheduledIo {
+                    request: Bytes::from_static(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+                    written: written.clone(),
+                    max_write,
+                    stall_write: false,
+                    stall_flush: true,
+                };
+                let service = service_fn(move |_| async move {
+                    let frames = if prefix.is_empty() {
+                        vec![Err(io::Error::other("synthetic-private-error"))]
+                    } else {
+                        vec![
+                            Ok(Bytes::copy_from_slice(prefix)),
+                            Err(io::Error::other("synthetic-private-error")),
+                        ]
+                    };
+                    Ok::<_, Infallible>(stream_response(
+                        futures_util::stream::iter(frames),
+                        "local",
+                        "local/synthetic",
+                    ))
+                });
+                let result = runtime.block_on(async {
+                    timeout(
+                        Duration::from_secs(2),
+                        serve_forward_connection(io, service),
+                    )
+                    .await
+                });
+                assert!(result.unwrap().is_err(), "body must remain incomplete");
+                let wire = written.lock().unwrap();
+                assert!(
+                    wire.starts_with(b"HTTP/1.1 200 OK\r\n"),
+                    "response headers lost: prefix={} max_write={max_write} bytes={}",
+                    prefix.len(),
+                    wire.len()
+                );
+                let head_end = wire
+                    .windows(4)
+                    .position(|bytes| bytes == b"\r\n\r\n")
+                    .expect("complete HTTP header block");
+                let head = std::str::from_utf8(&wire[..head_end])
+                    .unwrap()
+                    .to_ascii_lowercase();
+                for header in [
+                    "content-type: text/event-stream",
+                    "cache-control: no-store",
+                    "transfer-encoding: chunked",
+                    "x-magpie-provider: local",
+                    "x-magpie-model: local/synthetic",
+                ] {
+                    assert!(head.contains(header), "missing {header}");
+                }
+                if !prefix.is_empty() {
+                    assert!(wire.windows(prefix.len()).any(|bytes| bytes == prefix));
+                }
+                assert!(
+                    !wire
+                        .windows(23)
+                        .any(|bytes| bytes == b"synthetic-private-error")
+                );
+                assert!(
+                    !wire.ends_with(b"0\r\n\r\n"),
+                    "failure must not become clean EOF"
+                );
+            }
+        }
+    }
+
     #[test]
     fn config_has_no_secret_url_or_unbounded_model_surface() {
         let good = br#"{"version":1,"provider_id":"local","base_url":"http://127.0.0.1:9999/v1","models":["fixture-a"]}"#;

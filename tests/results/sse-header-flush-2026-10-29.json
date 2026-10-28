@@ -1,0 +1,31 @@
+{
+  "date": "2026-10-29",
+  "base_commit": "72358f5d97cd109809d37eab82fa521681aeb0e7",
+  "binary_sha256": "0a7bb78f77462382cf5e82da9256348b00e0653354400c294b772a51fbc48e27",
+  "input_sha256": {
+    "crates/magpie-service/src/forward.rs": "8da5fb09fac17e0be614c9748d5c570ed64f9009d2d98156f1d41cf46a8e7ebb",
+    "tests/repeat_stream_error.py": "bf47e16150313c19e2697f80a497ba67e6f2b88c1f0e6817c9aeeb51ef67e86d",
+    "tests/native_error_matrix.py": "33e1bb008e45b841e9770272b01ebeb9824cdfe90c816ba505c352eb17c41aa5",
+    "tests/first_loop.py": "122d502219c87ad1a5c8bb6b7c273692f622a48b61d3cc022cbb3678d2b5d76d"
+  },
+  "prior_failure": "original unmodified test06: 29/30 pass, one RemoteDisconnected before HTTP headers; deterministic failing mock emitted zero bytes",
+  "post_fix": {
+    "service_tests": 56,
+    "service_clippy": "passed",
+    "first_loop": 26,
+    "test06_repetitions": 1000,
+    "error_matrix_requests": 640,
+    "error_matrix_counters": {
+      "completed": 0,
+      "failed": 640,
+      "cancelled": 0,
+      "active": 0
+    }
+  },
+  "scope": "Linux synthetic loopback HTTP and controllable Hyper IO; no real accounts",
+  "limitations": [
+    "Pro provider integration remains separately unverified",
+    "no external TLS or other operating systems tested",
+    "non-empty malformed status lines not directly reproduced"
+  ]
+}
