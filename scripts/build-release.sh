@@ -15,17 +15,7 @@ for arg in "$@"; do
   esac
 done
 root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$root"
-export CARGO_TARGET_DIR="${MAGPIE_RS_TARGET_DIR:-/tmp/magpie-rs-release-${target}}"
-python scripts/package-release.py --version "$version" --check-version
-cargo build --release --locked --package magpie-cli --target "$target"
-extension=""
-case "$target" in *-windows-*) extension=".exe" ;; esac
-args=(--version "$version" --target "$target"
-      --binary "$CARGO_TARGET_DIR/$target/release/magpie$extension" --out-dir "$out")
-if "$desktop"; then
-  cargo build --release --locked --manifest-path apps/desktop/Cargo.toml --target "$target"
-  args+=(--desktop-binary "$CARGO_TARGET_DIR/$target/release/magpie-desktop$extension")
-fi
+args=(--version "$version" --target "$target" --out-dir "$out" --build)
+if "$desktop"; then args+=(--with-desktop); fi
 if "$native"; then args+=(--native-packages); fi
-python scripts/package-release.py "${args[@]}"
+exec python3 -B "$root/scripts/package-release.py" "${args[@]}"

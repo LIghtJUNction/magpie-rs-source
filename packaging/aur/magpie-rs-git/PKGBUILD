@@ -51,4 +51,15 @@ package() {
   install -Dm644 packaging/linux/magpie-rs.desktop "${pkgdir}/usr/share/applications/magpie-rs.desktop"
   install -Dm644 packaging/linux/magpie-rs.svg "${pkgdir}/usr/share/icons/hicolor/scalable/apps/magpie-rs.svg"
   install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+  local notices="${srcdir}/magpie-rs-license-notices"
+  local host
+  host="$(rustc -vV | sed -n 's/^host: //p')"
+  python scripts/collect-licenses.py --target "${host}" \
+    --binary "${target}/release/magpie" \
+    --desktop-binary "${target}/release/magpie-desktop" \
+    --out-dir "${notices}"
+  local notice
+  for notice in THIRD-PARTY-NOTICES.txt THIRD-PARTY-LICENSES.json; do
+    install -Dm644 "${notices}/${notice}" "${pkgdir}/usr/share/licenses/${pkgname}/${notice}"
+  done
 }

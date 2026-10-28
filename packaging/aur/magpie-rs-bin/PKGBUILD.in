@@ -26,6 +26,15 @@ package() {
   install -Dm644 "${gui}/share/icons/hicolor/scalable/apps/magpie-rs.svg" \
     "${pkgdir}/usr/share/icons/hicolor/scalable/apps/magpie-rs.svg"
   install -Dm644 "${cli}/LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+  local variant notice
+  for variant in cli gui; do
+    local archive="${cli}"
+    [[ "${variant}" == gui ]] && archive="${gui}"
+    for notice in THIRD-PARTY-NOTICES.txt THIRD-PARTY-LICENSES.json; do
+      install -Dm644 "${archive}/${notice}" \
+        "${pkgdir}/usr/share/licenses/${pkgname}/${variant}/${notice}"
+    done
+  done
   install -Dm644 "${cli}/BUILD-METADATA.json" "${pkgdir}/usr/share/doc/${pkgname}/CLI-BUILD-METADATA.json"
   install -Dm644 "${gui}/BUILD-METADATA.json" "${pkgdir}/usr/share/doc/${pkgname}/GUI-BUILD-METADATA.json"
 }

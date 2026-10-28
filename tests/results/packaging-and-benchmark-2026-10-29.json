@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-29",
+  "tested_source_base": "cc22e7dacc5794d1b20765d5c1c383a8a734a5b1",
+  "input_sha256": {
+    "benchmark/forwarding.py": "832ccb80298c6db3b7645cd48ea517cea605e0c57ca772435b2ed9ee5e4153e3",
+    "benchmark/forwarding_self_check.py": "e28ecfafb1b8c5a105123073ca40ad138272e3c66510f10c261a35ae489fa762",
+    "scripts/collect-licenses.py": "c468919e74e6e0afac358a091ec6734f262edb1cd6acbc46eb5d6a27c9d15e12",
+    "scripts/package-release.py": "e6e1f64f375182cf80b41a4f6d746d01d5fd9524dc3f43303af20fed1ba76ef7",
+    "scripts/render-aur.py": "28721d867f6cdf18a4dbbd0bb18fe99fbb7a73d8b46d0b676b1202d2f2763946",
+    "scripts/packaging_self_check.py": "edd9c03e622e6f46b3f0e73e858c1be145cbb1e101936cb92c05973dab45e06a",
+    "scripts/build-release.sh": "a820a2dcd44cc794700b8d6bfeb7133de9fbd67b303504be2953097a99b748f0",
+    "packaging/license-supplements.json": "70432c9c3b85dc21123abef2680ea0971e0a462d253b0758cdf14b7c94c693ca",
+    "packaging/aur/magpie-rs-bin/PKGBUILD.in": "85e13da99ebd5c473aa1c8043cf8d53cb69b602e1743631f1226182f8841c128",
+    "packaging/aur/magpie-rs-git/PKGBUILD": "806905fe96a7f9fe2047b3eb558ae8c98fad91a9af130f71a1e8c5d8e8e6d2c9"
+  },
+  "tests": {
+    "packaging_synthetic": 13,
+    "benchmark_synthetic": 8,
+    "build_script_bash_syntax": "passed"
+  },
+  "worker_license_inventory": {
+    "linux_x86_64": 530,
+    "windows_x86_64_msvc": 376,
+    "macos_aarch64": 417,
+    "missing_text_or_known_source": 0
+  },
+  "limits": [
+    "cached inventory is not legal compliance approval",
+    "system libraries, Rust standard library and SDK excluded",
+    "no fresh cache dependency preparation or real native installers",
+    "no AUR publication or package installation",
+    "no other OS device execution",
+    "objc2 Apple SDK origin question remains open"
+  ]
+}
