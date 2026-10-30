@@ -320,13 +320,6 @@ impl Locale {
                 "Die aktuelle Datei ist nicht lesbar. Diese Werte stammen aus dem Arbeitsspeicher dieser Sitzung und können veraltet sein.",
             ],
             Text::NotSet => ["Not set", "未设置", "未設定", "未設定", "Nicht festgelegt"],
-            Text::SessionOnly => [
-                "Language and appearance apply to this window only. They reset when you reopen Magpie.",
-                "语言和外观仅用于此窗口；重新打开 Magpie 后恢复默认。",
-                "語言和外觀僅用於此視窗；重新開啟 Magpie 後恢復預設。",
-                "言語と外観はこのウィンドウにのみ適用します。再起動すると既定に戻ります。",
-                "Sprache und Darstellung gelten nur für dieses Fenster und werden beim Neustart zurückgesetzt.",
-            ],
             Text::SupportedAgents => [
                 "Detects Claude Code, Gemini CLI, OpenCode, Codex and Zed on PATH.",
                 "通过 PATH 检测 Claude Code、Gemini CLI、OpenCode、Codex 和 Zed。",
@@ -418,7 +411,6 @@ pub enum Text {
     LastKnown,
     LastKnownHint,
     NotSet,
-    SessionOnly,
     SupportedAgents,
     NoReadableValues,
     Selected,

@@ -41,13 +41,13 @@ impl Palette {
         };
         if dark {
             Self {
-                background: 0x19191c,
-                surface: 0x222225,
+                background: 0x1a1a1e,
+                surface: 0x232327,
                 inset: 0x2d2d32,
                 border: 0x35353b,
-                text: 0xf0f0f2,
+                text: 0xededf1,
                 muted: 0xacacb5,
-                accent: 0x8aa4ff,
+                accent: 0xa5b4fc,
                 selected: 0x2d3550,
                 warning: 0xf2c47d,
                 warning_bg: 0x382e21,
@@ -56,13 +56,13 @@ impl Palette {
             }
         } else {
             Self {
-                background: 0xf6f6f7,
+                background: 0xf4f4f6,
                 surface: 0xffffff,
-                inset: 0xf0f0f2,
+                inset: 0xededf1,
                 border: 0xe3e3e7,
-                text: 0x202124,
+                text: 0x1c1c21,
                 muted: 0x65666d,
-                accent: 0x3e61d4,
+                accent: 0x4f46e5,
                 selected: 0xeef2ff,
                 warning: 0x865818,
                 warning_bg: 0xfff5e5,

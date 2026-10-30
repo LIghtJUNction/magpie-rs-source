@@ -31,9 +31,12 @@ use tokio::{
 };
 
 const CHILD_CONFIG: &str = "MAGPIE_FORWARD_HTTP_TEST_CONFIG";
+const CHILD_STORE: &str = "MAGPIE_FORWARD_HTTP_TEST_STORE";
 const ADDRESS_MARKER: &str = "MAGPIE_FORWARD_HTTP_ADDRESS=";
 const KEY_ENV: &str = "MAGPIE_FORWARD_HTTP_TEST_KEY";
+const NEXT_KEY_ENV: &str = "MAGPIE_FORWARD_HTTP_TEST_NEXT_KEY";
 const KEY: &str = "synthetic-provider-key";
+const NEXT_KEY: &str = "synthetic-rotated-provider-key";
 const PRIVATE: &str = "synthetic-upstream-private-body";
 const TEXT: &str = "\u{4e2d}\u{1f642}";
 const PUBLIC_MODEL: &str = "fixture/namespace/model:trial";
@@ -49,11 +52,27 @@ struct ServerProcess(Child);
 
 impl ServerProcess {
     fn start(config: Value) -> (Self, SocketAddr) {
+        let mut command = Command::new(std::env::current_exe().expect("test executable"));
+        command
+            .env(CHILD_CONFIG, config.to_string())
+            .env_remove(CHILD_STORE);
+        Self::start_command(command)
+    }
+
+    #[cfg(unix)]
+    fn start_store(path: &std::path::Path) -> (Self, SocketAddr) {
+        let mut command = Command::new(std::env::current_exe().expect("test executable"));
+        command.env(CHILD_STORE, path).env_remove(CHILD_CONFIG);
+        Self::start_command(command)
+    }
+
+    fn start_command(mut command: Command) -> (Self, SocketAddr) {
         let mut child = Self(
-            Command::new(std::env::current_exe().expect("test executable"))
+            command
                 .args(["--exact", "forward_server_process", "--nocapture"])
-                .env(CHILD_CONFIG, config.to_string())
                 .env(KEY_ENV, KEY)
+                .env(NEXT_KEY_ENV, NEXT_KEY)
+                .env_remove("MAGPIE_FORWARD_HTTP_TEST_ABSENT_KEY")
                 .stdout(Stdio::piped())
                 .stderr(Stdio::inherit())
                 .spawn()
@@ -86,16 +105,353 @@ impl Drop for ServerProcess {
 
 #[test]
 fn forward_server_process() -> io::Result<()> {
-    let Ok(config) = std::env::var(CHILD_CONFIG) else {
+    let address = "127.0.0.1:0".parse().expect("literal loopback");
+    let server = if let Some(path) = std::env::var_os(CHILD_STORE) {
+        ForwardServer::bind_store(address, path.into())?
+    } else if let Ok(config) = std::env::var(CHILD_CONFIG) {
+        ForwardServer::bind(address, ForwardConfig::from_json(config.as_bytes())?)?
+    } else {
         return Ok(());
     };
-    let server = ForwardServer::bind(
-        "127.0.0.1:0".parse().expect("literal loopback"),
-        ForwardConfig::from_json(config.as_bytes())?,
-    )?;
     println!("\n{ADDRESS_MARKER}{}", server.local_addr()?);
     io::stdout().flush()?;
     server.run()
+}
+
+#[cfg(unix)]
+mod provider_store_cases {
+    use super::*;
+    use magpie_core::provider_store::{Provider, ProviderProtocol, ProviderStore};
+    use std::{
+        fs,
+        os::unix::fs::DirBuilderExt,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    struct StoreFixture {
+        path: PathBuf,
+    }
+
+    impl StoreFixture {
+        fn new() -> Self {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let directory = std::env::temp_dir().canonicalize().unwrap().join(format!(
+                "magpie-forward-store-{}-{timestamp}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&directory)
+                .unwrap();
+            Self {
+                path: directory.join("providers.toml"),
+            }
+        }
+
+        fn add(&self, provider: Provider) {
+            let revision = ProviderStore::load(&self.path).unwrap().revision();
+            ProviderStore::create(&self.path, provider, revision).unwrap();
+        }
+
+        fn edit(&self, id: &str, edit: impl FnOnce(&mut Provider)) {
+            let store = ProviderStore::load(&self.path).unwrap();
+            let mut provider = store.provider(id).unwrap().clone();
+            edit(&mut provider);
+            ProviderStore::update(&self.path, provider, store.revision()).unwrap();
+        }
+    }
+
+    impl Drop for StoreFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(self.path.parent().unwrap());
+        }
+    }
+
+    fn provider(id: &str, address: SocketAddr, protocol: ProviderProtocol) -> Provider {
+        Provider {
+            id: id.into(),
+            name: format!("Fixture {id}"),
+            base_url: format!("http://{address}"),
+            protocol,
+            api_key_env: Some(KEY_ENV.into()),
+            credential_ref: None,
+            models: vec![MODEL.into()],
+            enabled: true,
+        }
+    }
+
+    async fn post(client: &reqwest::Client, address: SocketAddr, model: &str) -> reqwest::Response {
+        let mut body = request_body(Protocol::OpenAiChat, false);
+        body["model"] = json!(model);
+        send(client, address, Protocol::OpenAiChat, false, body).await
+    }
+
+    async fn models(client: &reqwest::Client, address: SocketAddr) -> Value {
+        let response = client
+            .get(format!("http://{address}/v1/models"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        serde_json::from_slice(&response.bytes().await.unwrap()).unwrap()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn store_routes_two_providers_and_applies_edits_without_restart() {
+        let mut first = Fixture::start(Reply::json(response_body(Protocol::OpenAiChat))).await;
+        let mut second =
+            Fixture::start(Reply::json(response_body(Protocol::AnthropicMessages))).await;
+        let store = StoreFixture::new();
+        store.add(provider(
+            "first",
+            first.address,
+            ProviderProtocol::OpenAiChat,
+        ));
+        store.add(provider(
+            "second",
+            second.address,
+            ProviderProtocol::AnthropicMessages,
+        ));
+        let (_server, address) = ServerProcess::start_store(&store.path);
+        let client = client();
+        let catalog = models(&client, address).await;
+        assert_eq!(catalog["data"].as_array().unwrap().len(), 2);
+        assert_eq!(catalog["data"][0]["id"], format!("first/{MODEL}"));
+        assert_eq!(catalog["data"][1]["id"], format!("second/{MODEL}"));
+        assert!(!catalog.to_string().contains(KEY));
+        assert!(!catalog.to_string().contains(KEY_ENV));
+
+        let response = post(&client, address, &format!("first/{MODEL}")).await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()["x-magpie-provider"], "first");
+        let _ = response.bytes().await.unwrap();
+        let recorded = first.recorded().await;
+        assert_eq!(recorded.path, "/v1/chat/completions");
+        assert_eq!(recorded.body["model"], MODEL);
+        assert_eq!(recorded.headers["authorization"], format!("Bearer {KEY}"));
+        assert!(!recorded.headers.contains_key("x-api-key"));
+
+        let response = post(&client, address, &format!("second/{MODEL}")).await;
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()["x-magpie-provider"], "second");
+        let result: Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+        assert_eq!(result["choices"][0]["message"]["content"], TEXT);
+        let recorded = second.recorded().await;
+        assert_eq!(recorded.path, "/v1/messages");
+        assert_eq!(recorded.headers["x-api-key"], KEY);
+        assert!(!recorded.headers.contains_key("authorization"));
+        assert_eq!(first.requests.load(Ordering::SeqCst), 1);
+        assert_eq!(second.requests.load(Ordering::SeqCst), 1);
+
+        store.edit("second", |provider| {
+            provider.api_key_env = Some(NEXT_KEY_ENV.into());
+            provider.models = vec!["replacement-model".into()];
+        });
+        assert_eq!(
+            post(&client, address, &format!("second/{MODEL}"))
+                .await
+                .status(),
+            404
+        );
+        let response = post(&client, address, "second/replacement-model").await;
+        assert_eq!(response.status(), 200);
+        let _ = response.bytes().await.unwrap();
+        let recorded = second.recorded().await;
+        assert_eq!(recorded.body["model"], "replacement-model");
+        assert_eq!(recorded.headers["x-api-key"], NEXT_KEY);
+
+        let snapshot = ProviderStore::load(&store.path).unwrap();
+        ProviderStore::set_enabled(&store.path, "first", false, snapshot.revision()).unwrap();
+        assert_eq!(
+            post(&client, address, &format!("first/{MODEL}"))
+                .await
+                .status(),
+            404
+        );
+        let catalog = models(&client, address).await;
+        assert_eq!(catalog["data"].as_array().unwrap().len(), 1);
+        assert_eq!(catalog["data"][0]["id"], "second/replacement-model");
+        assert_eq!(first.requests.load(Ordering::SeqCst), 1);
+        assert_eq!(second.requests.load(Ordering::SeqCst), 2);
+        let snapshot = ProviderStore::load(&store.path).unwrap();
+        assert_eq!(snapshot.provider("first").unwrap().models, [MODEL]);
+        ProviderStore::remove(&store.path, "second", snapshot.revision()).unwrap();
+        assert_eq!(
+            post(&client, address, "second/replacement-model")
+                .await
+                .status(),
+            404
+        );
+        assert!(
+            models(&client, address).await["data"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn store_inspection_accepts_multi_provider_large_and_empty_catalogs() {
+        let store = StoreFixture::new();
+        let long_id = "p".repeat(128);
+        for id in [long_id.as_str(), "second"] {
+            let mut item = provider(
+                id,
+                "127.0.0.1:1".parse().unwrap(),
+                ProviderProtocol::OpenAiChat,
+            );
+            item.models = (0..128)
+                .map(|index| format!("namespace/model@revision-{index}"))
+                .collect();
+            store.add(item);
+        }
+        let (_server, address) = ServerProcess::start_store(&store.path);
+        let inspect = || -> Value {
+            serde_json::from_str(&magpie_service::forward::inspect_gateway(address).unwrap())
+                .unwrap()
+        };
+        assert_eq!(
+            inspect()["gateway"]["models"].as_array().unwrap().len(),
+            256
+        );
+        magpie_service::forward::probe_model(
+            address,
+            &format!("{long_id}/namespace/model@revision-0"),
+        )
+        .unwrap();
+        for id in [long_id.as_str(), "second"] {
+            let snapshot = ProviderStore::load(&store.path).unwrap();
+            ProviderStore::remove(&store.path, id, snapshot.revision()).unwrap();
+        }
+        assert!(
+            inspect()["gateway"]["models"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            magpie_service::forward::probe_model(address, "second/namespace/model@revision-0")
+                .is_err()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn store_rejects_unknown_models_and_corrupt_configuration_without_upstream_io() {
+        let fixture = Fixture::start(Reply::json(response_body(Protocol::OpenAiChat))).await;
+        let store = StoreFixture::new();
+        store.add(provider(
+            "first",
+            fixture.address,
+            ProviderProtocol::OpenAiChat,
+        ));
+        let (_server, address) = ServerProcess::start_store(&store.path);
+        let client = client();
+        for model in [MODEL, "unknown/model", "first/missing"] {
+            assert_eq!(post(&client, address, model).await.status(), 404);
+        }
+        let original = fs::read(&store.path).unwrap();
+        fs::write(&store.path, "broken = [ synthetic-private-config").unwrap();
+        for response in [
+            post(&client, address, &format!("first/{MODEL}")).await,
+            client
+                .get(format!("http://{address}/v1/models"))
+                .send()
+                .await
+                .unwrap(),
+        ] {
+            assert_eq!(response.status(), 503);
+            let body = response.text().await.unwrap();
+            assert!(!body.contains("synthetic-private-config"));
+            assert!(!body.contains(KEY));
+        }
+        assert_eq!(fixture.requests.load(Ordering::SeqCst), 0);
+        fs::write(&store.path, original).unwrap();
+        assert_eq!(
+            models(&client, address).await["data"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn store_catalog_does_not_read_missing_keys_and_requests_never_fall_back_keyless() {
+        let fixture = Fixture::start(Reply::json(response_body(Protocol::OpenAiChat))).await;
+        let store = StoreFixture::new();
+        let mut configured = provider("first", fixture.address, ProviderProtocol::OpenAiChat);
+        configured.api_key_env = Some("MAGPIE_FORWARD_HTTP_TEST_ABSENT_KEY".into());
+        store.add(configured);
+        let (_server, address) = ServerProcess::start_store(&store.path);
+        let client = client();
+        assert_eq!(
+            models(&client, address).await["data"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let response = post(&client, address, &format!("first/{MODEL}")).await;
+        assert_eq!(response.status(), 503);
+        assert!(!response.text().await.unwrap().contains("ABSENT_KEY"));
+        assert_eq!(fixture.requests.load(Ordering::SeqCst), 0);
+        store.edit("first", |provider| {
+            provider.api_key_env = None;
+            provider.credential_ref = Some("synthetic-invalid-credential-reference".into());
+        });
+        assert_eq!(
+            models(&client, address).await["data"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            post(&client, address, &format!("first/{MODEL}"))
+                .await
+                .status(),
+            503
+        );
+        assert_eq!(fixture.requests.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn store_https_is_not_downgraded_and_redirects_are_not_followed() {
+        let plaintext = Fixture::start(Reply::json(response_body(Protocol::OpenAiChat))).await;
+        let mut redirect = Fixture::start(Reply {
+            status: 302,
+            ..Reply::json(json!({"private": PRIVATE}))
+        })
+        .await;
+        let store = StoreFixture::new();
+        let mut tls = provider("tls", plaintext.address, ProviderProtocol::OpenAiChat);
+        tls.base_url = format!("https://{}/v1", plaintext.address);
+        store.add(tls);
+        store.add(provider(
+            "redirect",
+            redirect.address,
+            ProviderProtocol::OpenAiChat,
+        ));
+        let (_server, address) = ServerProcess::start_store(&store.path);
+        let client = client();
+        let response = post(&client, address, &format!("tls/{MODEL}")).await;
+        assert_eq!(response.status(), 502);
+        assert!(!response.text().await.unwrap().contains(KEY));
+        assert_eq!(plaintext.requests.load(Ordering::SeqCst), 0);
+        let response = post(&client, address, &format!("redirect/{MODEL}")).await;
+        assert_eq!(response.status(), 502);
+        assert!(!response.headers().contains_key("location"));
+        assert!(!response.headers().contains_key("set-cookie"));
+        assert!(!response.text().await.unwrap().contains(PRIVATE));
+        let _ = redirect.recorded().await;
+        assert_eq!(redirect.requests.load(Ordering::SeqCst), 1);
+    }
 }
 
 #[derive(Clone)]
