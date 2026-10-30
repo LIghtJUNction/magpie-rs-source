@@ -4,11 +4,51 @@
 //! --output /absolute/new/directory [--locale en|zh-CN|zh-TW|ja|de] [--all] [--size WIDTHxHEIGHT].
 //! The default baseline is the real Agents scene, light theme, at 900x560.
 //! --all includes Agents, Codex details, Providers, the Provider form and its
-//! credentials section, and Settings at four viewport sizes in both themes.
+//! credentials section, Gateway states, and Settings at four viewport sizes in both themes.
 //! Each scene saves a 1x PNG, the native texture and a manifest. No OS window opens.
 
-#[path = "../src/actions_state.rs"]
-mod actions_state;
+mod actions_state {
+    include!("../src/actions_state.rs");
+    impl ActionsState {
+        pub(super) fn model_update_fixture(&mut self, config: PathBuf) {
+            self.set_config_path(Some(config.clone()));
+            self.acknowledge_snapshot_refresh(true);
+            self.current_model = Some("fixture/preview-model".into());
+            self.ownership = Some(Ownership::Connected);
+            self.managed = Some(ManagedConnection {
+                address: "127.0.0.1:3425".parse().unwrap(),
+                model: "fixture/preview-model".into(),
+            });
+            self.catalog = Some(GatewayInfo {
+                address: "127.0.0.1:3425".parse().unwrap(),
+                models: vec![
+                    ModelInfo {
+                        id: "fixture/preview-model".into(),
+                    },
+                    ModelInfo {
+                        id: "fixture/next-model".into(),
+                    },
+                ],
+                server_version: Some("0.2.0".into()),
+                instance_id: Some("preview-scene".into()),
+                config_source: Some("provider_store".into()),
+            });
+            self.catalog_valid = true;
+            self.catalog_generation = 1;
+            self.selected = Some("fixture/next-model".into());
+            self.preview = Some(PreviewTicket {
+                binding: self.binding().unwrap(),
+                info: PreviewInfo {
+                    config_existed: true,
+                    changed_fields: vec!["model".into()],
+                },
+                stamp: ConfigStamp::capture(&config).unwrap(),
+                revision: Some("a".repeat(64)),
+            });
+            self.notice = Some(Notice::PreviewReady);
+        }
+    }
+}
 #[path = "../src/actions_text.rs"]
 mod actions_text;
 #[path = "../src/assets.rs"]
@@ -17,6 +57,10 @@ mod assets;
 mod cli_bridge;
 #[path = "../src/config_stamp.rs"]
 mod config_stamp;
+#[path = "../src/gateway_page.rs"]
+mod gateway_page;
+#[path = "../src/gateway_text.rs"]
+mod gateway_text;
 #[path = "../src/input_model.rs"]
 mod input_model;
 #[path = "../src/localization.rs"]
@@ -53,6 +97,9 @@ mod ui {
             self.appearance = appearance;
             self.page = match scene {
                 super::Scene::Settings => Page::Settings,
+                super::Scene::Gateway
+                | super::Scene::GatewayExternal
+                | super::Scene::GatewayError => Page::Gateway,
                 super::Scene::Providers
                 | super::Scene::ProviderEditor
                 | super::Scene::ProviderCredentials => Page::Providers,
@@ -70,7 +117,15 @@ mod ui {
                     cx,
                 );
             });
-            self.details = matches!(scene, super::Scene::Codex).then_some("codex");
+            self.gateway.update(cx, |page, cx| {
+                page.preview_fixture(
+                    matches!(scene, super::Scene::GatewayExternal),
+                    matches!(scene, super::Scene::GatewayError),
+                    cx,
+                )
+            });
+            self.details =
+                matches!(scene, super::Scene::Codex | super::Scene::CodexUpdate).then_some("codex");
             self.gateway_settings = matches!(scene, super::Scene::Codex);
             self.copied = None;
             self.pending_action = None;
@@ -84,6 +139,10 @@ mod ui {
                 .set_config_path(Some(root.join("codex/config.toml")));
             self.actions.acknowledge_snapshot_refresh(true);
             self.actions.ownership = Some(Ownership::Unmanaged);
+            if matches!(scene, super::Scene::CodexUpdate) {
+                self.actions
+                    .model_update_fixture(root.join("codex/config.toml"));
+            }
             let agents = [
                 ("codex", "Codex", Some("icons/codex-color.svg")),
                 ("claude", "Claude Code", Some("icons/claudecode-color.svg")),
@@ -144,10 +203,14 @@ const VIEWPORTS: [(u32, u32); 4] = [(900, 560), (360, 560), (440, 560), (1280, 7
 enum Scene {
     Agents,
     Codex,
+    CodexUpdate,
     Providers,
     ProviderEditor,
     ProviderCredentials,
     Settings,
+    Gateway,
+    GatewayExternal,
+    GatewayError,
 }
 
 impl Scene {
@@ -155,10 +218,14 @@ impl Scene {
         match self {
             Self::Agents => "agents",
             Self::Codex => "codex",
+            Self::CodexUpdate => "codex-update",
             Self::Providers => "providers",
             Self::ProviderEditor => "provider-editor",
             Self::ProviderCredentials => "provider-credentials",
             Self::Settings => "settings",
+            Self::Gateway => "gateway",
+            Self::GatewayExternal => "gateway-external",
+            Self::GatewayError => "gateway-error",
         }
     }
 }
@@ -221,8 +288,8 @@ fn options() -> Result<Option<Options>> {
                 println!(
                     "render_preview --output ABS_NEW_DIRECTORY [--locale en|zh-CN|zh-TW|ja|de] [--all]\n\
                      Default: Agents, light theme, 900x560; one 1x PNG, native texture and manifest.json.\n\
-                     --all: 48 scenes across Agents/Codex/Providers/Provider form/credentials/Settings, both themes and four viewports.\n\
-                     --size: render one custom viewport; combine with --all for 12 scene/theme pairs.\n\
+                     --all: 80 scenes across Agents/Codex/model update/Providers/Provider form/credentials/Gateway states/Settings, both themes and four viewports.\n\
+                     --size: render one custom viewport; combine with --all for 20 scene/theme pairs.\n\
                      Uses an isolated child, real GPUI scene rendering and system fonts."
                 );
                 return Ok(None);
@@ -463,10 +530,14 @@ fn render(options: &Options) -> Result<()> {
         &[
             Scene::Agents,
             Scene::Codex,
+            Scene::CodexUpdate,
             Scene::Providers,
             Scene::ProviderEditor,
             Scene::ProviderCredentials,
             Scene::Settings,
+            Scene::Gateway,
+            Scene::GatewayExternal,
+            Scene::GatewayError,
         ]
     } else {
         &[Scene::Agents]
@@ -475,7 +546,7 @@ fn render(options: &Options) -> Result<()> {
     for &(width, height) in viewports {
         for &(theme_name, appearance) in themes {
             let handle = cx.open_window(size(px(width as f32), px(height as f32)), |_, cx| {
-                cx.new(ui::MagpieWindow::new)
+                cx.new(ui::MagpieWindow::new_for_preview)
             })?;
             // Production discovery sees only the empty synthetic PATH and HOME.
             cx.run_until_parked();
@@ -559,7 +630,7 @@ fn render(options: &Options) -> Result<()> {
             "mode": if options.all { "all" } else { "baseline" },
             "render_path": "HeadlessAppContext + native platform text system + current_headless_renderer",
             "ui_source": "include!(../src/ui.rs); production MagpieWindow Render implementation",
-            "data": "five synthetic agents; one credential-free Codex configuration; three providers in an isolated real ProviderStore; synthetic password-input fixture only, no keyring writes or live accounts",
+            "data": "five synthetic agents; one credential-free Codex configuration; three providers in an isolated real ProviderStore; synthetic password-input fixture, Gateway owned/external/error snapshots and model-update preview; no keyring writes, live accounts or supervised services launched by this renderer",
             "fonts": families, "primary_font": selected_font.family.as_ref(),
             "fallback_fonts": selected_font.fallbacks.as_ref().map(|fonts| fonts.fallback_list()),
             "ui_source_bytes": include_bytes!("../src/ui.rs").len(),

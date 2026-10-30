@@ -136,7 +136,7 @@ impl GatewayServer {
 
         loop {
             match self.listener.accept() {
-                Ok((stream, _)) => match sender.try_send(stream) {
+                Ok((stream, peer)) if peer.ip().is_loopback() => match sender.try_send(stream) {
                     Ok(()) => {}
                     Err(mpsc::TrySendError::Full(mut stream)) => {
                         http::write_overloaded(&mut stream);
@@ -148,6 +148,7 @@ impl GatewayServer {
                         ));
                     }
                 },
+                Ok((_stream, _peer)) => {}
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                 Err(error) => return Err(error),
             }

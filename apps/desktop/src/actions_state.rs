@@ -1,5 +1,5 @@
-//! Window-independent state and orchestration for the frozen Magpie CLI contract.
-//! Processes and private configuration observations run only in background Jobs.
+// Window-independent state and orchestration for the versioned Magpie CLI contract.
+// Processes and private configuration observations run only in background Jobs.
 
 use crate::{
     cli_bridge::{
@@ -34,18 +34,27 @@ pub struct Binding {
     pub address: SocketAddr,
     pub model: String,
     pub catalog_generation: u64,
+    pub ownership: Ownership,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreviewTicket {
     pub binding: Binding,
     pub info: PreviewInfo,
     stamp: ConfigStamp,
+    revision: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ManagedConnection {
+    address: SocketAddr,
+    model: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Notice {
     CatalogUpdated,
     PreviewReady,
     Connected,
+    ModelUpdated,
     Disconnected(DisconnectInfo),
     StatusVerified,
     MutationUncertain,
@@ -77,6 +86,8 @@ pub struct ActionsState {
     needs_status: bool,
     needs_snapshot: bool,
     snapshot_ok: bool,
+    current_model: Option<String>,
+    managed: Option<ManagedConnection>,
 }
 
 impl Default for ActionsState {
@@ -101,6 +112,8 @@ impl Default for ActionsState {
             needs_status: false,
             needs_snapshot: false,
             snapshot_ok: false,
+            current_model: None,
+            managed: None,
         }
     }
 }
@@ -130,6 +143,23 @@ impl ActionsState {
             self.notice = None;
         }
     }
+    pub fn invalidate_catalog(&mut self) {
+        self.catalog_valid = false;
+        self.invalidate_preview();
+    }
+    pub fn set_current_model(&mut self, model: Option<String>) {
+        if self.current_model != model {
+            self.current_model = model;
+            self.managed = None;
+            self.invalidate_preview();
+        }
+    }
+    pub fn updating_connection(&self) -> bool {
+        self.ownership == Some(Ownership::Connected)
+    }
+    pub fn managed_address_verified(&self) -> bool {
+        self.updating_connection() && self.managed.is_some()
+    }
     pub fn set_config_path(&mut self, path: Option<PathBuf>) -> bool {
         if self.busy.is_some()
             || self.config_path == path
@@ -141,6 +171,7 @@ impl ActionsState {
         }
         self.config_path = path;
         self.ownership = None;
+        self.managed = None;
         self.snapshot_ok = false;
         self.error = None;
         self.notice = None;
@@ -217,7 +248,12 @@ impl ActionsState {
     }
     pub fn can_preview(&self) -> bool {
         self.writes_ready()
-            && self.ownership == Some(Ownership::Unmanaged)
+            && (self.ownership == Some(Ownership::Unmanaged)
+                || (self.updating_connection()
+                    && self.managed.as_ref().is_some_and(|managed| {
+                        cli_bridge::parse_address(&self.address).ok() == Some(managed.address)
+                            && self.selected.as_deref() != Some(&managed.model)
+                    })))
             && self.selected_available()
             && self
                 .selected
@@ -230,6 +266,9 @@ impl ActionsState {
                 .preview
                 .as_ref()
                 .is_some_and(|ticket| self.binding().as_ref() == Some(&ticket.binding))
+            && self.preview.as_ref().is_some_and(|ticket| {
+                ticket.revision.is_none() || !ticket.info.changed_fields.is_empty()
+            })
     }
     pub fn can_disconnect(&self) -> bool {
         self.writes_ready()
@@ -265,6 +304,7 @@ impl ActionsState {
             address: cli_bridge::parse_address(&self.address).ok()?,
             model: self.selected.clone()?,
             catalog_generation: self.catalog_generation,
+            ownership: self.ownership?,
         })
     }
     fn gate_error(&self) -> BridgeError {
@@ -278,7 +318,7 @@ impl ActionsState {
             ErrorKind::RecoveryRequired
         } else if self
             .ownership
-            .is_some_and(|state| state != Ownership::Unmanaged)
+            .is_some_and(|state| !matches!(state, Ownership::Unmanaged | Ownership::Connected))
         {
             ErrorKind::AlreadyManaged
         } else if !self.selected_available() {
@@ -329,7 +369,10 @@ impl ActionsState {
                 }
                 Operation::Apply(self.preview.take().expect("apply gate requires a ticket"))
             }
-            JobKind::Status => Operation::Status(config),
+            JobKind::Status => Operation::Status {
+                config,
+                current_model: self.current_model.clone(),
+            },
             JobKind::Disconnect => {
                 if !self.can_disconnect() || !self.disconnect_confirmation {
                     return Err(self.gate_error());
@@ -375,6 +418,7 @@ impl ActionsState {
         if result.kind.is_mutation() {
             self.preview = None;
             self.ownership = None;
+            self.managed = None;
             self.needs_status = true;
             self.needs_snapshot = true;
             self.snapshot_ok = false;
@@ -403,17 +447,43 @@ impl ActionsState {
                 self.notice = Some(Notice::PreviewReady);
             }
             Ok(Output::Applied) => self.notice = Some(Notice::Connected),
+            Ok(Output::ModelUpdated(ownership)) => {
+                self.notice = Some(if ownership == Ownership::Connected {
+                    Notice::ModelUpdated
+                } else {
+                    Notice::MutationUncertain
+                });
+                if ownership != Ownership::Connected {
+                    self.uncertain = true;
+                }
+            }
             Ok(Output::Disconnected(info)) => self.notice = Some(Notice::Disconnected(info)),
-            Ok(Output::Status(ownership)) => {
+            Ok(Output::Status {
+                ownership,
+                managed,
+                observation_error,
+            }) => {
                 self.ownership = Some(ownership);
+                self.managed = managed;
+                if let Some(managed) = &self.managed
+                    && cli_bridge::parse_address(&self.address).ok() != Some(managed.address)
+                {
+                    self.address = managed.address.to_string();
+                    self.catalog_valid = false;
+                    self.invalidate_preview();
+                }
+                if let Some(error) = observation_error {
+                    self.error = Some(error);
+                }
                 self.needs_status = false;
                 if ownership != Ownership::Unmanaged {
                     self.preview = None;
                 }
-                let changed = (matches!(self.notice, Some(Notice::Connected))
-                    && ownership != Ownership::Connected)
-                    || (matches!(self.notice, Some(Notice::Disconnected(_)))
-                        && ownership != Ownership::Unmanaged);
+                let changed =
+                    (matches!(self.notice, Some(Notice::Connected | Notice::ModelUpdated))
+                        && ownership != Ownership::Connected)
+                        || (matches!(self.notice, Some(Notice::Disconnected(_)))
+                            && ownership != Ownership::Unmanaged);
                 if !result.reconciliation || changed {
                     self.notice = Some(Notice::StatusVerified);
                 }
@@ -423,6 +493,7 @@ impl ActionsState {
                 self.error = Some(error);
                 if result.kind == JobKind::Status {
                     self.ownership = None;
+                    self.managed = None;
                     self.preview = None;
                 }
                 if error.mutation_may_have_run {
@@ -439,14 +510,22 @@ enum Operation {
     Inspect(SocketAddr),
     Preview(Binding),
     Apply(PreviewTicket),
-    Status(PathBuf),
+    Status {
+        config: PathBuf,
+        current_model: Option<String>,
+    },
     Disconnect(PathBuf),
 }
 enum Output {
     Inspected(GatewayInfo),
     Previewed(PreviewTicket),
     Applied,
-    Status(Ownership),
+    Status {
+        ownership: Ownership,
+        managed: Option<ManagedConnection>,
+        observation_error: Option<BridgeError>,
+    },
+    ModelUpdated(Ownership),
     Disconnected(DisconnectInfo),
 }
 pub struct Job {
@@ -497,9 +576,58 @@ impl Job {
                         _ => Err(invalid_reply()),
                     }
                 }
-                Operation::Status(config) => {
-                    match run(Request::Status { config }, self.cancellation.clone()).await? {
-                        Reply::Status(state) => Ok(Output::Status(state)),
+                Operation::Status {
+                    config,
+                    current_model,
+                } => {
+                    match run(
+                        Request::Status {
+                            config: config.clone(),
+                        },
+                        self.cancellation.clone(),
+                    )
+                    .await?
+                    {
+                        Reply::Status(ownership) => {
+                            let mut managed = None;
+                            let mut observation_error = None;
+                            if ownership == Ownership::Connected
+                                && let Some(model) = current_model
+                            {
+                                let result = run(
+                                    Request::ModelPreview {
+                                        config,
+                                        model: model.clone(),
+                                        check_catalog: false,
+                                    },
+                                    self.cancellation.clone(),
+                                )
+                                .await;
+                                match result {
+                                    Ok(Reply::ModelPreviewed(info))
+                                        if info.changed_fields.is_empty() =>
+                                    {
+                                        managed = Some(ManagedConnection {
+                                            address: info.address,
+                                            model,
+                                        });
+                                    }
+                                    Ok(Reply::ModelPreviewed(_)) => {
+                                        observation_error = Some(changed())
+                                    }
+                                    Ok(_) => observation_error = Some(invalid_reply()),
+                                    Err(error) => observation_error = Some(error),
+                                }
+                            }
+                            // The optional model observation is read-only and
+                            // does not erase the offline ownership result or
+                            // prevent an explicit safe Disconnect.
+                            Ok(Output::Status {
+                                ownership,
+                                managed,
+                                observation_error,
+                            })
+                        }
                         _ => Err(invalid_reply()),
                     }
                 }
@@ -515,17 +643,37 @@ impl Job {
                 Operation::Preview(binding) => {
                     let stamp = ConfigStamp::capture(&binding.config)?;
                     cancelled(&self.cancellation)?;
-                    let reply = run(
+                    let request = if binding.ownership == Ownership::Connected {
+                        Request::ModelPreview {
+                            config: binding.config.clone(),
+                            model: binding.model.clone(),
+                            check_catalog: true,
+                        }
+                    } else {
                         Request::Preview {
                             config: binding.config.clone(),
                             model: binding.model.clone(),
                             address: binding.address,
-                        },
-                        self.cancellation.clone(),
-                    )
-                    .await?;
-                    let Reply::Previewed(info) = reply else {
-                        return Err(invalid_reply());
+                        }
+                    };
+                    let reply = run(request, self.cancellation.clone()).await?;
+                    let (info, revision) = match reply {
+                        Reply::Previewed(info) if binding.ownership == Ownership::Unmanaged => {
+                            (info, None)
+                        }
+                        Reply::ModelPreviewed(info)
+                            if binding.ownership == Ownership::Connected
+                                && info.address == binding.address =>
+                        {
+                            (
+                                PreviewInfo {
+                                    config_existed: true,
+                                    changed_fields: info.changed_fields,
+                                },
+                                Some(info.revision),
+                            )
+                        }
+                        _ => return Err(invalid_reply()),
                     };
                     cancelled(&self.cancellation)?;
                     if ConfigStamp::capture(&binding.config)? != stamp
@@ -537,6 +685,7 @@ impl Job {
                         binding,
                         info,
                         stamp,
+                        revision,
                     }))
                 }
                 Operation::Apply(ticket) => {
@@ -544,6 +693,51 @@ impl Job {
                         return Err(changed());
                     }
                     cancelled(&self.cancellation)?;
+                    if let Some(revision) = &ticket.revision {
+                        if ticket.binding.ownership != Ownership::Connected {
+                            return Err(invalid_reply());
+                        }
+                        let reply = run(
+                            Request::ModelPreview {
+                                config: ticket.binding.config.clone(),
+                                model: ticket.binding.model.clone(),
+                                check_catalog: true,
+                            },
+                            self.cancellation.clone(),
+                        )
+                        .await?;
+                        let Reply::ModelPreviewed(info) = reply else {
+                            return Err(invalid_reply());
+                        };
+                        if &info.revision != revision
+                            || info.address != ticket.binding.address
+                            || info.changed_fields != ticket.info.changed_fields
+                            || ConfigStamp::capture(&ticket.binding.config)? != ticket.stamp
+                        {
+                            return Err(changed());
+                        }
+                        cancelled(&self.cancellation)?;
+                        return match run(
+                            Request::ModelApply {
+                                config: ticket.binding.config,
+                                model: ticket.binding.model,
+                                address: ticket.binding.address,
+                                revision: revision.clone(),
+                            },
+                            self.cancellation.clone(),
+                        )
+                        .await?
+                        {
+                            Reply::ModelUpdated(info) => Ok(Output::ModelUpdated(info.ownership)),
+                            _ => Err(BridgeError {
+                                kind: ErrorKind::InvalidReply,
+                                mutation_may_have_run: true,
+                            }),
+                        };
+                    }
+                    if ticket.binding.ownership != Ownership::Unmanaged {
+                        return Err(invalid_reply());
+                    }
                     let reply = run(
                         Request::Preview {
                             config: ticket.binding.config.clone(),
@@ -652,6 +846,9 @@ mod tests {
     }
     fn catalog(ids: &[&str]) -> GatewayInfo {
         GatewayInfo {
+            server_version: None,
+            instance_id: None,
+            config_source: None,
             address: "127.0.0.1:3425".parse().unwrap(),
             models: ids
                 .iter()
@@ -664,6 +861,175 @@ mod tests {
             config_existed: true,
             changed_fields: vec!["model".into()],
         }
+    }
+    fn model_info(revision: char, changed: bool) -> cli_bridge::ModelUpdateInfo {
+        cli_bridge::ModelUpdateInfo {
+            revision: revision.to_string().repeat(64),
+            address: "127.0.0.1:3425".parse().unwrap(),
+            ownership: Ownership::Connected,
+            changed_fields: if changed {
+                vec!["model".into()]
+            } else {
+                vec![]
+            },
+        }
+    }
+
+    fn connected(fixture: &Fixture) -> ActionsState {
+        fs::write(
+            fixture.path(),
+            "model = 'local/model'\nreasoning_effort = 'high'\n",
+        )
+        .unwrap();
+        let mut state = fixture.state();
+        state.set_current_model(Some("local/model".into()));
+        let job = state.begin(JobKind::Status, fixture.path()).unwrap();
+        let result = block_on(job.execute_with(|request, _| {
+            ready(Ok(match request {
+                Request::Status { .. } => Reply::Status(Ownership::Connected),
+                Request::ModelPreview {
+                    model,
+                    check_catalog: false,
+                    ..
+                } => {
+                    assert_eq!(model, "local/model");
+                    Reply::ModelPreviewed(model_info('a', false))
+                }
+                _ => panic!("status must remain offline and read only"),
+            }))
+        }));
+        assert!(state.complete(result));
+        state
+    }
+
+    fn update_preview(fixture: &Fixture, state: &mut ActionsState) {
+        assert!(state.select_model("local/other".into()));
+        assert!(state.can_preview());
+        let job = state.begin(JobKind::Preview, fixture.path()).unwrap();
+        let result = block_on(job.execute_with(|request, _| {
+            assert!(matches!(
+                request,
+                Request::ModelPreview {
+                    check_catalog: true,
+                    ..
+                }
+            ));
+            ready(Ok(Reply::ModelPreviewed(model_info('a', true))))
+        }));
+        assert!(state.complete(result));
+        assert!(state.can_apply());
+    }
+
+    #[test]
+    fn connected_model_preview_and_apply_keep_connection_and_require_reconciliation() {
+        let fixture = Fixture::new();
+        let mut state = connected(&fixture);
+        assert!(!state.can_preview(), "current model is not a change");
+        update_preview(&fixture, &mut state);
+        let job = state.begin(JobKind::Apply, fixture.path()).unwrap();
+        let mut writes = 0;
+        let result = block_on(job.execute_with(|request, _| {
+            ready(Ok(match request {
+                Request::ModelPreview { .. } => Reply::ModelPreviewed(model_info('a', true)),
+                Request::ModelApply {
+                    model,
+                    revision,
+                    address,
+                    ..
+                } => {
+                    writes += 1;
+                    assert_eq!(model, "local/other");
+                    assert_eq!(revision, "a".repeat(64));
+                    assert_eq!(address, model_info('a', true).address);
+                    Reply::ModelUpdated(model_info('b', true))
+                }
+                _ => panic!("an update must not disconnect or reconnect"),
+            }))
+        }));
+        assert_eq!(writes, 1);
+        assert!(state.complete(result));
+        assert_eq!(state.notice, Some(Notice::ModelUpdated));
+        assert!(state.reconcile_needed() && state.snapshot_failed());
+        assert!(!state.can_preview() && !state.can_apply());
+    }
+
+    #[test]
+    fn managed_update_rejects_concurrent_revision_file_or_selection_changes() {
+        let fixture = Fixture::new();
+        let mut state = connected(&fixture);
+        update_preview(&fixture, &mut state);
+        let job = state.begin(JobKind::Apply, fixture.path()).unwrap();
+        let result = block_on(job.execute_with(|request, _| {
+            assert!(
+                matches!(request, Request::ModelPreview { .. }),
+                "stale revision must not spawn a write"
+            );
+            ready(Ok(Reply::ModelPreviewed(model_info('b', true))))
+        }));
+        state.complete(result);
+        assert_eq!(state.error.unwrap().kind, ErrorKind::ConfigConflict);
+        assert!(!state.error.unwrap().mutation_may_have_run);
+
+        let mut state = connected(&fixture);
+        update_preview(&fixture, &mut state);
+        fs::write(fixture.path(), "model = 'local/model'\n# changed by user\n").unwrap();
+        let job = state.begin(JobKind::Apply, fixture.path()).unwrap();
+        let result = block_on(job.execute_with(|_, _| {
+            panic!("a changed file is refused before invoking CLI");
+            #[allow(unreachable_code)]
+            ready(Err(BridgeError::new(ErrorKind::CliRejected)))
+        }));
+        state.complete(result);
+        assert_eq!(state.error.unwrap().kind, ErrorKind::ConfigConflict);
+
+        let mut state = connected(&fixture);
+        update_preview(&fixture, &mut state);
+        state.select_model("local/model".into());
+        assert!(state.preview.is_none() && !state.can_preview() && !state.can_apply());
+        state.ownership = Some(Ownership::Drifted);
+        assert!(!state.can_preview() && state.can_disconnect());
+    }
+
+    #[test]
+    fn managed_address_observation_is_offline_and_failure_keeps_disconnect_available() {
+        let fixture = Fixture::new();
+        let mut state = fixture.state();
+        state.set_current_model(Some("local/model".into()));
+        let job = state.begin(JobKind::Status, fixture.path()).unwrap();
+        let result = block_on(job.execute_with(|request, _| {
+            ready(Ok(match request {
+                Request::Status { .. } => Reply::Status(Ownership::Connected),
+                Request::ModelPreview {
+                    check_catalog: false,
+                    ..
+                } => {
+                    let mut info = model_info('a', false);
+                    info.address = "127.0.0.1:4321".parse().unwrap();
+                    Reply::ModelPreviewed(info)
+                }
+                _ => panic!("offline status cannot inspect the network"),
+            }))
+        }));
+        state.complete(result);
+        assert_eq!(state.address, "127.0.0.1:4321");
+        assert!(!state.catalog_is_current());
+        assert!(state.can_disconnect());
+
+        let job = state.begin(JobKind::Status, fixture.path()).unwrap();
+        let result = block_on(job.execute_with(|request, _| {
+            ready(match request {
+                Request::Status { .. } => Ok(Reply::Status(Ownership::Connected)),
+                Request::ModelPreview {
+                    check_catalog: false,
+                    ..
+                } => Err(BridgeError::new(ErrorKind::ConfigConflict)),
+                _ => panic!("offline status cannot inspect the network"),
+            })
+        }));
+        state.complete(result);
+        assert_eq!(state.ownership, Some(Ownership::Connected));
+        assert!(state.can_disconnect());
+        assert!(!state.can_preview());
     }
     fn status(fixture: &Fixture, state: &mut ActionsState, ownership: Ownership) {
         let job = state.begin(JobKind::Status, fixture.path()).unwrap();
@@ -969,6 +1335,118 @@ mod tests {
         assert!(state.uncertain);
         assert!(state.reconcile_needed());
         assert!(state.snapshot_failed());
+    }
+
+    #[test]
+    #[ignore = "requires a CLI rebuilt from this checkout in MAGPIE_CLI_PATH"]
+    fn real_cli_model_update_retains_gateway_and_original_disconnect_baseline() {
+        use crate::cli_bridge::owned_gateway::{GatewayState, OwnedGateway};
+        use magpie_core::{
+            codex_config,
+            provider_store::{Provider, ProviderProtocol, ProviderStore},
+        };
+        use std::{
+            os::unix::fs::PermissionsExt,
+            time::{Duration, Instant},
+        };
+        let _lock = cli_bridge::PROCESS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let cli = std::env::var_os("MAGPIE_CLI_PATH").expect("explicit rebuilt CLI");
+        assert!(Path::new(&cli).is_absolute());
+        let fixture = Fixture::new();
+        fs::set_permissions(&fixture.0, fs::Permissions::from_mode(0o700)).unwrap();
+        let original = b"# original desktop fixture\nmodel = 'original-model'\nmodel_reasoning_effort = 'high'\ncustom = 'keep me'\n";
+        fs::write(fixture.path(), original).unwrap();
+        let providers = fixture.0.join("providers.toml");
+        ProviderStore::create(
+            &providers,
+            Provider {
+                id: "local".into(),
+                name: "Isolated desktop workflow".into(),
+                base_url: "http://127.0.0.1:9/v1".into(),
+                protocol: ProviderProtocol::OpenAiChat,
+                api_key_env: None,
+                credential_ref: None,
+                models: vec!["model".into(), "other".into()],
+                enabled: true,
+            },
+            0,
+        )
+        .unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let (owner, runner) = OwnedGateway::isolated_store(address, providers);
+        async fn execute(state: &mut ActionsState, path: &Path, kind: JobKind) {
+            let job = state.begin(kind, path.to_path_buf()).unwrap();
+            let result = job.execute().await;
+            assert!(state.complete(result));
+            assert!(state.error.is_none(), "{kind:?}: {:?}", state.error);
+        }
+        fn observe(state: &mut ActionsState, path: &Path) {
+            let selection = codex_config::read_selection(path).unwrap();
+            state.set_current_model(selection.and_then(|selection| selection.model));
+            state.acknowledge_snapshot_refresh(true);
+        }
+        block_on(futures_lite::future::zip(runner.run(), async {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !matches!(&*owner.state(), GatewayState::Owned { .. }) {
+                assert!(
+                    Instant::now() < deadline && owner.pending(),
+                    "{:?}",
+                    owner.state()
+                );
+                async_io::Timer::after(Duration::from_millis(20)).await;
+            }
+            let path = fixture.path();
+            let mut state = ActionsState::default();
+            state.set_config_path(Some(path.clone()));
+            state.set_address(address.to_string());
+            observe(&mut state, &path);
+            execute(&mut state, &path, JobKind::Inspect).await;
+            execute(&mut state, &path, JobKind::Status).await;
+            assert!(state.select_model("local/model".into()));
+            execute(&mut state, &path, JobKind::Preview).await;
+            execute(&mut state, &path, JobKind::Apply).await;
+            observe(&mut state, &path);
+            execute(&mut state, &path, JobKind::Status).await;
+            assert_eq!(state.ownership, Some(Ownership::Connected));
+            assert!(state.managed_address_verified());
+            assert_eq!(state.address, address.to_string());
+            assert!(state.select_model("local/other".into()));
+            let before = fs::read(&path).unwrap();
+            execute(&mut state, &path, JobKind::Preview).await;
+            assert_eq!(fs::read(&path).unwrap(), before);
+            let ticket = state.preview.as_ref().unwrap();
+            assert_eq!(ticket.info.changed_fields, ["model"]);
+            assert_eq!(ticket.revision.as_ref().unwrap().len(), 64);
+            execute(&mut state, &path, JobKind::Apply).await;
+            observe(&mut state, &path);
+            execute(&mut state, &path, JobKind::Status).await;
+            assert_eq!(state.notice, Some(Notice::ModelUpdated));
+            let selection = codex_config::read_selection(&path).unwrap().unwrap();
+            assert_eq!(selection.model.as_deref(), Some("local/other"));
+            assert_eq!(selection.model_provider.as_deref(), Some("magpie"));
+            assert_eq!(selection.model_reasoning_effort.as_deref(), Some("high"));
+            assert_eq!(state.address, address.to_string());
+            owner.stop();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while owner.pending() {
+                assert!(Instant::now() < deadline, "owned cleanup deadline");
+                async_io::Timer::after(Duration::from_millis(20)).await;
+            }
+            assert!(std::net::TcpStream::connect(address).is_err());
+            state.disconnect_confirmation = true;
+            execute(&mut state, &path, JobKind::Disconnect).await;
+            observe(&mut state, &path);
+            execute(&mut state, &path, JobKind::Status).await;
+            assert_eq!(state.ownership, Some(Ownership::Unmanaged));
+            assert_eq!(fs::read(&path).unwrap(), original);
+        }));
+        eprintln!(
+            "actual CLI: connect -> model-only preview/apply -> same managed gateway -> stop -> offline disconnect restored original bytes"
+        );
     }
 
     /// Invoked alone by tests/desktop_actions.py, with child-only fixture env.

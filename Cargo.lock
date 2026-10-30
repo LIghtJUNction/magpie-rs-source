@@ -942,6 +942,7 @@ dependencies = [
  "getrandom 0.3.4",
  "keyring",
  "rustix",
+ "sha2",
  "toml_edit",
  "zeroize",
 ]

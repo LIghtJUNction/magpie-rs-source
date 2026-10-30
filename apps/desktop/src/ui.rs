@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    net::SocketAddr,
     path::PathBuf,
     sync::{
         Arc,
@@ -21,6 +22,8 @@ use crate::{
     actions_text::{ActionText as A, error_text},
     assets,
     cli_bridge::{self, Ownership},
+    gateway_page::{GatewayEvent, GatewayPage},
+    gateway_text::GatewayText as G,
     localization::{Locale, Text},
     preferences::{self, Preferences},
     provider_text::ProviderText as P,
@@ -40,6 +43,7 @@ const CHECK: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24
 enum Page {
     Agents,
     Providers,
+    Gateway,
     Settings,
 }
 
@@ -76,6 +80,13 @@ pub struct MagpieWindow {
     locale: Locale,
     appearance: Appearance,
     providers: Entity<ProvidersPage>,
+    gateway: Entity<GatewayPage>,
+    gateway_address: SocketAddr,
+    gateway_autostart: bool,
+    gateway_configured: bool,
+    gateway_catalog_invalid: bool,
+    gateway_address_to_actions: Option<SocketAddr>,
+    pending_gateway_address: Option<SocketAddr>,
     preferences_task: Option<Task<()>>,
     preferences_snapshot: Option<Preferences>,
     preferences_error: Option<&'static str>,
@@ -115,8 +126,19 @@ pub struct MagpieWindow {
 }
 
 impl MagpieWindow {
-    /// Starts one background discovery; never modifies an Agent's files.
+    /// Loads local preferences, discovers Agents and supervises a local Gateway.
+    /// Agent configuration writes still require explicit preview and confirmation.
+    #[cfg_attr(feature = "visual-test", allow(dead_code))]
     pub fn new(cx: &mut Context<Self>) -> Self {
+        Self::with_gateway_autostart(true, cx)
+    }
+
+    #[cfg(feature = "visual-test")]
+    pub fn new_for_preview(cx: &mut Context<Self>) -> Self {
+        Self::with_gateway_autostart(false, cx)
+    }
+
+    fn with_gateway_autostart(gateway_autostart: bool, cx: &mut Context<Self>) -> Self {
         let roster_scroll = ScrollHandle::new();
         let detail_scroll = ScrollHandle::new();
         let settings_scroll = ScrollHandle::new();
@@ -175,6 +197,7 @@ impl MagpieWindow {
         for id in [
             "agents-page",
             "providers-page",
+            "gateway-page",
             "settings-page",
             "refresh",
             "more-pages",
@@ -224,15 +247,20 @@ impl MagpieWindow {
         subscriptions.push(cx.on_app_quit(|view, cx| {
             view.actions.cancel();
             view.providers.read(cx).cancel();
+            view.gateway.update(cx, |page, cx| page.begin_closing(cx));
             let pending = view.shutdown_pending.clone();
             let providers_pending = view.providers.read(cx).shutdown_pending();
             let preferences_pending = view.preferences_pending.clone();
+            let gateway_pending = view.gateway.read(cx).shutdown_pending();
             async move {
                 // Direct application quit has GPUI's 200ms budget; normal
                 // window close below waits for the full bridge cleanup.
                 while pending.load(Ordering::Acquire)
                     || providers_pending.load(Ordering::Acquire)
                     || preferences_pending.load(Ordering::Acquire)
+                    || gateway_pending
+                        .as_ref()
+                        .is_some_and(|pending| pending.load(Ordering::Acquire))
                 {
                     async_io::Timer::after(Duration::from_millis(10)).await;
                 }
@@ -240,7 +268,24 @@ impl MagpieWindow {
         }));
         let model_anchor = ScrollAnchor::for_handle(detail_scroll.clone());
         let providers = cx.new(ProvidersPage::new);
+        let gateway = cx.new(GatewayPage::new);
         subscriptions.push(cx.observe(&providers, |_, _, cx| cx.notify()));
+        subscriptions.push(cx.observe(&gateway, |_, _, cx| cx.notify()));
+        subscriptions.push(cx.subscribe(&gateway, |view, _, event, cx| {
+            match event {
+                GatewayEvent::Changed => view.gateway_catalog_invalid = true,
+                GatewayEvent::SaveAddress(address) => {
+                    if view.preferences_task.is_some() || view.close_requested {
+                        view.gateway
+                            .update(cx, |page, cx| page.address_saved(false, cx));
+                    } else {
+                        view.pending_gateway_address = Some(*address);
+                        view.save_preferences(cx);
+                    }
+                }
+            }
+            cx.notify();
+        }));
         let mut view = Self {
             snapshot: None,
             refresh_task: None,
@@ -248,6 +293,13 @@ impl MagpieWindow {
             locale: Locale::system(),
             appearance: Appearance::System,
             providers,
+            gateway,
+            gateway_address: magpie_core::gateway::default_gateway_addr(),
+            gateway_autostart,
+            gateway_configured: false,
+            gateway_catalog_invalid: false,
+            gateway_address_to_actions: None,
+            pending_gateway_address: None,
             preferences_task: None,
             preferences_snapshot: None,
             preferences_error: None,
@@ -317,10 +369,31 @@ impl MagpieWindow {
                                 Err(error) => view.preferences_error = Some(error),
                             }
                         }
+                        let address = preferences
+                            .as_ref()
+                            .and_then(|value| value.gateway_address().ok())
+                            .unwrap_or_else(magpie_core::gateway::default_gateway_addr);
+                        if !view.gateway_configured {
+                            view.gateway_address_to_actions = Some(address);
+                        }
+                        view.gateway_configured = true;
+                        view.gateway_address = address;
+                        view.gateway.update(cx, |page, cx| {
+                            page.configure(
+                                address,
+                                view.gateway_autostart && !view.close_requested,
+                                cx,
+                            )
+                        });
                         view.preferences_snapshot = preferences;
                         view.preferences_error = None;
                     }
-                    Err(error) => view.preferences_error = Some(error),
+                    Err(error) => {
+                        view.preferences_error = Some(error);
+                        view.gateway.update(cx, |page, cx| {
+                            page.configure(view.gateway_address, false, cx)
+                        });
+                    }
                 }
                 cx.notify();
             });
@@ -332,7 +405,8 @@ impl MagpieWindow {
         if self.preferences_task.is_some() {
             return;
         }
-        let value = Preferences::new(self.locale, self.appearance);
+        let value = Preferences::new(self.locale, self.appearance)
+            .with_gateway_address(self.pending_gateway_address.unwrap_or(self.gateway_address));
         let expected = self.preferences_snapshot.clone();
         let saved = value.clone();
         self.preferences_pending.store(true, Ordering::Release);
@@ -349,10 +423,26 @@ impl MagpieWindow {
                 view.preferences_task = None;
                 match result {
                     Ok(()) => {
+                        if let Some(address) = view.pending_gateway_address.take() {
+                            if cli_bridge::parse_address(&view.actions.address).ok()
+                                == Some(view.gateway_address)
+                            {
+                                view.gateway_address_to_actions = Some(address);
+                            }
+                            view.gateway_address = address;
+                            view.gateway
+                                .update(cx, |page, cx| page.address_saved(true, cx));
+                        }
                         view.preferences_snapshot = Some(saved);
                         view.preferences_error = None;
                     }
-                    Err(error) => view.preferences_error = Some(error),
+                    Err(error) => {
+                        if view.pending_gateway_address.take().is_some() {
+                            view.gateway
+                                .update(cx, |page, cx| page.address_saved(false, cx));
+                        }
+                        view.preferences_error = Some(error);
+                    }
                 }
                 cx.notify();
             });
@@ -400,6 +490,11 @@ impl MagpieWindow {
                         })
                 }) && view.actions.config_path().map(PathBuf::from) == path;
                 view.actions.acknowledge_snapshot_refresh(fresh);
+                view.actions.set_current_model(
+                    codex
+                        .and_then(|agent| agent.settings.as_ref())
+                        .and_then(|settings| settings.model.clone()),
+                );
                 view.snapshot = Some(snapshot);
                 view.refresh_task = None;
                 if view.check_after_refresh {
@@ -580,6 +675,10 @@ impl MagpieWindow {
         }
         match action {
             Action::Refresh => {
+                if self.page == Page::Gateway {
+                    self.gateway.update(cx, |page, cx| page.refresh(cx));
+                    return;
+                }
                 if self.page == Page::Providers {
                     self.providers.update(cx, |page, cx| page.refresh(cx));
                     return;
@@ -601,6 +700,7 @@ impl MagpieWindow {
             }
             Action::Page(page) => {
                 let entering = self.page != page && page == Page::Agents;
+                let entering_gateway = self.page != page && page == Page::Gateway;
                 self.page = page;
                 self.roadmap = false;
                 if entering {
@@ -608,6 +708,9 @@ impl MagpieWindow {
                 }
                 if page == Page::Providers {
                     self.providers.update(cx, |page, cx| page.refresh(cx));
+                }
+                if entering_gateway {
+                    self.gateway.update(cx, |page, cx| page.refresh(cx));
                 }
             }
             Action::Details(id) => {
@@ -1762,10 +1865,12 @@ impl Render for MagpieWindow {
                     if view.actions.busy().is_some()
                         || view.providers.read(cx).busy()
                         || view.preferences_task.is_some()
+                        || view.gateway.read(cx).pending()
                     {
                         view.close_requested = true;
                         view.actions.cancel();
                         view.providers.read(cx).cancel();
+                        view.gateway.update(cx, |page, cx| page.begin_closing(cx));
                         cx.notify();
                         false
                     } else {
@@ -1779,8 +1884,23 @@ impl Render for MagpieWindow {
             && self.actions.busy().is_none()
             && !self.providers.read(cx).busy()
             && self.preferences_task.is_none()
+            && !self.gateway.read(cx).pending()
         {
             window.remove_window();
+        }
+        if self.actions.busy().is_none() {
+            if let Some(address) = self.gateway_address_to_actions.take()
+                && !self.actions.updating_connection()
+            {
+                self.actions.set_address(address.to_string());
+                self.gateway_input.update(cx, |input, cx| {
+                    input.set_text(&address.to_string(), cx);
+                });
+            }
+            if self.gateway_catalog_invalid {
+                self.gateway_catalog_invalid = false;
+                self.actions.invalidate_catalog();
+            }
         }
         if let Some(action) = self.pending_action.take() {
             self.act(action, window, cx);
@@ -1851,7 +1971,7 @@ impl Render for MagpieWindow {
                 "127.0.0.1:3425",
                 locale.action_text(A::Gateway),
                 palette,
-                disabled,
+                disabled || self.actions.managed_address_verified(),
                 cx,
             );
         });
@@ -1883,9 +2003,21 @@ impl Render for MagpieWindow {
         self.providers.update(cx, |page, cx| {
             page.set_presentation(self.locale, self.appearance, cx)
         });
+        self.gateway.update(cx, |page, cx| {
+            if self.gateway_configured {
+                page.configure(self.gateway_address, false, cx);
+            }
+            page.set_presentation(
+                self.locale,
+                self.appearance,
+                self.preferences_ready && self.preferences_task.is_none() && !self.close_requested,
+                cx,
+            );
+        });
         let body = match self.page {
             Page::Agents => self.agents_page(palette, cx),
             Page::Providers => div().size_full().child(self.providers.clone()),
+            Page::Gateway => div().size_full().child(self.gateway.clone()),
             Page::Settings => self.settings_page(palette, cx),
         };
         let scan_status = if self.refresh_task.is_some() {
@@ -1898,7 +2030,6 @@ impl Render for MagpieWindow {
             )
         };
         let future_pages = [
-            A::GatewayPage,
             A::RoutesPage,
             A::UsagePage,
             A::SessionsPage,
@@ -1967,6 +2098,23 @@ impl Render for MagpieWindow {
                 .px(px(if self.compact { 6.0 } else { 10.0 }))
                 .when(wide_navigation, |button| button.justify_start())
                 .bg(rgb(if self.page == Page::Providers {
+                    palette.selected
+                } else {
+                    palette.background
+                })),
+            )
+            .child(
+                self.button(
+                    "gateway-page",
+                    self.locale.action_text(A::GatewayPage),
+                    None,
+                    Action::Page(Page::Gateway),
+                    palette,
+                    cx,
+                )
+                .px(px(if self.compact { 6.0 } else { 10.0 }))
+                .when(wide_navigation, |button| button.justify_start())
+                .bg(rgb(if self.page == Page::Gateway {
                     palette.selected
                 } else {
                     palette.background
@@ -2084,6 +2232,10 @@ impl Render for MagpieWindow {
                     .text_color(rgb(palette.muted))
                     .child(text!(self.locale.provider_text(P::Intro))),
                 Page::Settings => self.caption(Text::Preferences, palette),
+                Page::Gateway => div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(palette.muted))
+                    .child(text!(self.locale.gateway_text(G::Intro))),
             });
         let brand = div()
             .flex()
@@ -2145,6 +2297,7 @@ impl Render for MagpieWindow {
                         .child(text!(match self.page {
                             Page::Agents => self.locale.text(Text::Agents),
                             Page::Providers => self.locale.action_text(A::ProvidersPage),
+                            Page::Gateway => self.locale.action_text(A::GatewayPage),
                             Page::Settings => self.locale.text(Text::Settings),
                         })),
                 )
@@ -2336,6 +2489,9 @@ impl MagpieWindow {
             let kind = result.kind;
             let _ = this.update(cx, |view, cx| {
                 view.actions.complete(result);
+                view.gateway_input.update(cx, |input, cx| {
+                    input.set_text(&view.actions.address, cx);
+                });
                 if let Some(catalog) = &view.actions.catalog {
                     let ids: BTreeSet<_> = catalog
                         .models
@@ -2596,50 +2752,80 @@ impl MagpieWindow {
 
     fn preview_panel(&self, palette: Palette, cx: &mut Context<Self>) -> Option<Div> {
         let ticket = self.actions.preview.as_ref()?;
+        let update = ticket.binding.ownership == Ownership::Connected;
         let mut preview = div()
             .w_full()
             .min_w_0()
-            .p(px(12.0))
+            .p(px(if update { 8.0 } else { 12.0 }))
             .rounded(px(6.0))
             .border_1()
             .border_color(rgb(palette.border))
             .bg(rgb(palette.inset))
             .flex()
             .flex_col()
-            .gap(px(8.0))
-            .child(self.action_caption(A::PreviewHint, palette))
+            .gap(px(if update { 5.0 } else { 8.0 }))
+            .child(self.action_caption(
+                if update {
+                    A::UpdateHint
+                } else {
+                    A::PreviewHint
+                },
+                palette,
+            ))
             .child(self.review_field(
                 self.locale.text(Text::Model),
                 ticket.binding.model.clone(),
                 palette,
-            ))
-            .child(self.review_field(
-                self.locale.action_text(A::Gateway),
-                ticket.binding.address.to_string(),
-                palette,
-            ))
-            .child(self.review_field(
-                self.locale.text(Text::ConfigPath),
-                ticket.binding.config.display().to_string(),
-                palette,
-            ))
-            .child(self.action_caption(
-                if ticket.info.config_existed {
-                    A::KeepConfig
-                } else {
-                    A::CreateConfig
-                },
-                palette,
-            ))
-            .child(self.action_caption(A::Preserve, palette))
-            .child(self.action_button(
-                "preview-fields",
-                A::Fields,
-                Action::ToggleFields,
-                palette,
-                cx,
             ));
+        if update {
+            preview = preview.child(
+                div()
+                    .text_size(px(12.0))
+                    .line_height(px(18.0))
+                    .text_color(rgb(palette.muted))
+                    .child(text!(format!(
+                        "{} · {}",
+                        self.locale.action_text(A::Gateway),
+                        ticket.binding.address
+                    ))),
+            );
+        } else {
+            preview = preview
+                .child(self.review_field(
+                    self.locale.action_text(A::Gateway),
+                    ticket.binding.address.to_string(),
+                    palette,
+                ))
+                .child(self.review_field(
+                    self.locale.text(Text::ConfigPath),
+                    ticket.binding.config.display().to_string(),
+                    palette,
+                ))
+                .child(self.action_caption(
+                    if ticket.info.config_existed {
+                        A::KeepConfig
+                    } else {
+                        A::CreateConfig
+                    },
+                    palette,
+                ))
+                .child(self.action_caption(A::Preserve, palette));
+        }
+        preview = preview.child(self.action_button(
+            "preview-fields",
+            if update { A::UpdateDetails } else { A::Fields },
+            Action::ToggleFields,
+            palette,
+            cx,
+        ));
         if self.preview_fields {
+            if update {
+                preview = preview.child(self.review_field(
+                    self.locale.text(Text::ConfigPath),
+                    ticket.binding.config.display().to_string(),
+                    palette,
+                ));
+            }
             for field in &ticket.info.changed_fields {
                 preview = preview.child(
                     div()
@@ -2659,7 +2845,7 @@ impl MagpieWindow {
                 .gap(px(8.0))
                 .child(self.action_button(
                     "apply-connect",
-                    A::Save,
+                    if update { A::SaveModel } else { A::Save },
                     Action::Run(JobKind::Apply),
                     palette,
                     cx,
@@ -2795,7 +2981,24 @@ impl MagpieWindow {
         summary = summary
             .child(self.action_caption(A::Preserve, palette))
             .child(div().flex_1().min_h(px(8.0)));
-        if self
+        if self.actions.updating_connection() {
+            summary = summary
+                .child(self.action_caption(A::UpdateHint, palette))
+                .child(self.action_button(
+                    "preview-connect",
+                    A::PreviewUpdate,
+                    Action::Run(JobKind::Preview),
+                    palette,
+                    cx,
+                ))
+                .child(self.action_button(
+                    "disconnect",
+                    A::Disconnect,
+                    Action::ConfirmDisconnect,
+                    palette,
+                    cx,
+                ));
+        } else if self
             .actions
             .ownership
             .is_some_and(|state| state != Ownership::Unmanaged)
@@ -2902,7 +3105,14 @@ impl MagpieWindow {
                             .anchor_scroll(self.scroll_anchors.get("gateway-address").cloned())
                             .child(self.gateway_input.clone()),
                     )
-                    .child(self.action_caption(A::GatewayHint, palette)),
+                    .child(self.action_caption(
+                        if self.actions.managed_address_verified() {
+                            A::ManagedGatewayHint
+                        } else {
+                            A::GatewayHint
+                        },
+                        palette,
+                    )),
             );
         }
         panel
@@ -2981,7 +3191,7 @@ impl MagpieWindow {
         } else if self.actions.reconcile_needed()
             || (matches!(
                 self.actions.notice,
-                Some(Notice::Connected | Notice::Disconnected(_))
+                Some(Notice::Connected | Notice::ModelUpdated | Notice::Disconnected(_))
             ) && self.actions.snapshot_failed())
         {
             if !self.actions.uncertain {
@@ -2995,6 +3205,7 @@ impl MagpieWindow {
         } else if let Some(notice) = &self.actions.notice {
             let key = match notice {
                 Notice::Connected => Some(A::ConnectDone),
+                Notice::ModelUpdated => Some(A::UpdateDone),
                 Notice::Disconnected(_) => Some(A::DisconnectDone),
                 Notice::StatusVerified => None,
                 _ => None,

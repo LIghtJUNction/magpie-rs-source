@@ -30,7 +30,7 @@ fn main() -> ExitCode {
                  Without arguments, opens the desktop window.\n\
                  --help, -h     Show this help without opening a display\n\
                  --version, -V  Show the version without opening a display\n\n\
-                 Queries use the packaged Magpie CLI; saving and restoring require explicit actions. The gateway is started separately.",
+                 The app starts and manages its own local Gateway; external services are read only. Saving Agent settings and restoring them require explicit actions.",
                 env!("CARGO_PKG_VERSION"),
             );
             return ExitCode::SUCCESS;

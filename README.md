@@ -3,13 +3,17 @@
 Choose a Provider and model, connect an Agent, and send its requests through a
 local gateway. This Rust implementation has a standalone CLI and a native GPUI
 desktop application. Version 0.2.0 remains a development preview of the complete
-93-requirement Magpie contract.
+99-requirement Magpie contract, including the six additions identified in the
+original Magpie 0.1.2185 changelog.
 
-The current iteration adds shared Provider management, system-keyring API keys,
-live multi-Provider forwarding, model discovery, and a Providers desktop page
-based on the original Magpie's layout. See [the implementation and verification
-record](docs/provider-ui-parity-2026-10-30.md) for the exact scope and remaining
-product differences. Visual inspection and user acceptance are separate checks.
+Shared Provider management, system-keyring API keys, live multi-Provider
+forwarding, model discovery and the native Providers page remain the foundation.
+The latest iteration adds desktop-owned Gateway lifecycle management, model
+updates for an already connected Codex, and bounded Chat token-parameter
+compatibility. See [the latest verification and full feature audit](docs/changelog-parity-2026-10-30.md)
+and [the previous Provider/UI record](docs/provider-ui-parity-2026-10-30.md)
+for exact scope. These are incremental implementations; complete original
+feature parity, all-platform validation and user visual acceptance remain open.
 
 ## Install
 
@@ -55,8 +59,14 @@ magpie models --json
 magpie serve --listen 127.0.0.1:3425
 ```
 
-While `serve` runs, open `magpie gui` in another terminal. Add, edit, disable or
-remove Providers in either interface; the running Gateway reads the current
+Open `magpie gui` to let the desktop start its own Gateway. Its Gateway page
+shows the actual server version, address and ownership, with Start/Stop for its
+own process. A Gateway already started by `serve` is displayed as external and
+cannot be stopped by the desktop. The desktop's saved address is a local
+preference; standalone CLI invocations still select their address with `--listen`.
+Stopping or changing this address does not silently rewrite Agent settings.
+
+Add, edit, disable or remove Providers in either interface; the running Gateway reads the current
 configuration on every new request. Disabled Providers retain their settings
 and disappear from the available model list. In-flight requests retain the
 upstream already selected for that request.
@@ -100,8 +110,8 @@ preferences. Large model pickers render only the visible rows.
 
 The CLI provides agent discovery, configuration inspection, explicit Codex
 connection/restore transactions, status output, and loopback-only gateways.
-Agent discovery checks installed Codex, Claude Code, Gemini CLI,
-OpenCode and Zed executables on PATH. Only Codex configuration is inspected;
+The catalog retains 68 Agent types, with executable discovery for a subset
+including Codex, Claude Code, Gemini CLI, OpenCode and Zed. Only Codex configuration is inspected;
 its explicit model, provider and reasoning effort are read without credentials.
 The GPUI application reads local snapshots and calls the packaged CLI for model
 queries, selection, read-only connection previews, explicit saves, ownership
@@ -114,10 +124,30 @@ for another Magpie binary.
 Provider subscription sign-in, multi-account/key scheduling, the full preset
 catalog, complete Usage, routing-group integration, plugins, Library and
 synchronization remain under development. Other Agent configuration writers,
-Web/TUI/tray workflows and desktop-owned Gateway startup are still incomplete.
+Web/TUI/tray workflows are still incomplete. Desktop ownership uses a private
+stdin lease: normal shutdown or owner process loss stops only that owned child.
 Provider writes currently support Linux, macOS and Android; Windows returns an
 explicit unsupported-platform result. System-keyring integration was exercised
 on Linux; macOS/Windows need their own OS validation.
+
+To change an already connected Codex model, use the existing desktop model
+picker or the explicit CLI operation. Preview is read-only; passing its revision
+to apply rejects changes made between the two steps. Disconnect still restores
+the configuration from before the first connection, even after repeated model
+updates. Replace paths and model IDs with your own configured values:
+
+```sh
+magpie agents set-model codex --config /absolute/path/config.toml \
+  --model local/another-model --dry-run --json
+magpie agents set-model codex --config /absolute/path/config.toml \
+  --model local/another-model --apply --if-revision REVISION_FROM_PREVIEW --json
+```
+
+The forwarding implementation recognizes the Chat output-limit rename for
+OpenAI's actual domain. A compatible upstream that explicitly rejects the
+current token field in an HTTP 400 can be retried once with the requested field;
+other failures and streams that have already started are not replayed. This
+does not add general retry/fallback routing or usage accounting.
 
 ```sh
 magpie agents --json

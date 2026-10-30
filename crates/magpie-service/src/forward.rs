@@ -1,7 +1,11 @@
 //! Bounded provider forwarding with optional, explicitly selected translation.
 //! Not the full gateway contract: no account routing, prompt logging, or Usage accounting.
 
+mod lifecycle;
 pub(crate) mod source;
+mod token_field;
+
+pub use lifecycle::GatewayIdentity;
 
 use source::ForwardSource;
 
@@ -221,6 +225,7 @@ fn transport_error() -> io::Error {
 pub struct ForwardServer {
     listener: TcpListener,
     source: ForwardSource,
+    identity: GatewayIdentity,
 }
 impl ForwardServer {
     pub fn bind(address: SocketAddr, config: ForwardConfig) -> io::Result<Self> {
@@ -239,55 +244,22 @@ impl ForwardServer {
         }
         let listener = TcpListener::bind(address)?;
         listener.set_nonblocking(true)?;
-        Ok(Self { listener, source })
+        let identity = GatewayIdentity::new(
+            listener.local_addr()?,
+            if matches!(&source, ForwardSource::Store { .. }) {
+                "provider_store"
+            } else {
+                "legacy_forward"
+            },
+        );
+        Ok(Self {
+            listener,
+            source,
+            identity,
+        })
     }
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.listener.local_addr()
-    }
-    pub fn run(self) -> io::Result<()> {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?
-            .block_on(self.run_async())
-    }
-    async fn run_async(self) -> io::Result<()> {
-        let address = self.listener.local_addr()?;
-        let source = self.source.initialize(address)?;
-        let client = source::transport_client()?;
-        let requests = Arc::new(Semaphore::new(ACTIVE_LIMIT));
-        let connections = Arc::new(Semaphore::new(CONNECTION_LIMIT));
-        let state = Arc::new(State {
-            source,
-            address,
-            client,
-            requests,
-            catalogs: Arc::new(Semaphore::new(CATALOG_ACTIVE_LIMIT)),
-            stats: Arc::new(Stats::default()),
-        });
-        let listener = tokio::net::TcpListener::from_std(self.listener)?;
-        loop {
-            // A permit is acquired before accept: live connection tasks are bounded.
-            let permit = connections
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|_| invalid("listener_closed"))?;
-            let (socket, peer) = listener.accept().await?;
-            if !peer.ip().is_loopback() {
-                continue;
-            }
-            let state = state.clone();
-            tokio::spawn(async move {
-                let _connection_permit = permit;
-                let service = service_fn(move |request| handle(request, state.clone()));
-                // Also bounds a client that stops reading a response forever.
-                let _ = timeout(
-                    TOTAL_TIMEOUT + Duration::from_secs(5),
-                    serve_forward_connection(TokioIo::new(socket), service),
-                )
-                .await;
-            });
-        }
     }
 }
 
@@ -427,6 +399,7 @@ struct Stats {
 struct State {
     source: ForwardSource,
     address: SocketAddr,
+    identity: GatewayIdentity,
     client: reqwest::Client,
     requests: Arc<Semaphore>,
     catalogs: Arc<Semaphore>,
@@ -608,11 +581,9 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
     };
     // Real peer was checked at accept. Untrusted proxy/browser headers do not grant local privilege.
     let headers = request.headers();
-    if headers.contains_key(header::ORIGIN)
-        || headers.contains_key("forwarded")
-        || headers
-            .keys()
-            .any(|key| key.as_str().starts_with("x-forwarded-"))
+    if headers
+        .keys()
+        .any(|key| crate::local_access::untrusted_browser_or_proxy_header(key.as_str()))
     {
         return error(StatusCode::FORBIDDEN, "untrusted_origin_or_proxy");
     }
@@ -620,8 +591,7 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
         || headers
             .get(header::HOST)
             .and_then(|h| h.to_str().ok())
-            .and_then(|h| h.parse::<SocketAddr>().ok())
-            != Some(state.address)
+            .is_none_or(|host| !crate::local_access::valid_local_host(host, state.address))
         || request.uri().scheme().is_some()
         || request.uri().authority().is_some()
     {
@@ -650,6 +620,8 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
             "/health" => json_response(
                 StatusCode::OK,
                 json!({"status":"ok","mode":"forward_candidate",
+                "server_version":state.identity.server_version,"instance_id":state.identity.instance_id,
+                "config_source":state.identity.config_source,"address":state.identity.address.to_string(),
                 "provider_health":"not_probed","limits":{"active_requests":ACTIVE_LIMIT,"waiting_requests":0,"connections":CONNECTION_LIMIT,
                     "request_bytes":REQUEST_LIMIT,"json_response_bytes":JSON_RESPONSE_LIMIT,"catalog_response_bytes":CATALOG_RESPONSE_LIMIT,
                     "active_catalog_responses":CATALOG_ACTIVE_LIMIT,"sse_event_bytes":EVENT_LIMIT,"forward_chunk_bytes":CHUNK_LIMIT},
@@ -786,6 +758,7 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
     } else if client != Protocol::Gemini {
         value["model"] = Value::String(model.clone());
     }
+    let field = token_field::Field::in_request(provider, &value);
     let payload = match serde_json::to_vec(&value) {
         Ok(payload) => payload,
         Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_json"),
@@ -816,52 +789,46 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
             );
         }
     };
+    let payload = token_field::Payload::new(payload, field, &url);
+    if payload.len() > REQUEST_LIMIT {
+        return attributed(
+            error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "converted_request_body_too_large",
+            ),
+            &target.provider_id,
+            &public_model,
+        );
+    }
     let mut attempt = Attempt::new(state.stats.clone(), permit);
     let deadline = Instant::now() + TOTAL_TIMEOUT;
-    let upstream = timeout(
-        IDLE_TIMEOUT,
-        state
-            .client
-            .post(url)
-            .headers(target.headers.clone())
-            .header(header::CONTENT_TYPE, "application/json")
-            .header(
-                header::ACCEPT,
-                if stream {
-                    "text/event-stream"
-                } else {
-                    "application/json"
-                },
-            )
-            .body(payload)
-            .send(),
+    let upstream = token_field::send(
+        &state.client,
+        &url,
+        &target.headers,
+        payload,
+        stream,
+        deadline,
     )
     .await;
     let upstream = match upstream {
-        Ok(Ok(response)) => response,
-        Ok(Err(failure)) => {
+        Ok(response) => response,
+        Err(failure) => {
             attempt.finish(false);
+            let timed_out = failure == token_field::SendFailure::Timeout;
             return attributed(
                 error(
-                    if typed_errors && failure.is_timeout() {
+                    if timed_out {
                         StatusCode::GATEWAY_TIMEOUT
                     } else {
                         StatusCode::BAD_GATEWAY
                     },
-                    if typed_errors && failure.is_timeout() {
+                    if timed_out {
                         "upstream_header_timeout"
                     } else {
                         "upstream_transport_error"
                     },
                 ),
-                &target.provider_id,
-                &public_model,
-            );
-        }
-        Err(_) => {
-            attempt.finish(false);
-            return attributed(
-                error(StatusCode::GATEWAY_TIMEOUT, "upstream_header_timeout"),
                 &target.provider_id,
                 &public_model,
             );
@@ -1730,7 +1697,11 @@ fn attributed(mut response: Response<Body>, provider: &str, model: &str) -> Resp
 /// Validate local listener/catalog before an explicit Agent config commit.
 /// This does not claim the provider is reachable or supports a given protocol.
 pub fn probe_model(address: SocketAddr, model: &str) -> io::Result<()> {
-    if inspected_models(address)?.iter().any(|id| id == model) {
+    if inspected_gateway(address)?
+        .models
+        .iter()
+        .any(|id| id == model)
+    {
         Ok(())
     } else {
         Err(invalid("gateway_model_not_configured"))
@@ -1742,14 +1713,17 @@ pub fn probe_model(address: SocketAddr, model: &str) -> io::Result<()> {
 /// # Errors
 /// Returns a static diagnostic for invalid addresses, transport or catalog data.
 pub fn inspect_gateway(address: SocketAddr) -> io::Result<String> {
-    let models = inspected_models(address)?;
+    let report = inspected_gateway(address)?;
     Ok(json!({
         "version": magpie_core::VERSION,
         "gateway": {
             "address": address.to_string(),
             "mode": "forward_candidate",
             "provider_health": "not_probed",
-            "models": models.into_iter().map(|id| json!({
+            "server_version": report.server_version,
+            "instance_id": report.instance_id,
+            "config_source": report.config_source,
+            "models": report.models.into_iter().map(|id| json!({
                 "id": id, "source": "configured"
             })).collect::<Vec<_>>()
         }
@@ -1757,7 +1731,14 @@ pub fn inspect_gateway(address: SocketAddr) -> io::Result<String> {
     .to_string())
 }
 
-fn inspected_models(address: SocketAddr) -> io::Result<Vec<String>> {
+struct GatewayReport {
+    models: Vec<String>,
+    server_version: Option<String>,
+    instance_id: Option<String>,
+    config_source: Option<String>,
+}
+
+fn inspected_gateway(address: SocketAddr) -> io::Result<GatewayReport> {
     if !address.ip().is_loopback() || address.port() == 0 {
         return Err(invalid("candidate_requires_loopback_listener"));
     }
@@ -1789,6 +1770,36 @@ fn inspected_models(address: SocketAddr) -> io::Result<Vec<String>> {
             if value.get("mode").and_then(Value::as_str) != Some("forward_candidate") {
                 return Err(invalid("gateway_forwarder_not_ready"));
             }
+            let metadata = |name: &str| -> io::Result<Option<String>> {
+                match value.get(name) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::String(text))
+                        if !text.is_empty()
+                            && text.len() <= 64
+                            && text.bytes().all(|byte| {
+                                byte.is_ascii_alphanumeric() || b"._+-".contains(&byte)
+                            }) =>
+                    {
+                        Ok(Some(text.clone()))
+                    }
+                    _ => Err(invalid("gateway_probe_invalid")),
+                }
+            };
+            let server_version = metadata("server_version")?;
+            let instance_id = metadata("instance_id")?;
+            let config_source = metadata("config_source")?;
+            if config_source
+                .as_deref()
+                .is_some_and(|source| !matches!(source, "provider_store" | "legacy_forward"))
+                || value.get("address").is_some_and(|reported| {
+                    reported
+                        .as_str()
+                        .and_then(|text| text.parse::<SocketAddr>().ok())
+                        != Some(address)
+                })
+            {
+                return Err(invalid("gateway_probe_invalid"));
+            }
             let response = client
                 .get(format!("http://{address}/v1/models"))
                 .send()
@@ -1819,7 +1830,12 @@ fn inspected_models(address: SocketAddr) -> io::Result<Vec<String>> {
                 }
                 models.push(id.to_owned());
             }
-            Ok(models)
+            Ok(GatewayReport {
+                models,
+                server_version,
+                instance_id,
+                config_source,
+            })
         })
 }
 

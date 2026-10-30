@@ -489,6 +489,7 @@ struct Recorded {
     path: String,
     headers: hyper::HeaderMap,
     body: Value,
+    raw: Bytes,
 }
 
 struct Fixture {
@@ -515,6 +516,12 @@ impl Drop for ReplyBody {
 
 impl Fixture {
     async fn start(reply: Reply) -> Self {
+        Self::sequence(vec![reply]).await
+    }
+
+    async fn sequence(replies: Vec<Reply>) -> Self {
+        assert!(!replies.is_empty());
+        let replies = Arc::new(replies);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind isolated upstream");
@@ -530,24 +537,26 @@ impl Fixture {
                 tokio::select! {
                     accepted = listener.accept() => {
                         let (socket, _) = accepted.expect("fixture accepts");
-                        let reply = reply.clone();
+                        let replies = replies.clone();
                         let sender = sender.clone();
                         let count = count.clone();
                         let live = live.clone();
                         workers.spawn(async move {
                             let service = service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
-                                let reply = reply.clone();
+                                let replies = replies.clone();
                                 let sender = sender.clone();
                                 let count = count.clone();
                                 let live = live.clone();
                                 async move {
-                                    count.fetch_add(1, Ordering::SeqCst);
+                                    let number = count.fetch_add(1, Ordering::SeqCst);
+                                    let reply = replies.get(number).unwrap_or_else(|| replies.last().unwrap()).clone();
                                     let (parts, body) = request.into_parts();
                                     let bytes = body.collect().await.expect("synthetic request body").to_bytes();
                                     sender.send(Recorded {
                                         path: parts.uri.to_string(),
                                         headers: parts.headers,
                                         body: serde_json::from_slice(&bytes).expect("forwarded JSON"),
+                                        raw: bytes,
                                     }).await.expect("fixture request receiver");
                                     live.fetch_add(1, Ordering::SeqCst);
                                     let body = ReplyBody {
@@ -1492,4 +1501,320 @@ async fn omitted_protocol_rejects_new_entrypoints_without_contacting_upstream() 
         assert!(body.contains("endpoint_not_implemented"));
     }
     assert_eq!(fixture.requests.load(Ordering::SeqCst), 0);
+}
+
+fn token_refusal(from: &str, to: &str) -> Reply {
+    Reply {
+        status: 400,
+        ..Reply::json(json!({"error":{
+            "message":format!("Unsupported parameter: '{from}' is not supported with this model. Use '{to}' instead. {PRIVATE}"),
+            "param":from,"code":"unsupported_parameter"
+        }}))
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn chat_token_retry_preserves_native_and_translated_json_and_sse() {
+    let http = client();
+    for (entry, _) in PROTOCOLS {
+        for stream in [false, true] {
+            let (from, to) = if entry == Protocol::OpenAiChat {
+                ("max_tokens", "max_completion_tokens")
+            } else {
+                ("max_completion_tokens", "max_tokens")
+            };
+            let success = if stream {
+                Reply::sse(stream_body(Protocol::OpenAiChat))
+            } else {
+                Reply::json(response_body(Protocol::OpenAiChat))
+            };
+            let mut fixture = Fixture::sequence(vec![token_refusal(from, to), success]).await;
+            let (_server, address) =
+                ServerProcess::start(config(fixture.address, Some("openai_chat")));
+            let mut body = request_body(entry, stream);
+            if entry == Protocol::OpenAiChat {
+                body.as_object_mut()
+                    .unwrap()
+                    .remove("max_completion_tokens");
+                body["max_tokens"] = json!(64);
+                body["x_native_extension"] = serde_json::from_str(
+                    r#"{"nested":{"max_tokens":17},"precision":99999999999999999999999999999,"text":"literal max_tokens stays here"}"#,
+                )
+                .unwrap();
+            }
+            let response = send(&http, address, entry, stream, body).await;
+            assert_eq!(response.status(), 200, "{entry:?}, stream={stream}");
+            assert_eq!(response.headers()["x-magpie-provider"], "fixture");
+            let text = response.text().await.expect("complete compatible response");
+            assert!(!text.contains(PRIVATE));
+            if stream {
+                assert_sse(&text, entry);
+            } else if entry == Protocol::OpenAiChat {
+                assert_eq!(
+                    serde_json::from_str::<Value>(&text).unwrap(),
+                    response_body(entry)
+                );
+            } else {
+                assert_json(&serde_json::from_str(&text).unwrap(), entry);
+            }
+            let first = fixture.recorded().await;
+            let second = fixture.recorded().await;
+            assert_eq!(first.body[from], 64);
+            assert!(first.body.get(to).is_none());
+            assert_eq!(second.body[to], 64);
+            assert!(second.body.get(from).is_none());
+            let expected = String::from_utf8(first.raw.to_vec()).unwrap().replacen(
+                &format!("\"{from}\":"),
+                &format!("\"{to}\":"),
+                1,
+            );
+            assert_eq!(&second.raw[..], expected.as_bytes());
+            assert_eq!(second.path, first.path);
+            assert_eq!(second.headers["authorization"], format!("Bearer {KEY}"));
+            assert_eq!(
+                first.headers["authorization"],
+                second.headers["authorization"]
+            );
+            assert_eq!(fixture.requests.load(Ordering::SeqCst), 2);
+            counters_settle(&http, address, 1, 0, 0).await;
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn chat_token_retry_requires_the_specific_400_and_single_sent_field() {
+    let http = client();
+    let base = request_body(Protocol::OpenAiChat, false);
+    let mut both = base.clone();
+    both["max_tokens"] = json!(123);
+    let mut absent = base.clone();
+    absent
+        .as_object_mut()
+        .unwrap()
+        .remove("max_completion_tokens");
+    let ordinary = |message: &str| Reply {
+        status: 400,
+        ..Reply::json(json!({"error":{"message":message}}))
+    };
+    let mut cases = vec![
+        (
+            ordinary("max_completion_tokens exceeds 4096; use max_tokens instead"),
+            base.clone(),
+        ),
+        (
+            ordinary("Unsupported max_completion_tokens. Use max_tokens or max_completion_tokens."),
+            base.clone(),
+        ),
+        (
+            ordinary("Unsupported max_completion_tokens. Do not use max_tokens."),
+            base.clone(),
+        ),
+        (
+            ordinary("Unsupported parameter temperature. Use max_tokens."),
+            base.clone(),
+        ),
+        (token_refusal("max_completion_tokens", "max_tokens"), both),
+        (token_refusal("max_completion_tokens", "max_tokens"), absent),
+        (
+            Reply {
+                status: 400,
+                chunks: vec![Bytes::from_static(
+                    b"not JSON: Unsupported max_completion_tokens. Use max_tokens.",
+                )],
+                ..Reply::json(json!({}))
+            },
+            base.clone(),
+        ),
+        (
+            ordinary(&format!(
+                "Unsupported max_completion_tokens. Use max_tokens. {}",
+                "x".repeat(17 * 1024)
+            )),
+            base.clone(),
+        ),
+    ];
+    cases.push((
+        ordinary("Unsupported value for max_completion_tokens: 4096. Use max_tokens instead."),
+        base.clone(),
+    ));
+    for status in [401, 429, 500] {
+        let mut reply = token_refusal("max_completion_tokens", "max_tokens");
+        reply.status = status;
+        cases.push((reply, base.clone()));
+    }
+    for (reply, body) in cases {
+        let expected = reply.status;
+        let fixture = Fixture::start(reply).await;
+        let (_server, address) = ServerProcess::start(config(fixture.address, Some("openai_chat")));
+        let response = send(&http, address, Protocol::OpenAiChat, false, body).await;
+        assert_eq!(response.status().as_u16(), expected);
+        let text = response.text().await.unwrap();
+        assert!(!text.contains(PRIVATE));
+        assert!(!text.contains("Unsupported"));
+        assert_eq!(fixture.requests.load(Ordering::SeqCst), 1);
+        counters_settle(&http, address, 0, 1, 0).await;
+    }
+
+    // Even an identical rejection must not rewrite the Anthropic field.
+    let fixture = Fixture::start(token_refusal("max_tokens", "max_completion_tokens")).await;
+    let (_server, address) =
+        ServerProcess::start(config(fixture.address, Some("anthropic_messages")));
+    let response = send(
+        &http,
+        address,
+        Protocol::AnthropicMessages,
+        false,
+        request_body(Protocol::AnthropicMessages, false),
+    )
+    .await;
+    assert_eq!(response.status(), 400);
+    assert_eq!(fixture.requests.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn chat_token_retry_stops_after_the_second_rejection_and_after_stream_output() {
+    let http = client();
+    let fixture = Fixture::sequence(vec![
+        token_refusal("max_completion_tokens", "max_tokens"),
+        token_refusal("max_tokens", "max_completion_tokens"),
+    ])
+    .await;
+    let (_server, address) = ServerProcess::start(config(fixture.address, Some("openai_chat")));
+    let response = send(
+        &http,
+        address,
+        Protocol::OpenAiChat,
+        false,
+        request_body(Protocol::OpenAiChat, false),
+    )
+    .await;
+    assert_eq!(response.status(), 400);
+    assert!(!response.text().await.unwrap().contains(PRIVATE));
+    assert_eq!(fixture.requests.load(Ordering::SeqCst), 2);
+    counters_settle(&http, address, 0, 1, 0).await;
+
+    let mut stream = chat_event(json!({"role":"assistant","content":TEXT}), Value::Null);
+    stream.extend_from_slice(format!("data: {}\n\n", json!({"error":{"message":format!("Unsupported max_completion_tokens. Use max_tokens. {PRIVATE}")}})).as_bytes());
+    let fixture = Fixture::start(Reply::sse(stream)).await;
+    let (_server, address) = ServerProcess::start(config(fixture.address, Some("openai_chat")));
+    let response = send(
+        &http,
+        address,
+        Protocol::OpenAiChat,
+        true,
+        request_body(Protocol::OpenAiChat, true),
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    if let Ok(text) = response.text().await {
+        assert!(!text.contains(PRIVATE));
+    }
+    assert_eq!(fixture.requests.load(Ordering::SeqCst), 1);
+    counters_settle(&http, address, 0, 1, 0).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn chat_token_retry_keeps_its_permit_until_the_final_response() {
+    let first_gate = Arc::new(Semaphore::new(0));
+    let second_gate = Arc::new(Semaphore::new(0));
+    let mut first = token_refusal("max_completion_tokens", "max_tokens");
+    first.gate = Some(first_gate.clone());
+    let second = Reply {
+        gate: Some(second_gate.clone()),
+        ..Reply::json(response_body(Protocol::OpenAiChat))
+    };
+    let mut replies = vec![first; 4];
+    replies.extend(vec![second; 4]);
+    let mut fixture = Fixture::sequence(replies).await;
+    let (_server, address) = ServerProcess::start(config(fixture.address, Some("openai_chat")));
+    let http = client();
+    let mut requests = JoinSet::new();
+    for _ in 0..4 {
+        let http = http.clone();
+        requests.spawn(async move {
+            send(
+                &http,
+                address,
+                Protocol::OpenAiChat,
+                false,
+                request_body(Protocol::OpenAiChat, false),
+            )
+            .await
+        });
+    }
+    for _ in 0..4 {
+        fixture.recorded().await;
+    }
+    assert_eq!(
+        health(&http, address).await["transport_counters"]["active"],
+        4
+    );
+    let refused = send(
+        &http,
+        address,
+        Protocol::OpenAiChat,
+        false,
+        request_body(Protocol::OpenAiChat, false),
+    )
+    .await;
+    assert_eq!(refused.status(), 503);
+    assert_eq!(fixture.requests.load(Ordering::SeqCst), 4);
+    first_gate.add_permits(4);
+    for _ in 0..4 {
+        let retried = fixture.recorded().await;
+        assert_eq!(retried.body["max_tokens"], 64);
+    }
+    assert_eq!(
+        health(&http, address).await["transport_counters"]["active"],
+        4
+    );
+    let refused = send(
+        &http,
+        address,
+        Protocol::OpenAiChat,
+        false,
+        request_body(Protocol::OpenAiChat, false),
+    )
+    .await;
+    assert_eq!(refused.status(), 503);
+    assert_eq!(fixture.requests.load(Ordering::SeqCst), 8);
+    second_gate.add_permits(4);
+    while let Some(response) = requests.join_next().await {
+        let response = response.unwrap();
+        assert_eq!(response.status(), 200);
+        response.bytes().await.unwrap();
+    }
+    counters_settle(&http, address, 4, 0, 0).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn chat_token_retry_cancel_during_error_body_releases_upstream_and_permit() {
+    let mut reply = token_refusal("max_completion_tokens", "max_tokens");
+    reply.gate = Some(Arc::new(Semaphore::new(0)));
+    let mut fixture = Fixture::start(reply).await;
+    let (_server, address) = ServerProcess::start(config(fixture.address, Some("openai_chat")));
+    let http = client();
+    let sender = http.clone();
+    let pending = tokio::spawn(async move {
+        send(
+            &sender,
+            address,
+            Protocol::OpenAiChat,
+            false,
+            request_body(Protocol::OpenAiChat, false),
+        )
+        .await
+    });
+    fixture.recorded().await;
+    pending.abort();
+    let _ = pending.await;
+    counters_settle(&http, address, 0, 0, 1).await;
+    timeout(Duration::from_secs(2), async {
+        while fixture.live_bodies.load(Ordering::SeqCst) != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled diagnostic drops the upstream body");
+    assert_eq!(fixture.requests.load(Ordering::SeqCst), 1);
 }
