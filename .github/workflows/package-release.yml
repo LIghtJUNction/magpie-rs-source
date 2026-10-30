@@ -86,11 +86,11 @@ jobs:
           rustup target add "$RELEASE_TARGET"
           rustc -Vv
           cargo -V
-      - name: Linux packaging tools
+      - name: Linux build and packaging dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes dpkg-dev libarchive-tools zstd
+          sudo apt-get install --yes libdbus-1-dev pkg-config dpkg-dev libarchive-tools zstd
       - name: Windows NSIS
         if: matrix.target == 'x86_64-pc-windows-msvc'
         shell: pwsh

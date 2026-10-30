@@ -41,7 +41,8 @@ sudo pacman -R magpie-rs-cli
 
 Use the AUR desktop package instead when the GUI is required. Arch aarch64
 packages are intended for compatible Arch Linux ARM systems, not official
-Arch Linux x86_64.
+Arch Linux x86_64. Both CLI and desktop packages depend on `dbus` for libdbus;
+on Arch this package also supplies the headers needed by the source build.
 
 ## Debian / Ubuntu
 
@@ -53,8 +54,10 @@ sudo apt remove magpie-rs-cli
 
 These native Linux builds use Ubuntu 22.04; the `.deb` contains calculated
 runtime dependencies. GNU/Linux archives require compatible glibc and
-libgcc; they are not musl/Alpine binaries. The GUI additionally requires a
-working display session and GPUI graphics dependencies.
+libgcc plus `libdbus-1-3`; they are not musl/Alpine binaries. Debian/Ubuntu
+source builds additionally need `libdbus-1-dev` and `pkg-config`, including
+when building only the CLI. The GUI additionally requires a working display
+session and GPUI graphics dependencies.
 
 ## Linux portable installation
 
@@ -66,6 +69,17 @@ and copy `share/icons/hicolor/scalable/apps/magpie-rs.svg` into
 `~/.local/share/icons/hicolor/scalable/apps/`.
 Run `magpie gui`, `magpie-desktop`, or the **Magpie Rust** desktop entry.
 Remove those exact files to uninstall.
+
+Linux direct API-key storage uses an available, unlocked Secret Service on the
+user's D-Bus session. The packages do not select or configure a credential
+service, and installing libdbus does not unlock one. Headless users can explicitly
+choose
+`magpie providers add ... --key-env VARIABLE_NAME` and supply that variable to
+the Gateway process. A missing or locked saved key is an error, never an
+automatic switch to environment credentials. The libdbus runtime library is
+still required to load these GNU/Linux binaries even when using environment
+credentials. New musl/static builds require target-native libdbus and separate
+validation; earlier static-archive results do not cover the new keyring backend.
 
 ## macOS (13 or later)
 
@@ -118,4 +132,7 @@ Android NDK and tests it on an arm64 phone. No Android asset is produced by
 the native desktop workflow. An Android tarball is a CLI binary, not an APK.
 Extract and install it into a Termux executable path only after its device
 compatibility has been verified. Desktop GNU/Linux binaries do not run on
-Android.
+Android. The Android target does not link the Linux Secret Service backend.
+Use an explicit `--key-env VARIABLE_NAME` Provider credential reference;
+`--key-stdin`/system key storage is currently unavailable, with no plaintext
+fallback. This packaging update does not establish a new device execution result.

@@ -55,23 +55,43 @@ struct CompositionBackup {
     cursor: usize,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub(crate) struct EditBuffer {
     text: String,
     anchor: usize,
     cursor: usize,
+    limit: usize,
     marked: Option<Range<usize>>,
     composition: Option<CompositionBackup>,
 }
 
+impl Default for EditBuffer {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            anchor: 0,
+            cursor: 0,
+            limit: MAX_INPUT_BYTES,
+            marked: None,
+            composition: None,
+        }
+    }
+}
+
 impl EditBuffer {
     pub(crate) fn new(text: &str) -> Result<Self, EditError> {
-        let text = single_line(text)?;
+        Self::with_limit(text, MAX_INPUT_BYTES)
+    }
+
+    pub(crate) fn with_limit(text: &str, limit: usize) -> Result<Self, EditError> {
+        let limit = limit.min(1024 * 1024);
+        let text = single_line(text, limit)?;
         let end = text.len();
         Ok(Self {
             text,
             anchor: end,
             cursor: end,
+            limit,
             marked: None,
             composition: None,
         })
@@ -136,7 +156,7 @@ impl EditBuffer {
 
     /// Programmatic replacement uses the same limits as keyboard/clipboard/IME.
     pub(crate) fn set_text(&mut self, value: &str) -> Result<bool, EditError> {
-        let next = Self::new(value)?;
+        let next = Self::with_limit(value, self.limit)?;
         let changed = self.text != next.text;
         if changed {
             *self = next;
@@ -298,8 +318,8 @@ impl EditBuffer {
         text: &str,
         marked_selection: Option<Option<Range<usize>>>,
     ) -> Result<bool, EditError> {
-        let insertion = single_line(text)?;
-        if self.text.len() - range.len() + insertion.len() > MAX_INPUT_BYTES {
+        let insertion = single_line(text, self.limit)?;
+        if self.text.len() - range.len() + insertion.len() > self.limit {
             return Err(EditError::TooLong);
         }
         // Validate before changing any state, including the IME cancellation backup.
@@ -365,9 +385,9 @@ impl EditBuffer {
     }
 }
 
-fn single_line(value: &str) -> Result<String, EditError> {
+fn single_line(value: &str, limit: usize) -> Result<String, EditError> {
     // Check before allocating or walking an arbitrarily large clipboard item.
-    if value.len() > MAX_INPUT_BYTES {
+    if value.len() > limit {
         return Err(EditError::TooLong);
     }
     let mut output = String::with_capacity(value.len());

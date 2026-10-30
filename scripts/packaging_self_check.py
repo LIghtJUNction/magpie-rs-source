@@ -325,6 +325,13 @@ class Controls(unittest.TestCase):
             provides = next(line for line in recipe.splitlines() if line.startswith("provides="))
             for package in ("magpie", "magpie-rs"):
                 self.assertIn(f"'{package}'", provides)
+            # Shared-core keyring support links libdbus in both executables;
+            # the rendered package must install it even for CLI-only use.
+            dependencies = subprocess.check_output(
+                ["bash", "-c", 'source "$1"; printf "%s\\n" "${depends[@]}"',
+                 "bash", str(destination / name / "PKGBUILD")], text=True,
+            ).splitlines()
+            self.assertIn("dbus", dependencies)
         with patch.object(sys, "argv", argv), self.assertRaises(SystemExit), \
                 contextlib.redirect_stderr(io.StringIO()):
             aur.main()

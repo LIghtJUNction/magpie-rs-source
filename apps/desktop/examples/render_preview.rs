@@ -3,7 +3,8 @@
 //! Build with --features visual-test --example render_preview, then run with
 //! --output /absolute/new/directory [--locale en|zh-CN|zh-TW|ja|de] [--all] [--size WIDTHxHEIGHT].
 //! The default baseline is the real Agents scene, light theme, at 900x560.
-//! --all includes Codex details and Settings at 900/360/440x560 in both themes.
+//! --all includes Agents, Codex details, Providers, the Provider form and its
+//! credentials section, and Settings at four viewport sizes in both themes.
 //! Each scene saves a 1x PNG, the native texture and a manifest. No OS window opens.
 
 #[path = "../src/actions_state.rs"]
@@ -20,6 +21,12 @@ mod config_stamp;
 mod input_model;
 #[path = "../src/localization.rs"]
 mod localization;
+#[path = "../src/preferences.rs"]
+mod preferences;
+#[path = "../src/provider_text.rs"]
+mod provider_text;
+#[path = "../src/providers.rs"]
+mod providers;
 #[path = "../src/snapshot.rs"]
 mod snapshot;
 #[path = "../src/text_input.rs"]
@@ -46,8 +53,23 @@ mod ui {
             self.appearance = appearance;
             self.page = match scene {
                 super::Scene::Settings => Page::Settings,
+                super::Scene::Providers
+                | super::Scene::ProviderEditor
+                | super::Scene::ProviderCredentials => Page::Providers,
                 _ => Page::Agents,
             };
+            self.providers.update(cx, |page, cx| {
+                page.set_presentation(locale, appearance, cx);
+                page.preview_fixture(
+                    matches!(
+                        scene,
+                        super::Scene::ProviderEditor | super::Scene::ProviderCredentials
+                    ),
+                    matches!(scene, super::Scene::ProviderCredentials),
+                    self.compact,
+                    cx,
+                );
+            });
             self.details = matches!(scene, super::Scene::Codex).then_some("codex");
             self.gateway_settings = matches!(scene, super::Scene::Codex);
             self.copied = None;
@@ -116,12 +138,15 @@ use theme::Appearance;
 const GPUI_REVISION: &str = "37faef81f74fc1bb08be9939c4cffc8ede6ced2f";
 const FIXTURE_CONFIG: &str = "model = \"fixture/preview-model\"\n\
     model_provider = \"fixture\"\nmodel_reasoning_effort = \"high\"\n";
-const VIEWPORTS: [(u32, u32); 3] = [(900, 560), (360, 560), (440, 560)];
+const VIEWPORTS: [(u32, u32); 4] = [(900, 560), (360, 560), (440, 560), (1280, 720)];
 
 #[derive(Clone, Copy)]
 enum Scene {
     Agents,
     Codex,
+    Providers,
+    ProviderEditor,
+    ProviderCredentials,
     Settings,
 }
 
@@ -130,6 +155,9 @@ impl Scene {
         match self {
             Self::Agents => "agents",
             Self::Codex => "codex",
+            Self::Providers => "providers",
+            Self::ProviderEditor => "provider-editor",
+            Self::ProviderCredentials => "provider-credentials",
             Self::Settings => "settings",
         }
     }
@@ -193,8 +221,8 @@ fn options() -> Result<Option<Options>> {
                 println!(
                     "render_preview --output ABS_NEW_DIRECTORY [--locale en|zh-CN|zh-TW|ja|de] [--all]\n\
                      Default: Agents, light theme, 900x560; one 1x PNG, native texture and manifest.json.\n\
-                     --all: 18 scenes across Agents/Codex/Settings, both themes and three widths.\n\
-                     --size: render one custom viewport; combine with --all for six scene/theme pairs.\n\
+                     --all: 48 scenes across Agents/Codex/Providers/Provider form/credentials/Settings, both themes and four viewports.\n\
+                     --size: render one custom viewport; combine with --all for 12 scene/theme pairs.\n\
                      Uses an isolated child, real GPUI scene rendering and system fonts."
                 );
                 return Ok(None);
@@ -248,6 +276,46 @@ impl FixtureDirectory {
             builder.create(fixture.0.join(name))?;
         }
         fs::write(fixture.0.join("codex/config.toml"), FIXTURE_CONFIG)?;
+        use magpie_core::provider_store::{Provider, ProviderProtocol, ProviderStore};
+        let path = fixture.0.join("config/providers.toml");
+        for (index, (id, name, protocol, base_url)) in [
+            (
+                "fixture-openai",
+                "Fixture · Research models",
+                ProviderProtocol::OpenAiResponses,
+                "https://models.example.invalid/v1",
+            ),
+            (
+                "fixture-anthropic",
+                "Fixture · Writing models",
+                ProviderProtocol::AnthropicMessages,
+                "https://writing.example.invalid",
+            ),
+            (
+                "fixture-local",
+                "Fixture · Local workspace",
+                ProviderProtocol::OpenAiChat,
+                "http://127.0.0.1:8099/v1",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            ProviderStore::create(
+                &path,
+                Provider {
+                    id: id.into(),
+                    name: name.into(),
+                    protocol,
+                    base_url: base_url.into(),
+                    api_key_env: (index < 2).then(|| "SYNTHETIC_PREVIEW_API_KEY".into()),
+                    credential_ref: None,
+                    models: vec!["fixture-model-a".into(), "fixture-model-b".into()],
+                    enabled: index != 1,
+                },
+                index as u64,
+            )?;
+        }
         Ok(fixture)
     }
 }
@@ -392,7 +460,14 @@ fn render(options: &Options) -> Result<()> {
         &[("light", Appearance::Light)]
     };
     let scenes: &[Scene] = if options.all {
-        &[Scene::Agents, Scene::Codex, Scene::Settings]
+        &[
+            Scene::Agents,
+            Scene::Codex,
+            Scene::Providers,
+            Scene::ProviderEditor,
+            Scene::ProviderCredentials,
+            Scene::Settings,
+        ]
     } else {
         &[Scene::Agents]
     };
@@ -484,7 +559,7 @@ fn render(options: &Options) -> Result<()> {
             "mode": if options.all { "all" } else { "baseline" },
             "render_path": "HeadlessAppContext + native platform text system + current_headless_renderer",
             "ui_source": "include!(../src/ui.rs); production MagpieWindow Render implementation",
-            "data": "five synthetic agents; one credential-free Codex configuration; no live accounts",
+            "data": "five synthetic agents; one credential-free Codex configuration; three providers in an isolated real ProviderStore; synthetic password-input fixture only, no keyring writes or live accounts",
             "fonts": families, "primary_font": selected_font.family.as_ref(),
             "fallback_fonts": selected_font.fallbacks.as_ref().map(|fonts| fonts.fallback_list()),
             "ui_source_bytes": include_bytes!("../src/ui.rs").len(),
@@ -493,7 +568,7 @@ fn render(options: &Options) -> Result<()> {
                 "Offscreen scene/text/SVG raster evidence; no OS screen capture or desktop input.",
                 "GPU or software-adapter availability and installed fonts affect raster output.",
                 "PNG creation is not visual approval, workflow acceptance or original feature parity.",
-                "Only Agents, Codex details and Settings exist in this captured UI; no invented Providers page.",
+                "Captures the implemented Agents/Codex, Providers and Settings pages. Other upstream pages remain explicitly unimplemented.",
                 "No original visual baseline or cross-platform execution is attested."
             ]
         }))?,

@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::{
         Arc,
@@ -10,8 +10,9 @@ use std::{
 
 use gpui::{
     AccessibleAction, App, ClipboardItem, Context, Div, Entity, FocusHandle, FontWeight,
-    IntoElement, KeyDownEvent, Render, Role, ScrollAnchor, ScrollHandle, SharedString, Stateful,
-    Subscription, Task, Toggled, Window, div, img, point, prelude::*, px, rgb, svg, text,
+    IntoElement, KeyDownEvent, Render, Role, ScrollAnchor, ScrollHandle, ScrollStrategy,
+    SharedString, Stateful, Subscription, Task, Toggled, UniformListScrollHandle, Window, div, img,
+    point, prelude::*, px, rgb, svg, text, uniform_list,
 };
 use magpie_core::agents::ConfigFileState;
 
@@ -21,6 +22,9 @@ use crate::{
     assets,
     cli_bridge::{self, Ownership},
     localization::{Locale, Text},
+    preferences::{self, Preferences},
+    provider_text::ProviderText as P,
+    providers::ProvidersPage,
     snapshot::{Agent, Snapshot},
     text_input::{InputEvent, TextInput},
     theme::{self, Appearance, Palette},
@@ -35,6 +39,7 @@ const CHECK: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
     Agents,
+    Providers,
     Settings,
 }
 
@@ -70,6 +75,11 @@ pub struct MagpieWindow {
     page: Page,
     locale: Locale,
     appearance: Appearance,
+    providers: Entity<ProvidersPage>,
+    preferences_task: Option<Task<()>>,
+    preferences_snapshot: Option<Preferences>,
+    preferences_error: Option<&'static str>,
+    preferences_ready: bool,
     details: Option<&'static str>,
     copied: Option<&'static str>,
     compact: bool,
@@ -88,7 +98,7 @@ pub struct MagpieWindow {
     search_input: Entity<TextInput>,
     _subscriptions: Vec<Subscription>,
     model_focus: BTreeMap<String, FocusHandle>,
-    model_scroll: ScrollHandle,
+    model_scroll: UniformListScrollHandle,
     model_anchor: ScrollAnchor,
     pending_action: Option<Action>,
     pending_focus: Option<&'static str>,
@@ -101,6 +111,7 @@ pub struct MagpieWindow {
     close_handler_installed: bool,
     close_requested: bool,
     shutdown_pending: Arc<AtomicBool>,
+    preferences_pending: Arc<AtomicBool>,
 }
 
 impl MagpieWindow {
@@ -163,6 +174,7 @@ impl MagpieWindow {
         }
         for id in [
             "agents-page",
+            "providers-page",
             "settings-page",
             "refresh",
             "more-pages",
@@ -201,7 +213,7 @@ impl MagpieWindow {
                 match event {
                     InputEvent::Changed => {
                         view.actions.set_search(input.read(cx).text().to_owned());
-                        view.model_scroll.set_offset(point(px(0.0), px(0.0)));
+                        view.model_scroll.scroll_to_item(0, ScrollStrategy::Top);
                     }
                     InputEvent::Submit => view.pending_action = Some(Action::Run(JobKind::Preview)),
                     InputEvent::Escape => view.pending_action = Some(Action::Escape),
@@ -209,24 +221,37 @@ impl MagpieWindow {
                 cx.notify();
             }),
         ];
-        subscriptions.push(cx.on_app_quit(|view, _| {
+        subscriptions.push(cx.on_app_quit(|view, cx| {
             view.actions.cancel();
+            view.providers.read(cx).cancel();
             let pending = view.shutdown_pending.clone();
+            let providers_pending = view.providers.read(cx).shutdown_pending();
+            let preferences_pending = view.preferences_pending.clone();
             async move {
                 // Direct application quit has GPUI's 200ms budget; normal
                 // window close below waits for the full bridge cleanup.
-                while pending.load(Ordering::Acquire) {
+                while pending.load(Ordering::Acquire)
+                    || providers_pending.load(Ordering::Acquire)
+                    || preferences_pending.load(Ordering::Acquire)
+                {
                     async_io::Timer::after(Duration::from_millis(10)).await;
                 }
             }
         }));
         let model_anchor = ScrollAnchor::for_handle(detail_scroll.clone());
+        let providers = cx.new(ProvidersPage::new);
+        subscriptions.push(cx.observe(&providers, |_, _, cx| cx.notify()));
         let mut view = Self {
             snapshot: None,
             refresh_task: None,
             page: Page::Agents,
             locale: Locale::system(),
             appearance: Appearance::System,
+            providers,
+            preferences_task: None,
+            preferences_snapshot: None,
+            preferences_error: None,
+            preferences_ready: false,
             details: None,
             copied: None,
             compact: false,
@@ -245,7 +270,7 @@ impl MagpieWindow {
             search_input,
             _subscriptions: subscriptions,
             model_focus: BTreeMap::new(),
-            model_scroll: ScrollHandle::new(),
+            model_scroll: UniformListScrollHandle::new(),
             model_anchor,
             pending_action: None,
             pending_focus: None,
@@ -258,13 +283,81 @@ impl MagpieWindow {
             close_handler_installed: false,
             close_requested: false,
             shutdown_pending: Arc::new(AtomicBool::new(false)),
+            preferences_pending: Arc::new(AtomicBool::new(false)),
         };
         view.refresh(cx);
+        view.load_preferences(cx);
         view
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         self.focus.focus(window, cx);
+    }
+
+    fn load_preferences(&mut self, cx: &mut Context<Self>) {
+        if self.preferences_task.is_some() {
+            return;
+        }
+        let read = cx
+            .background_executor()
+            .spawn(async { preferences::path().and_then(|path| preferences::load(&path)) });
+        self.preferences_task = Some(cx.spawn(async move |this, cx| {
+            let result = read.await;
+            let _ = this.update(cx, |view, cx| {
+                view.preferences_task = None;
+                view.preferences_ready = true;
+                match result {
+                    Ok(preferences) => {
+                        if let Some(value) = &preferences {
+                            match value.values() {
+                                Ok((locale, appearance)) => {
+                                    view.locale = locale;
+                                    view.appearance = appearance;
+                                }
+                                Err(error) => view.preferences_error = Some(error),
+                            }
+                        }
+                        view.preferences_snapshot = preferences;
+                        view.preferences_error = None;
+                    }
+                    Err(error) => view.preferences_error = Some(error),
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    fn save_preferences(&mut self, cx: &mut Context<Self>) {
+        if self.preferences_task.is_some() {
+            return;
+        }
+        let value = Preferences::new(self.locale, self.appearance);
+        let expected = self.preferences_snapshot.clone();
+        let saved = value.clone();
+        self.preferences_pending.store(true, Ordering::Release);
+        let pending = self.preferences_pending.clone();
+        let write = cx.background_executor().spawn(async move {
+            let result = preferences::path()
+                .and_then(|path| preferences::save(&path, expected.as_ref(), &value));
+            pending.store(false, Ordering::Release);
+            result
+        });
+        self.preferences_task = Some(cx.spawn(async move |this, cx| {
+            let result = write.await;
+            let _ = this.update(cx, |view, cx| {
+                view.preferences_task = None;
+                match result {
+                    Ok(()) => {
+                        view.preferences_snapshot = Some(saved);
+                        view.preferences_error = None;
+                    }
+                    Err(error) => view.preferences_error = Some(error),
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
     }
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -399,7 +492,8 @@ impl MagpieWindow {
                 if let Some(index) = self.row_index("codex") {
                     self.roster_scroll.scroll_to_item(index);
                 }
-                self.model_scroll.scroll_to_item(index);
+                self.model_scroll
+                    .scroll_to_item(index, ScrollStrategy::Nearest);
                 self.model_anchor.scroll_to(window, cx);
                 window.on_next_frame(|window, _| window.refresh());
                 return;
@@ -427,7 +521,7 @@ impl MagpieWindow {
             }
             if matches!(
                 *id,
-                "agents-page" | "settings-page" | "refresh" | "more-pages"
+                "agents-page" | "providers-page" | "settings-page" | "refresh" | "more-pages"
             ) {
                 return;
             }
@@ -486,6 +580,14 @@ impl MagpieWindow {
         }
         match action {
             Action::Refresh => {
+                if self.page == Page::Providers {
+                    self.providers.update(cx, |page, cx| page.refresh(cx));
+                    return;
+                }
+                if self.page == Page::Settings {
+                    self.load_preferences(cx);
+                    return;
+                }
                 if self.roadmap {
                     self.pending_focus = Some("more-pages");
                 }
@@ -503,6 +605,9 @@ impl MagpieWindow {
                 self.roadmap = false;
                 if entering {
                     self.check_connection(cx);
+                }
+                if page == Page::Providers {
+                    self.providers.update(cx, |page, cx| page.refresh(cx));
                 }
             }
             Action::Details(id) => {
@@ -548,8 +653,14 @@ impl MagpieWindow {
                     self.copied = Some(id);
                 }
             }
-            Action::Language(locale) => self.locale = locale,
-            Action::Appearance(appearance) => self.appearance = appearance,
+            Action::Language(locale) => {
+                self.locale = locale;
+                self.save_preferences(cx);
+            }
+            Action::Appearance(appearance) => {
+                self.appearance = appearance;
+                self.save_preferences(cx);
+            }
             Action::Run(kind) => self.start_job(kind, cx),
             Action::CheckConnection => self.check_connection(cx),
             Action::ConfirmDisconnect => {
@@ -711,7 +822,13 @@ impl MagpieWindow {
                     })
             })
             .when_some(icon, |button, data| {
-                button.child(svg().data(data).size(px(16.0)))
+                button.child(svg().data(data).size(px(16.0)).flex_none().text_color(rgb(
+                    if selected {
+                        palette.accent
+                    } else {
+                        palette.muted
+                    },
+                )))
             })
             .when(!label.is_empty(), |button| button.child(text!(label)))
     }
@@ -1003,9 +1120,6 @@ impl MagpieWindow {
                             button
                                 .bg(rgb(palette.text))
                                 .text_color(rgb(palette.surface))
-                                .hover(move |style| {
-                                    style.bg(rgb(palette.text)).text_color(rgb(palette.surface))
-                                })
                         }),
                 );
             }
@@ -1603,7 +1717,36 @@ impl MagpieWindow {
                                 )
                                 .child(languages),
                         )
-                        .child(self.caption(Text::SessionOnly, palette)),
+                        .child(
+                            div()
+                                .id("preferences-status")
+                                .role(Role::Status)
+                                .text_size(px(12.0))
+                                .text_color(rgb(if self.preferences_error.is_some() {
+                                    palette.warning
+                                } else {
+                                    palette.muted
+                                }))
+                                .child(text!(self.locale.provider_text(
+                                    if self.preferences_task.is_some() {
+                                        P::PreferencesSaving
+                                    } else if self.preferences_error.is_some() {
+                                        P::PreferenceError
+                                    } else if self.preferences_snapshot.is_some() {
+                                        P::SavedPreferences
+                                    } else {
+                                        P::AutoSavePreferences
+                                    }
+                                ))),
+                        )
+                        .when_some(self.preferences_error, |column, error| {
+                            column.child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(palette.muted))
+                                    .child(text!(error)),
+                            )
+                        }),
                 ),
         )
     }
@@ -1616,9 +1759,13 @@ impl Render for MagpieWindow {
             let weak = cx.entity().downgrade();
             window.on_window_should_close(cx, move |_, cx| {
                 weak.update(cx, |view, cx| {
-                    if view.actions.busy().is_some() {
+                    if view.actions.busy().is_some()
+                        || view.providers.read(cx).busy()
+                        || view.preferences_task.is_some()
+                    {
                         view.close_requested = true;
                         view.actions.cancel();
+                        view.providers.read(cx).cancel();
                         cx.notify();
                         false
                     } else {
@@ -1628,7 +1775,11 @@ impl Render for MagpieWindow {
                 .unwrap_or(true)
             });
         }
-        if self.close_requested && self.actions.busy().is_none() {
+        if self.close_requested
+            && self.actions.busy().is_none()
+            && !self.providers.read(cx).busy()
+            && self.preferences_task.is_none()
+        {
             window.remove_window();
         }
         if let Some(action) = self.pending_action.take() {
@@ -1717,7 +1868,8 @@ impl Render for MagpieWindow {
             );
         });
         let gutter = if self.compact { 16.0 } else { 24.0 };
-        let small_toolbar = window.viewport_size().width < px(440.0);
+        let wide_navigation = window.viewport_size().width >= px(1080.0);
+        let small_toolbar = window.viewport_size().width < px(620.0);
         if small_toolbar
             && !disabled
             && !self.roadmap
@@ -1728,13 +1880,12 @@ impl Render for MagpieWindow {
         {
             Self::focus_next_frame(self.control_focus["more-pages"].clone(), window);
         }
-        let full_nav = window.viewport_size().width
-            >= px(match self.locale {
-                Locale::English | Locale::German | Locale::Japanese => 1100.0,
-                _ => 900.0,
-            });
+        self.providers.update(cx, |page, cx| {
+            page.set_presentation(self.locale, self.appearance, cx)
+        });
         let body = match self.page {
             Page::Agents => self.agents_page(palette, cx),
+            Page::Providers => div().size_full().child(self.providers.clone()),
             Page::Settings => self.settings_page(palette, cx),
         };
         let scan_status = if self.refresh_task.is_some() {
@@ -1747,7 +1898,6 @@ impl Render for MagpieWindow {
             )
         };
         let future_pages = [
-            A::ProvidersPage,
             A::GatewayPage,
             A::RoutesPage,
             A::UsagePage,
@@ -1760,6 +1910,17 @@ impl Render for MagpieWindow {
             .items_center()
             .gap(px(2.0))
             .min_w_0()
+            .when(wide_navigation, |nav| {
+                nav.flex_col().items_stretch().w_full().gap(px(6.0)).child(
+                    div()
+                        .px(px(10.0))
+                        .pt(px(8.0))
+                        .pb(px(4.0))
+                        .text_size(px(10.0))
+                        .text_color(rgb(palette.muted))
+                        .child(text!(self.locale.provider_text(P::Work))),
+                )
+            })
             .child(
                 self.button(
                     "agents-page",
@@ -1770,40 +1931,47 @@ impl Render for MagpieWindow {
                     cx,
                 )
                 .px(px(if self.compact { 6.0 } else { 10.0 }))
+                .when(wide_navigation, |button| button.justify_start())
                 .bg(rgb(if self.page == Page::Agents {
-                    palette.surface
+                    palette.selected
                 } else {
                     palette.background
                 }))
                 .text_color(rgb(if self.page == Page::Agents {
-                    palette.text
+                    palette.accent
                 } else {
                     palette.muted
                 }))
-                .border_1()
-                .border_color(rgb(if self.page == Page::Agents {
-                    palette.border
+                .border_color(gpui::rgba(0)),
+            )
+            .when(wide_navigation, |nav| {
+                nav.child(
+                    div()
+                        .px(px(10.0))
+                        .pt(px(18.0))
+                        .pb(px(4.0))
+                        .text_size(px(10.0))
+                        .text_color(rgb(palette.muted))
+                        .child(text!(self.locale.provider_text(P::ModelsGroup))),
+                )
+            })
+            .child(
+                self.button(
+                    "providers-page",
+                    self.locale.action_text(A::ProvidersPage),
+                    None,
+                    Action::Page(Page::Providers),
+                    palette,
+                    cx,
+                )
+                .px(px(if self.compact { 6.0 } else { 10.0 }))
+                .when(wide_navigation, |button| button.justify_start())
+                .bg(rgb(if self.page == Page::Providers {
+                    palette.selected
                 } else {
                     palette.background
                 })),
             )
-            .when(full_nav, |nav| {
-                nav.children(future_pages.map(|key| {
-                    div()
-                        .id(SharedString::from(format!("future-nav:{}", key as usize)))
-                        .role(Role::Status)
-                        .px(px(10.0))
-                        .text_size(px(12.0))
-                        .text_color(rgb(palette.muted))
-                        .whitespace_nowrap()
-                        .aria_label(format!(
-                            "{} · {}",
-                            self.locale.action_text(key),
-                            self.locale.action_text(A::Planned)
-                        ))
-                        .child(text!(self.locale.action_text(key)))
-                }))
-            })
             .child(
                 self.button(
                     "more-pages",
@@ -1814,6 +1982,7 @@ impl Render for MagpieWindow {
                     cx,
                 )
                 .px(px(if self.compact { 6.0 } else { 10.0 }))
+                .when(wide_navigation, |button| button.justify_start())
                 .aria_expanded(self.roadmap)
                 .aria_label(format!(
                     "{} · {}",
@@ -1886,19 +2055,21 @@ impl Render for MagpieWindow {
                     )),
                 )
             })
-            .child(
-                self.button(
-                    "settings-page",
-                    "",
-                    Some(assets::SETTINGS),
-                    Action::Page(Page::Settings),
-                    palette,
-                    cx,
+            .when(!wide_navigation, |actions| {
+                actions.child(
+                    self.button(
+                        "settings-page",
+                        "",
+                        Some(assets::SETTINGS),
+                        Action::Page(Page::Settings),
+                        palette,
+                        cx,
+                    )
+                    .px(px(8.0))
+                    .bg(rgb(palette.background))
+                    .aria_label(self.locale.text(Text::Settings)),
                 )
-                .px(px(8.0))
-                .bg(rgb(palette.background))
-                .aria_label(self.locale.text(Text::Settings)),
-            );
+            });
         let heading = div()
             .flex_none()
             .min_w_0()
@@ -1906,17 +2077,101 @@ impl Render for MagpieWindow {
             .items_center()
             .gap(px(8.0))
             .min_h(px(24.0))
-            .child(if self.page == Page::Agents {
-                self.action_caption(A::WorkspaceIntro, palette)
-            } else {
-                self.caption(Text::Preferences, palette)
+            .child(match self.page {
+                Page::Agents => self.action_caption(A::WorkspaceIntro, palette),
+                Page::Providers => div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(palette.muted))
+                    .child(text!(self.locale.provider_text(P::Intro))),
+                Page::Settings => self.caption(Text::Preferences, palette),
             });
-        div()
+        let brand = div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .flex_none()
+            .child(
+                svg()
+                    .path("icons/magpie.svg")
+                    .size(px(24.0))
+                    .text_color(rgb(palette.text)),
+            )
+            .child(
+                div()
+                    .text_size(px(18.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(text!("magpie")),
+            );
+        let main_header;
+        let sidebar;
+        if wide_navigation {
+            sidebar = Some(
+                div()
+                    .w(px(172.0))
+                    .h_full()
+                    .flex_none()
+                    .p(px(12.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(16.0))
+                    .border_r_1()
+                    .border_color(rgb(palette.border))
+                    .child(brand)
+                    .child(navigation)
+                    .child(div().flex_1())
+                    .child(
+                        self.button(
+                            "settings-page",
+                            self.locale.text(Text::Settings),
+                            Some(assets::SETTINGS),
+                            Action::Page(Page::Settings),
+                            palette,
+                            cx,
+                        )
+                        .justify_start(),
+                    ),
+            );
+            main_header = div()
+                .min_h(px(56.0))
+                .flex_none()
+                .px(px(gutter))
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .text_size(px(16.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(text!(match self.page {
+                            Page::Agents => self.locale.text(Text::Agents),
+                            Page::Providers => self.locale.action_text(A::ProvidersPage),
+                            Page::Settings => self.locale.text(Text::Settings),
+                        })),
+                )
+                .child(window_actions);
+        } else {
+            sidebar = None;
+            main_header = div()
+                .flex_none()
+                .px(px(gutter))
+                .py(px(10.0))
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .border_b_1()
+                .border_color(rgb(palette.border))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(brand)
+                        .child(window_actions),
+                )
+                .child(navigation);
+        }
+        let content = div()
             .id("magpie")
-            .track_focus(&self.focus)
-            .tab_group()
-            .tab_stop(false)
-            .on_key_down(cx.listener(Self::key_down))
             .size_full()
             .flex()
             .flex_col()
@@ -1925,39 +2180,7 @@ impl Render for MagpieWindow {
             .line_height(px(20.0))
             .text_color(rgb(palette.text))
             .bg(rgb(palette.background))
-            .child(
-                div()
-                    .h(px(56.0))
-                    .flex_none()
-                    .px(px(gutter))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(if self.compact { 4.0 } else { 8.0 }))
-                    .border_b_1()
-                    .border_color(rgb(palette.border))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.0))
-                            .flex_none()
-                            .child(
-                                svg()
-                                    .path("icons/magpie.svg")
-                                    .size(px(24.0))
-                                    .text_color(rgb(palette.text)),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(18.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(text!("magpie")),
-                            ),
-                    )
-                    .child(navigation)
-                    .child(window_actions),
-            )
+            .child(main_header)
             .when(self.roadmap, |root| root.child(roadmap_panel))
             .child(
                 div()
@@ -2008,12 +2231,31 @@ impl Render for MagpieWindow {
                                 env!("CARGO_PKG_VERSION")
                             ))),
                     ),
-            )
+            );
+        div()
+            .id("magpie-shell")
+            .track_focus(&self.focus)
+            .tab_group()
+            .tab_stop(false)
+            .on_key_down(cx.listener(Self::key_down))
+            .size_full()
+            .flex()
+            .bg(rgb(palette.background))
+            .font(theme::ui_font(cx, self.locale))
+            .text_size(px(13.0))
+            .text_color(rgb(palette.text))
+            .when_some(sidebar, |shell, sidebar| shell.child(sidebar))
+            .child(div().flex_1().min_w_0().h_full().child(content))
     }
 }
 
 impl MagpieWindow {
     fn action_enabled(&self, action: Action) -> bool {
+        if matches!(action, Action::Language(_) | Action::Appearance(_))
+            && (!self.preferences_ready || self.preferences_task.is_some())
+        {
+            return false;
+        }
         if self.close_requested || (self.refresh_task.is_some() && self.check_after_refresh) {
             return false;
         }
@@ -2095,8 +2337,12 @@ impl MagpieWindow {
             let _ = this.update(cx, |view, cx| {
                 view.actions.complete(result);
                 if let Some(catalog) = &view.actions.catalog {
-                    view.model_focus
-                        .retain(|id, _| catalog.models.iter().any(|model| &model.id == id));
+                    let ids: BTreeSet<_> = catalog
+                        .models
+                        .iter()
+                        .map(|model| model.id.as_str())
+                        .collect();
+                    view.model_focus.retain(|id, _| ids.contains(id.as_str()));
                     for model in &catalog.models {
                         view.model_focus
                             .entry(model.id.clone())
@@ -2193,9 +2439,6 @@ impl MagpieWindow {
                 button
                     .bg(rgb(palette.text))
                     .text_color(rgb(palette.surface))
-                    .hover(move |style| {
-                        style.bg(rgb(palette.text)).text_color(rgb(palette.surface))
-                    })
             },
         )
     }
@@ -2214,6 +2457,7 @@ impl MagpieWindow {
             && self.actions.catalog_is_current();
         let click_id = model.to_owned();
         let a11y_id = click_id.clone();
+        let keyboard_id = click_id.clone();
         let weak = cx.entity().downgrade();
         div()
             .id(SharedString::from(format!("model-option:{model}")))
@@ -2237,7 +2481,7 @@ impl MagpieWindow {
             .when_some(self.model_focus.get(model), |row, focus| {
                 row.track_focus(&focus.clone().tab_stop(enabled))
             })
-            .min_h(px(36.0))
+            .h(px(38.0))
             .w_full()
             .min_w_0()
             .flex_none()
@@ -2258,12 +2502,15 @@ impl MagpieWindow {
             }))
             .text_size(px(13.0))
             .line_height(px(18.0))
-            .whitespace_normal()
+            .truncate()
             .when(!enabled, |row| row.opacity(0.6))
             .when(enabled, |row| {
                 row.cursor_pointer()
                     .focus_visible(move |style| style.border_color(rgb(palette.accent)))
                     .hover(move |style| style.bg(rgb(palette.inset)))
+                    .on_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| {
+                        view.model_key(&keyboard_id, event, window, cx)
+                    }))
                     .on_click(
                         cx.listener(move |view, _, _, cx| view.select_model(click_id.clone(), cx)),
                     )
@@ -2278,12 +2525,45 @@ impl MagpieWindow {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .whitespace_normal()
+                    .truncate()
                     .child(text!(model.to_owned())),
             )
             .when(selected, |row| {
-                row.child(svg().data(CHECK).size(px(16.0)).flex_none())
+                row.child(
+                    svg()
+                        .data(CHECK)
+                        .size(px(16.0))
+                        .flex_none()
+                        .text_color(rgb(palette.accent)),
+                )
             })
+    }
+
+    fn model_key(
+        &mut self,
+        model: &str,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let models = self.actions.visible_models();
+        let Some(index) = models.iter().position(|item| item.id == model) else {
+            return;
+        };
+        let next = match event.keystroke.key.as_str() {
+            "down" => (index + 1).min(models.len() - 1),
+            "up" => index.saturating_sub(1),
+            "home" => 0,
+            "end" => models.len() - 1,
+            _ => return,
+        };
+        if let Some(focus) = self.model_focus.get(&models[next].id).cloned() {
+            self.model_scroll
+                .scroll_to_item(next, ScrollStrategy::Nearest);
+            Self::focus_next_frame(focus, window);
+            cx.notify();
+        }
+        cx.stop_propagation();
     }
 
     fn review_field(&self, label: &'static str, value: String, palette: Palette) -> Div {
@@ -2432,20 +2712,21 @@ impl MagpieWindow {
                     .py(px(12.0)),
                 );
             } else {
-                let rows = div()
-                    .id("configured-models")
-                    .w_full()
-                    .min_w_0()
-                    .max_h(px(152.0))
-                    .flex()
-                    .flex_col()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.model_scroll)
-                    .children(
-                        models
-                            .iter()
-                            .map(|model| self.model_option(&model.id, palette, cx)),
-                    );
+                let rows = uniform_list(
+                    "configured-models",
+                    models.len(),
+                    cx.processor(move |view, range: std::ops::Range<usize>, _, cx| {
+                        let models = view.actions.visible_models();
+                        range
+                            .filter_map(|index| models.get(index))
+                            .map(|model| view.model_option(&model.id, palette, cx))
+                            .collect::<Vec<_>>()
+                    }),
+                )
+                .w_full()
+                .min_w_0()
+                .h(px((models.len().min(4) as f32) * 38.0))
+                .track_scroll(&self.model_scroll);
                 choices = choices.child(
                     div()
                         .id("models-field")

@@ -27,9 +27,9 @@ use serde::Deserialize;
 
 const PROTOCOL_VERSION: &str = "0.2.0";
 const VERSION_LINE: &[u8] = b"magpie 0.2.0";
-const STDOUT_LIMIT: usize = 256 * 1024;
+const STDOUT_LIMIT: usize = 32 * 1024 * 1024;
 const STDERR_LIMIT: usize = 8 * 1024;
-const MAX_MODELS: usize = 512;
+const MAX_MODELS: usize = magpie_core::provider_store::MAX_TOTAL_MODELS;
 const OWNED_FIELDS: [&str; 7] = [
     "model",
     "model_provider",
@@ -46,6 +46,11 @@ static ADMISSION: AtomicU8 = AtomicU8::new(0);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
+    RefreshProvider {
+        store: PathBuf,
+        id: String,
+        revision: u64,
+    },
     Inspect {
         address: SocketAddr,
     },
@@ -69,11 +74,24 @@ pub enum Request {
 
 impl Request {
     pub const fn is_mutation(&self) -> bool {
-        matches!(self, Self::Apply { .. } | Self::Disconnect { .. })
+        matches!(
+            self,
+            Self::Apply { .. } | Self::Disconnect { .. } | Self::RefreshProvider { .. }
+        )
     }
 
     fn validate(&self) -> Result<(), BridgeError> {
         match self {
+            Self::RefreshProvider {
+                store,
+                id,
+                revision,
+            } => {
+                validate_config(store)?;
+                if !magpie_core::catalog::valid_provider_id(id) || *revision == u64::MAX {
+                    return Err(BridgeError::new(ErrorKind::ConfigInvalid));
+                }
+            }
             Self::Inspect { address } => validate_address(*address)?,
             Self::Preview {
                 config,
@@ -107,6 +125,16 @@ impl Request {
             values.iter().map(OsString::from).collect()
         }
         match self {
+            Self::RefreshProvider {
+                store,
+                id,
+                revision,
+            } => {
+                let mut args = words(&["providers", "refresh", id, "--store"]);
+                args.push(store.as_os_str().to_owned());
+                args.extend(words(&["--if-revision", &revision.to_string(), "--json"]));
+                args
+            }
             Self::Inspect { address } => {
                 let mut args = words(&["gateway", "inspect", "--listen"]);
                 args.extend([address.to_string().into(), "--json".into()]);
@@ -197,6 +225,7 @@ pub struct DisconnectInfo {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reply {
+    ProviderRefreshed { provider_id: String, revision: u64 },
     Inspected(GatewayInfo),
     Previewed(PreviewInfo),
     Applied(PreviewInfo),
@@ -862,6 +891,29 @@ fn decode(request: &Request, captured: Captured) -> Result<Reply, BridgeError> {
         return Err(error(ErrorKind::InvalidReply));
     }
     match request {
+        Request::RefreshProvider { id, revision, .. } => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Refreshed {
+                version: String,
+                operation: String,
+                provider_id: String,
+                revision: u64,
+            }
+            let wire: Refreshed = serde_json::from_slice(&captured.stdout)
+                .map_err(|_| error(ErrorKind::InvalidReply))?;
+            if wire.version != PROTOCOL_VERSION
+                || wire.operation != "providers.refresh"
+                || &wire.provider_id != id
+                || wire.revision != revision + 1
+            {
+                return Err(error(ErrorKind::InvalidReply));
+            }
+            Ok(Reply::ProviderRefreshed {
+                provider_id: wire.provider_id,
+                revision: wire.revision,
+            })
+        }
         Request::Inspect { address } => {
             let wire: InspectWire = serde_json::from_slice(&captured.stdout)
                 .map_err(|_| error(ErrorKind::InvalidReply))?;
@@ -1098,6 +1150,31 @@ mod tests {
                 stderr: vec![],
             },
         )
+    }
+
+    #[test]
+    fn provider_refresh_reply_is_bound_to_provider_and_next_revision() {
+        let request = Request::RefreshProvider {
+            store: config(),
+            id: "fixture".into(),
+            revision: 12,
+        };
+        let good = json!({"version":"0.2.0","operation":"providers.refresh","provider_id":"fixture","revision":13});
+        assert!(matches!(
+            parse_ok(&request, good.clone()),
+            Ok(Reply::ProviderRefreshed { revision: 13, .. })
+        ));
+        for (key, value) in [
+            ("provider_id", json!("other")),
+            ("revision", json!(12)),
+            ("operation", json!("providers.update")),
+        ] {
+            let mut bad = good.clone();
+            bad[key] = value;
+            assert!(parse_ok(&request, bad).is_err());
+        }
+        assert!(request.is_mutation());
+        assert_eq!(request.arguments()[1], "refresh");
     }
 
     #[test]

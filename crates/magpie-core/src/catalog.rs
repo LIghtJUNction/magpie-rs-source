@@ -308,7 +308,8 @@ fn string_field<'a>(
         .ok_or_else(|| invalid_field(Some(provider), field, "expected a string"))
 }
 
-fn valid_provider_id(id: &str) -> bool {
+/// Validates the shared Provider namespace, excluding the reserved `group` ID.
+pub fn valid_provider_id(id: &str) -> bool {
     id.len() <= 128
         && id.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
         && id
@@ -317,7 +318,8 @@ fn valid_provider_id(id: &str) -> bool {
         && id != "group"
 }
 
-fn valid_model_id(id: &str) -> bool {
+/// Validates an upstream model ID, including bounded vendor/path namespaces.
+pub fn valid_model_id(id: &str) -> bool {
     id.len() <= 256
         && id.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
         && id

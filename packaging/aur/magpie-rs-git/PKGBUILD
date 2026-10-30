@@ -7,7 +7,7 @@ pkgdesc='Magpie Rust development preview: CLI and GPUI desktop'
 arch=('x86_64')
 url='https://github.com/LIghtJUNction/magpie-rs'
 license=('MIT')
-depends=('glibc' 'gcc-libs' 'fontconfig' 'freetype2' 'libxcb'
+depends=('glibc' 'gcc-libs' 'dbus' 'fontconfig' 'freetype2' 'libxcb'
          'libxkbcommon' 'libxkbcommon-x11' 'libx11' 'libxi' 'libxrandr' 'wayland'
          'vulkan-icd-loader' 'libxcursor' 'openssl' 'zlib')
 makedepends=('git' 'cargo' 'clang' 'cmake' 'pkgconf' 'python' 'wayland-protocols')

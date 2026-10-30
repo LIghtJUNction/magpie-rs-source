@@ -12,6 +12,10 @@ path = "src/main.rs"
 [dependencies]
 magpie-core.workspace = true
 magpie-service.workspace = true
+zeroize = "=1.8.2"
+
+[dev-dependencies]
+serde_json = "=1.0.145"
 
 [lints]
 workspace = true
