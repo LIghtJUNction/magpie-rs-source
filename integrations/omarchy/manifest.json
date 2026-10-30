@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "magpie-rs.magpie",
+  "name": "magpie-rs",
+  "version": "0.1.0",
+  "author": "magpie-rs contributors",
+  "license": "MIT",
+  "description": "Native Omarchy bar launcher for magpie-rs",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Widget.qml"
+  },
+  "barWidget": {
+    "displayName": "magpie-rs",
+    "description": "Open the model selection panel or main window",
+    "category": "AI",
+    "aliases": [
+      "magpie-rs"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
