@@ -25,6 +25,9 @@ use async_process::Command;
 use futures_lite::{AsyncRead, AsyncReadExt, future};
 use serde::Deserialize;
 
+#[path = "cli_bridge/owned_gateway.rs"]
+pub(crate) mod owned_gateway;
+
 const PROTOCOL_VERSION: &str = "0.2.0";
 const VERSION_LINE: &[u8] = b"magpie 0.2.0";
 const STDOUT_LIMIT: usize = 32 * 1024 * 1024;
@@ -43,6 +46,8 @@ const OWNED_FIELDS: [&str; 7] = [
 // 0: idle; 1: admitted request; 2: cleanup could not be proved complete.
 // A dropped request never admits an unbounded succession of orphaned children.
 static ADMISSION: AtomicU8 = AtomicU8::new(0);
+#[cfg(test)]
+pub(crate) static PROCESS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
@@ -64,6 +69,18 @@ pub enum Request {
         model: String,
         address: SocketAddr,
     },
+    ModelPreview {
+        config: PathBuf,
+        model: String,
+        /// False is a read-only ownership/address observation usable offline.
+        check_catalog: bool,
+    },
+    ModelApply {
+        config: PathBuf,
+        model: String,
+        address: SocketAddr,
+        revision: String,
+    },
     Status {
         config: PathBuf,
     },
@@ -76,7 +93,10 @@ impl Request {
     pub const fn is_mutation(&self) -> bool {
         matches!(
             self,
-            Self::Apply { .. } | Self::Disconnect { .. } | Self::RefreshProvider { .. }
+            Self::Apply { .. }
+                | Self::ModelApply { .. }
+                | Self::Disconnect { .. }
+                | Self::RefreshProvider { .. }
         )
     }
 
@@ -93,6 +113,24 @@ impl Request {
                 }
             }
             Self::Inspect { address } => validate_address(*address)?,
+            Self::ModelPreview { config, model, .. } | Self::ModelApply { config, model, .. } => {
+                validate_config(config)?;
+                if !writable_model(model) {
+                    return Err(BridgeError::new(ErrorKind::InvalidModel));
+                }
+                if !transactions_supported() {
+                    return Err(BridgeError::new(ErrorKind::PlatformUnsupported));
+                }
+                if let Self::ModelApply {
+                    address, revision, ..
+                } = self
+                {
+                    validate_address(*address)?;
+                    if !valid_revision(revision) {
+                        return Err(BridgeError::new(ErrorKind::ConfigConflict));
+                    }
+                }
+            }
             Self::Preview {
                 config,
                 model,
@@ -133,6 +171,18 @@ impl Request {
                 let mut args = words(&["providers", "refresh", id, "--store"]);
                 args.push(store.as_os_str().to_owned());
                 args.extend(words(&["--if-revision", &revision.to_string(), "--json"]));
+                args
+            }
+            Self::ModelPreview { config, model, .. } | Self::ModelApply { config, model, .. } => {
+                let mut args = words(&["agents", "set-model", "codex", "--config"]);
+                args.push(config.as_os_str().to_owned());
+                args.extend(words(&["--model", model]));
+                if let Self::ModelApply { revision, .. } = self {
+                    args.extend(words(&["--apply", "--if-revision", revision]));
+                } else {
+                    args.push("--dry-run".into());
+                }
+                args.push("--json".into());
                 args
             }
             Self::Inspect { address } => {
@@ -189,11 +239,23 @@ pub struct ModelInfo {
 pub struct GatewayInfo {
     pub address: SocketAddr,
     pub models: Vec<ModelInfo>,
+    /// Reported by the running service, never inferred from the CLI version.
+    pub server_version: Option<String>,
+    pub instance_id: Option<String>,
+    pub config_source: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreviewInfo {
     pub config_existed: bool,
+    pub changed_fields: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelUpdateInfo {
+    pub revision: String,
+    pub address: SocketAddr,
+    pub ownership: Ownership,
     pub changed_fields: Vec<String>,
 }
 
@@ -229,6 +291,8 @@ pub enum Reply {
     Inspected(GatewayInfo),
     Previewed(PreviewInfo),
     Applied(PreviewInfo),
+    ModelPreviewed(ModelUpdateInfo),
+    ModelUpdated(ModelUpdateInfo),
     Status(Ownership),
     Disconnected(DisconnectInfo),
 }
@@ -384,6 +448,13 @@ pub fn writable_model(model: &str) -> bool {
         && !name.bytes().any(|byte| b"\\\"'?#".contains(&byte))
 }
 
+fn valid_revision(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 pub fn parse_address(value: &str) -> Result<SocketAddr, BridgeError> {
     let address = value
         .trim()
@@ -442,6 +513,8 @@ impl Default for Limits {
 
 struct Admission {
     safe_to_release: bool,
+    global: bool,
+    isolated_poison: Option<Arc<AtomicBool>>,
 }
 
 impl Admission {
@@ -449,16 +522,34 @@ impl Admission {
         match ADMISSION.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire) {
             Ok(_) => Ok(Self {
                 safe_to_release: true,
+                global: true,
+                isolated_poison: None,
             }),
             Err(2) => Err(BridgeError::new(ErrorKind::CleanupPending)),
             Err(_) => Err(BridgeError::new(ErrorKind::Busy)),
+        }
+    }
+
+    // A single Gateway supervisor owns its own bounded probes. Its long-lived
+    // child must never hold, reset, or bypass an active short-command admission.
+    fn isolated(poison: Arc<AtomicBool>) -> Self {
+        Self {
+            safe_to_release: true,
+            global: false,
+            isolated_poison: Some(poison),
         }
     }
 }
 
 impl Drop for Admission {
     fn drop(&mut self) {
-        ADMISSION.store(if self.safe_to_release { 0 } else { 2 }, Ordering::Release);
+        if self.global {
+            ADMISSION.store(if self.safe_to_release { 0 } else { 2 }, Ordering::Release);
+        } else if !self.safe_to_release
+            && let Some(poison) = &self.isolated_poison
+        {
+            poison.store(true, Ordering::Release);
+        }
     }
 }
 
@@ -619,8 +710,9 @@ async fn run_resolved(
     // The frozen status/disconnect contract must remain usable offline. Query
     // and writes involving a model additionally prove inspect capability and
     // re-check the chosen catalog entry on this same executable each time.
-    if let Request::Preview { model, address, .. } | Request::Apply { model, address, .. } =
-        &request
+    if let Request::Preview { model, address, .. }
+    | Request::Apply { model, address, .. }
+    | Request::ModelApply { model, address, .. } = &request
     {
         let inspect = Request::Inspect { address: *address };
         let output = capture(
@@ -650,7 +742,37 @@ async fn run_resolved(
         &mut admission,
     )
     .await?;
-    decode(&request, output)
+    let reply = decode(&request, output)?;
+    if let (
+        Request::ModelPreview {
+            model,
+            check_catalog: true,
+            ..
+        },
+        Reply::ModelPreviewed(info),
+    ) = (&request, &reply)
+    {
+        let inspect = Request::Inspect {
+            address: info.address,
+        };
+        let output = capture(
+            &executable,
+            &inspect.arguments(),
+            false,
+            &cancellation,
+            deadline,
+            limits,
+            &mut admission,
+        )
+        .await?;
+        let Reply::Inspected(gateway) = decode(&inspect, output)? else {
+            return Err(BridgeError::new(ErrorKind::InvalidReply));
+        };
+        if !gateway.models.iter().any(|item| item.id == *model) {
+            return Err(BridgeError::new(ErrorKind::ModelUnavailable));
+        }
+    }
+    Ok(reply)
 }
 
 // Not Debug: captured bytes can contain malicious output or private values.
@@ -802,6 +924,12 @@ struct GatewayWire {
     mode: String,
     provider_health: String,
     models: Vec<ModelWire>,
+    #[serde(default)]
+    server_version: Option<String>,
+    #[serde(default)]
+    instance_id: Option<String>,
+    #[serde(default)]
+    config_source: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -820,6 +948,21 @@ struct ConnectWire {
     writes_performed: bool,
     config_existed: bool,
     state: String,
+    gateway_readiness: String,
+    provider_readiness: String,
+    agent_execution: String,
+    changed_fields: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelUpdateWire {
+    operation: String,
+    dry_run: bool,
+    writes_performed: bool,
+    state: String,
+    revision: String,
+    gateway_address: String,
     gateway_readiness: String,
     provider_readiness: String,
     agent_execution: String,
@@ -874,6 +1017,16 @@ fn catalog_model(model: &str) -> bool {
         && !name.bytes().any(|byte| b"\\\"'?#".contains(&byte))
 }
 
+fn identity_field(value: &Option<String>) -> bool {
+    value.as_ref().is_none_or(|value| {
+        !value.is_empty()
+            && value.len() <= 128
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._-+".contains(&byte))
+    })
+}
+
 fn decode(request: &Request, captured: Captured) -> Result<Reply, BridgeError> {
     let error = |kind| BridgeError::after_spawn(kind, request.is_mutation());
     if !captured.success {
@@ -926,6 +1079,9 @@ fn decode(request: &Request, captured: Captured) -> Result<Reply, BridgeError> {
                 || wire.gateway.mode != "forward_candidate"
                 || wire.gateway.provider_health != "not_probed"
                 || wire.gateway.models.len() > MAX_MODELS
+                || !identity_field(&wire.gateway.server_version)
+                || !identity_field(&wire.gateway.instance_id)
+                || !identity_field(&wire.gateway.config_source)
             {
                 return Err(error(ErrorKind::InvalidReply));
             }
@@ -940,6 +1096,9 @@ fn decode(request: &Request, captured: Captured) -> Result<Reply, BridgeError> {
             }
             Ok(Reply::Inspected(GatewayInfo {
                 address: actual,
+                server_version: wire.gateway.server_version,
+                instance_id: wire.gateway.instance_id,
+                config_source: wire.gateway.config_source,
                 models: wire
                     .gateway
                     .models
@@ -947,6 +1106,46 @@ fn decode(request: &Request, captured: Captured) -> Result<Reply, BridgeError> {
                     .map(|model| ModelInfo { id: model.id })
                     .collect(),
             }))
+        }
+        Request::ModelPreview { .. } | Request::ModelApply { .. } => {
+            let wire: ModelUpdateWire = serde_json::from_slice(&captured.stdout)
+                .map_err(|_| error(ErrorKind::InvalidReply))?;
+            let apply = request.is_mutation();
+            let address =
+                parse_address(&wire.gateway_address).map_err(|_| error(ErrorKind::InvalidReply))?;
+            if wire.operation != "agents.set-model"
+                || wire.dry_run == apply
+                || wire.writes_performed != apply
+                || !valid_revision(&wire.revision)
+                || (wire.state != "connected" && !(apply && wire.state == "drifted"))
+                || wire.gateway_readiness
+                    != if apply {
+                        "listener_and_configured_model_checked"
+                    } else {
+                        "not_checked"
+                    }
+                || wire.provider_readiness != "not_probed"
+                || wire.agent_execution != "not_checked"
+                || (!wire.changed_fields.is_empty() && wire.changed_fields != ["model"])
+                || matches!(request, Request::ModelApply { address: expected, .. } if *expected != address)
+            {
+                return Err(error(ErrorKind::InvalidReply));
+            }
+            let info = ModelUpdateInfo {
+                revision: wire.revision,
+                address,
+                ownership: if wire.state == "connected" {
+                    Ownership::Connected
+                } else {
+                    Ownership::Drifted
+                },
+                changed_fields: wire.changed_fields,
+            };
+            Ok(if apply {
+                Reply::ModelUpdated(info)
+            } else {
+                Reply::ModelPreviewed(info)
+            })
         }
         Request::Preview { .. } | Request::Apply { .. } => {
             let wire: ConnectWire = serde_json::from_slice(&captured.stdout)
@@ -1491,6 +1690,67 @@ mod tests {
     }
 
     #[test]
+    fn model_update_receipts_require_exact_revision_fields_and_managed_address() {
+        let preview = Request::ModelPreview {
+            config: config(),
+            model: "local/next".into(),
+            check_catalog: true,
+        };
+        let apply = Request::ModelApply {
+            config: config(),
+            model: "local/next".into(),
+            address: address(),
+            revision: "a".repeat(64),
+        };
+        let wire = |apply: bool| {
+            json!({"operation":"agents.set-model","dry_run":!apply,"writes_performed":apply,
+            "state":"connected","revision":"b".repeat(64),"gateway_address":"127.0.0.1:3425",
+            "gateway_readiness": if apply {"listener_and_configured_model_checked"} else {"not_checked"},
+            "provider_readiness":"not_probed","agent_execution":"not_checked","changed_fields":["model"]})
+        };
+        assert!(matches!(
+            parse_ok(&preview, wire(false)).unwrap(),
+            Reply::ModelPreviewed(_)
+        ));
+        assert!(matches!(
+            parse_ok(&apply, wire(true)).unwrap(),
+            Reply::ModelUpdated(_)
+        ));
+        let args = apply.arguments();
+        assert!(args.iter().any(|arg| arg == "--if-revision"));
+        assert!(!args.iter().any(|arg| arg == "--gateway"));
+        for (field, value) in [
+            ("revision", json!("x".repeat(64))),
+            ("revision", json!("A".repeat(64))),
+            ("revision", json!("a".repeat(63))),
+            ("writes_performed", json!(true)),
+            ("changed_fields", json!(["model", "model_provider"])),
+            ("state", json!("drifted")),
+            ("gateway_address", json!("0.0.0.0:3425")),
+        ] {
+            let mut invalid = wire(false);
+            invalid[field] = value;
+            assert_eq!(
+                parse_ok(&preview, invalid).unwrap_err().kind,
+                ErrorKind::InvalidReply,
+                "{field}"
+            );
+        }
+        let mut mismatch = wire(true);
+        mismatch["gateway_address"] = json!("127.0.0.1:4321");
+        assert!(
+            parse_ok(&apply, mismatch)
+                .unwrap_err()
+                .mutation_may_have_run
+        );
+        let mut drifted = wire(true);
+        drifted["state"] = json!("drifted");
+        assert!(
+            matches!(parse_ok(&apply, drifted).unwrap(), Reply::ModelUpdated(info) if info.ownership == Ownership::Drifted)
+        );
+    }
+
+    #[test]
     fn status_is_exact_ownership_and_never_network_health() {
         for state in [
             Ownership::Unmanaged,
@@ -1719,6 +1979,9 @@ mod tests {
         // admission gate is exercised without test runner races or env changes.
         #[test]
         fn real_isolated_process_protocol_deadline_cancel_output_and_reaping() {
+            let _guard = PROCESS_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             let fixture = Fixture::new();
             future::block_on(async {
                 fixture.mode("ok");

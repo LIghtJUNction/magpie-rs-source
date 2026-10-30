@@ -2,6 +2,7 @@
 
 pub mod forward;
 mod gateway;
+mod local_access;
 pub mod protocol;
 pub mod provider_catalog;
 

@@ -2,6 +2,7 @@
 use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
+    net::SocketAddr,
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -19,6 +20,12 @@ pub(crate) struct Preferences {
     version: u8,
     locale: String,
     appearance: String,
+    #[serde(default = "default_gateway_address")]
+    gateway_address: String,
+}
+
+fn default_gateway_address() -> String {
+    magpie_core::gateway::default_gateway_addr().to_string()
 }
 
 impl Preferences {
@@ -32,6 +39,7 @@ impl Preferences {
                 Appearance::Dark => "dark",
             }
             .to_owned(),
+            gateway_address: default_gateway_address(),
         }
     }
 
@@ -39,6 +47,7 @@ impl Preferences {
         if self.version != 1 {
             return Err("preferences_version_unsupported");
         }
+        self.gateway_address()?;
         let locale = Locale::ALL
             .into_iter()
             .find(|locale| locale.id() == self.locale)
@@ -50,6 +59,16 @@ impl Preferences {
             _ => return Err("preferences_invalid"),
         };
         Ok((locale, appearance))
+    }
+
+    pub fn gateway_address(&self) -> Result<SocketAddr, &'static str> {
+        crate::cli_bridge::parse_address(&self.gateway_address)
+            .map_err(|_| "preferences_invalid_gateway_address")
+    }
+
+    pub fn with_gateway_address(mut self, address: SocketAddr) -> Self {
+        self.gateway_address = address.to_string();
+        self
     }
 }
 
@@ -196,6 +215,50 @@ mod tests {
         ));
         fs::create_dir(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn legacy_preferences_default_address_and_explicit_address_roundtrip() {
+        let root = directory();
+        let path = root.join("preferences.json");
+        fs::write(
+            &path,
+            br#"{"version":1,"locale":"locale-en","appearance":"dark"}"#,
+        )
+        .unwrap();
+        let old = load(&path).unwrap().unwrap();
+        assert_eq!(
+            old.gateway_address().unwrap(),
+            magpie_core::gateway::default_gateway_addr()
+        );
+        let changed = old
+            .clone()
+            .with_gateway_address("[::1]:4321".parse().unwrap());
+        save(&path, Some(&old), &changed).unwrap();
+        assert_eq!(
+            load(&path)
+                .unwrap()
+                .unwrap()
+                .gateway_address()
+                .unwrap()
+                .to_string(),
+            "[::1]:4321"
+        );
+        for invalid in [
+            "0.0.0.0:3425",
+            "127.0.0.1:0",
+            "[::1%1]:3425",
+            "https://127.0.0.1:3425",
+        ] {
+            let mut value = changed.clone();
+            value.gateway_address = invalid.into();
+            assert_eq!(
+                save(&path, Some(&changed), &value),
+                Err("preferences_invalid_gateway_address")
+            );
+            assert_eq!(load(&path).unwrap(), Some(changed.clone()));
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -186,6 +186,83 @@ impl fmt::Debug for PreparedConnect {
     }
 }
 
+/// A read-only model-change preview for an existing, unchanged connection.
+/// The first connection's original configuration remains the recovery point.
+pub struct PreparedModelUpdate {
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    inner: native::UpdatePlan,
+}
+
+impl PreparedModelUpdate {
+    /// Only `model` can change; private values are never included.
+    pub fn changed_fields(&self) -> &[&'static str] {
+        #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+        return &self.inner.changed_fields;
+        #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+        &[]
+    }
+
+    /// Opaque connection version for a caller's preview/apply precondition.
+    pub fn revision(&self) -> &str {
+        #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+        return &self.inner.revision;
+        #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+        ""
+    }
+
+    /// The existing owned loopback endpoint. Updating a model cannot replace it.
+    pub fn gateway_addr(&self) -> SocketAddr {
+        #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+        return self.inner.gateway;
+        #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+        SocketAddr::from(([127, 0, 0, 1], 0))
+    }
+}
+
+impl fmt::Debug for PreparedModelUpdate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PreparedModelUpdate")
+            .field("changed_fields", &self.changed_fields())
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelUpdateOutcome {
+    pub status: ConnectionStatus,
+    pub revision: String,
+    pub changed: bool,
+}
+
+/// Preview a change to the active model without changing any files. A missing,
+/// drifted, or interrupted ownership record never authorizes this operation.
+pub fn prepare_model_update(
+    path: &Path,
+    model: &str,
+) -> Result<PreparedModelUpdate, TransactionError> {
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    return native::prepare_update(path, model).map(|inner| PreparedModelUpdate { inner });
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+    {
+        let _ = (path, model);
+        Err(TransactionError::UnsupportedPlatform)
+    }
+}
+
+/// Apply a single-use preview only while both its ownership revision and exact
+/// target snapshot still match. A successful no-op does not write any files.
+pub fn commit_model_update(
+    plan: PreparedModelUpdate,
+) -> Result<ModelUpdateOutcome, TransactionError> {
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    return native::commit_update(plan.inner);
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+    {
+        let _ = plan;
+        Err(TransactionError::UnsupportedPlatform)
+    }
+}
+
 /// Read-only preparation. The existing parent directory is required; this
 /// function does not create configuration, locks, state or backup files.
 pub fn prepare_connect(
@@ -379,8 +456,12 @@ pub mod test_support {
 
 #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
 mod native {
-    use super::{ConnectionStatus, DisconnectOutcome, OWNED_FIELDS, TransactionError as Error};
+    use super::{
+        ConnectionStatus, DisconnectOutcome, ModelUpdateOutcome, OWNED_FIELDS,
+        TransactionError as Error,
+    };
     use rustix::fs::{FlockOperation, flock};
+    use sha2::{Digest, Sha256};
     use std::ffi::OsStr;
     use std::fs::{self, DirBuilder, File, Metadata, OpenOptions};
     use std::io::{Read, Write};
@@ -453,6 +534,17 @@ mod native {
         pub(super) changed_fields: Vec<&'static str>,
     }
 
+    pub(super) struct UpdatePlan {
+        target: Target,
+        previous: Journal,
+        before: Snapshot,
+        after: Vec<u8>,
+        connected: Vec<u8>,
+        pub(super) gateway: SocketAddr,
+        pub(super) revision: String,
+        pub(super) changed_fields: Vec<&'static str>,
+    }
+
     struct Target {
         path: PathBuf,
         parent: PathBuf,
@@ -495,13 +587,17 @@ mod native {
     enum Phase {
         Prepared,
         Connected,
+        UpdatePrepared,
         DisconnectPrepared,
         Disconnected,
         Aborted,
     }
 
+    #[derive(Clone, PartialEq, Eq)]
     struct Journal {
         session: String,
+        connected_session: String,
+        update_session: String,
         disconnect_session: String,
         phase: Phase,
         original_exists: bool,
@@ -514,10 +610,11 @@ mod native {
 
     impl Journal {
         fn image_path(&self, target: &Target, suffix: &str) -> PathBuf {
-            let session = if matches!(suffix, "disconnect-before" | "disconnected") {
-                &self.disconnect_session
-            } else {
-                &self.session
+            let session = match suffix {
+                "disconnect-before" | "disconnected" => &self.disconnect_session,
+                "update-before" | "update-after" => &self.update_session,
+                "connected" => &self.connected_session,
+                _ => &self.session,
             };
             target.state.join(format!("{session}-{suffix}.toml"))
         }
@@ -608,8 +705,11 @@ mod native {
             5,
         )?;
         let mut staged = stage(&target, &plan.connected)?;
+        let session = nonce();
         let mut journal = Journal {
-            session: nonce(),
+            connected_session: session.clone(),
+            session,
+            update_session: String::new(),
             disconnect_session: String::new(),
             phase: Phase::Prepared,
             original_exists: plan.original.bytes.is_some(),
@@ -652,6 +752,116 @@ mod native {
         inspect_connected(&target, &plan.connected).map_err(|_| Error::CommitUncertain)
     }
 
+    pub(super) fn prepare_update(path: &Path, model: &str) -> Result<UpdatePlan, Error> {
+        #[cfg(test)]
+        let _descriptor_scope = super::test_support::descriptor_scope();
+        validate_model(model)?;
+        let target = target(path, true)?;
+        let lock = existing_lock(&target)?;
+        let previous = read_journal(&target)?.ok_or(Error::NotManaged)?;
+        match previous.phase {
+            Phase::Connected => (),
+            Phase::Disconnected | Phase::Aborted => return Err(Error::NotManaged),
+            _ => return Err(Error::RecoveryRequired),
+        }
+        let (original, connected) = connection_images(&target, &previous)?;
+        let written = parse(&connected).map_err(|_| Error::StateInvalid)?;
+        let gateway = connected_gateway(&written)?;
+        let before = read_config(&target.path, true)?;
+        let bytes = before.bytes.as_deref().ok_or(Error::OriginalChanged)?;
+        let document = parse(bytes)?;
+        if !(0..OWNED_FIELDS.len()).all(|i| owned_equal(&document, &written, i)) {
+            return Err(Error::OriginalChanged);
+        }
+        let changed = document.get("model").and_then(Item::as_str) != Some(model);
+        // Actual edits retain unrelated user changes. The canonical ownership
+        // image remains reproducible from the first-connect recovery image.
+        let after = replace_model(bytes, model)?;
+        let connected = build_connected(original.as_deref(), model, gateway)?;
+        recheck_read_lock(&target, lock.as_ref())?;
+        Ok(UpdatePlan {
+            target,
+            revision: connection_revision(&previous, &before),
+            previous,
+            before,
+            after,
+            connected,
+            gateway,
+            changed_fields: if changed { vec!["model"] } else { Vec::new() },
+        })
+    }
+
+    pub(super) fn commit_update(plan: UpdatePlan) -> Result<ModelUpdateOutcome, Error> {
+        #[cfg(test)]
+        let _descriptor_scope = super::test_support::descriptor_scope();
+        let target = plan.target;
+        recheck_parent(&target, true)?;
+        let _lock = acquire_lock(&target, false)?;
+        if read_journal(&target)?.as_ref() != Some(&plan.previous) {
+            return Err(Error::OriginalChanged);
+        }
+        expect_current(&target, &plan.before)?;
+        if plan.changed_fields.is_empty() {
+            return Ok(ModelUpdateOutcome {
+                status: ConnectionStatus::Connected,
+                revision: plan.revision,
+                changed: false,
+            });
+        }
+        ensure_budget(
+            &target,
+            plan.before.bytes.as_ref().map_or(0, Vec::len)
+                + 2 * plan.after.len()
+                + plan.connected.len()
+                + 2 * MAX_JOURNAL_BYTES as usize,
+            6,
+        )?;
+        let mut staged = stage(&target, &plan.after)?;
+        let mut pending = plan.previous.clone();
+        pending.phase = Phase::UpdatePrepared;
+        pending.update_session = nonce();
+        let mut next = pending.clone();
+        next.connected_session = pending.update_session.clone();
+        next.update_session.clear();
+        next.phase = Phase::Connected;
+        write_new_private(
+            &target,
+            &next.image_path(&target, "connected"),
+            &plan.connected,
+        )?;
+        write_new_private(
+            &target,
+            &pending.image_path(&target, "update-before"),
+            plan.before.bytes.as_deref().ok_or(Error::StateInvalid)?,
+        )?;
+        write_new_private(
+            &target,
+            &pending.image_path(&target, "update-after"),
+            &plan.after,
+        )?;
+        sync_dir(&target.state)?;
+        // Publication may have reached rename even if its directory sync fails.
+        // Keep every referenced image for explicit recovery in either case.
+        persist_journal(&target, &pending).map_err(|_| Error::RecoveryRequired)?;
+        if let Err(error) = expect_current(&target, &plan.before)
+            .and_then(|()| install_stage(&mut staged, &target.path))
+        {
+            persist_journal(&target, &plan.previous).map_err(|_| Error::RecoveryRequired)?;
+            discard_update_images(&target, &pending, false);
+            return Err(error);
+        }
+        sync_dir(&target.parent).map_err(|_| Error::CommitUncertain)?;
+        persist_journal(&target, &next).map_err(|_| Error::CommitUncertain)?;
+        discard_update_images(&target, &pending, true);
+        let current = read_config(&target.path, false).map_err(|_| Error::CommitUncertain)?;
+        Ok(ModelUpdateOutcome {
+            status: inspect_snapshot_connected(&current, &plan.connected)
+                .map_err(|_| Error::CommitUncertain)?,
+            revision: connection_revision(&next, &current),
+            changed: true,
+        })
+    }
+
     pub(super) fn status(path: &Path) -> Result<ConnectionStatus, Error> {
         #[cfg(test)]
         let _descriptor_scope = super::test_support::descriptor_scope();
@@ -661,7 +871,9 @@ mod native {
             None => ConnectionStatus::Unmanaged,
             Some(journal) => match journal.phase {
                 Phase::Disconnected | Phase::Aborted => ConnectionStatus::Unmanaged,
-                Phase::Prepared | Phase::DisconnectPrepared => ConnectionStatus::RecoveryRequired,
+                Phase::Prepared | Phase::UpdatePrepared | Phase::DisconnectPrepared => {
+                    ConnectionStatus::RecoveryRequired
+                }
                 Phase::Connected => {
                     let (_, connected) = connection_images(&target, &journal)?;
                     inspect_connected(&target, &connected)?
@@ -683,6 +895,9 @@ mod native {
         }
         if journal.phase == Phase::DisconnectPrepared {
             return resume_disconnect(&target, &mut journal);
+        }
+        if journal.phase == Phase::UpdatePrepared {
+            resume_update(&target, &mut journal)?;
         }
         let (original, connected) = connection_images(&target, &journal)?;
         let current = read_config(&target.path, true)?;
@@ -734,6 +949,53 @@ mod native {
         persist_journal(&target, &journal)?;
         apply_disconnect(&target, &mut journal, &current, restored.as_deref())?;
         Ok(outcome)
+    }
+
+    fn resume_update(target: &Target, journal: &mut Journal) -> Result<(), Error> {
+        let pending = journal.clone();
+        let (_, connected) = connection_images(target, &pending)?;
+        let written = parse(&connected).map_err(|_| Error::StateInvalid)?;
+        let before =
+            stored_image(target, &pending, "update-before", true)?.ok_or(Error::StateInvalid)?;
+        let after =
+            stored_image(target, &pending, "update-after", true)?.ok_or(Error::StateInvalid)?;
+        let before_document = parse(&before).map_err(|_| Error::StateInvalid)?;
+        if !(0..OWNED_FIELDS.len()).all(|i| owned_equal(&before_document, &written, i)) {
+            return Err(Error::StateInvalid);
+        }
+        let mut next = pending.clone();
+        next.connected_session = pending.update_session.clone();
+        next.update_session.clear();
+        next.phase = Phase::Connected;
+        let (_, next_connected) = connection_images(target, &next)?;
+        let next_document = parse(&next_connected).map_err(|_| Error::StateInvalid)?;
+        let model = next_document
+            .get("model")
+            .and_then(Item::as_str)
+            .ok_or(Error::StateInvalid)?;
+        if !(1..OWNED_FIELDS.len()).all(|i| owned_equal(&written, &next_document, i))
+            || replace_model(&before, model).map_err(|_| Error::StateInvalid)? != after
+        {
+            return Err(Error::StateInvalid);
+        }
+        let current = read_config(&target.path, true)?;
+        let installed = if current.bytes.as_deref() == Some(after.as_slice()) {
+            true
+        } else if current.bytes.as_deref() == Some(before.as_slice()) {
+            false
+        } else {
+            return Err(Error::RecoveryRequired);
+        };
+        ensure_budget(target, MAX_JOURNAL_BYTES as usize, 1)?;
+        if installed {
+            sync_dir(&target.parent).map_err(|_| Error::CommitUncertain)?;
+        } else {
+            next.connected_session = pending.connected_session.clone();
+        }
+        persist_journal(target, &next).map_err(|_| Error::CommitUncertain)?;
+        discard_update_images(target, &pending, installed);
+        *journal = next;
+        Ok(())
     }
 
     fn resume_disconnect(
@@ -904,6 +1166,19 @@ mod native {
         }
     }
 
+    fn replace_model(bytes: &[u8], model: &str) -> Result<Vec<u8>, Error> {
+        let mut document = parse(bytes)?;
+        if document.get("model").and_then(Item::as_str).is_none() {
+            return Err(Error::UnsupportedShape);
+        }
+        replace_value(document.as_table_mut(), "model", Value::from(model));
+        let bytes = document.to_string().into_bytes();
+        if bytes.len() as u64 > MAX_CONFIG_BYTES {
+            return Err(Error::TooLarge);
+        }
+        Ok(bytes)
+    }
+
     fn owned_item(document: &DocumentMut, index: usize) -> Option<&Item> {
         match index {
             0 => document.get("model"),
@@ -934,10 +1209,17 @@ mod native {
 
     fn inspect_connected(target: &Target, connected: &[u8]) -> Result<ConnectionStatus, Error> {
         let current = read_config(&target.path, false)?;
-        let Some(bytes) = current.bytes else {
+        inspect_snapshot_connected(&current, connected)
+    }
+
+    fn inspect_snapshot_connected(
+        current: &Snapshot,
+        connected: &[u8],
+    ) -> Result<ConnectionStatus, Error> {
+        let Some(bytes) = current.bytes.as_deref() else {
             return Ok(ConnectionStatus::Drifted);
         };
-        let current = parse(&bytes)?;
+        let current = parse(bytes)?;
         let written = parse(connected)?;
         Ok(
             if (0..OWNED_FIELDS.len()).all(|i| owned_equal(&current, &written, i)) {
@@ -946,6 +1228,42 @@ mod native {
                 ConnectionStatus::Drifted
             },
         )
+    }
+
+    fn connection_revision(journal: &Journal, snapshot: &Snapshot) -> String {
+        // This cross-process preview token covers unrelated changes and file
+        // replacement as well as a new Magpie ownership revision. The internal
+        // commit still compares the complete snapshot, not only this digest.
+        let mut hash = Sha256::new();
+        hash.update(b"magpie-codex-model-preview-v1\0");
+        for session in [&journal.session, &journal.connected_session] {
+            hash.update((session.len() as u64).to_le_bytes());
+            hash.update(session.as_bytes());
+        }
+        if let Some(identity) = &snapshot.identity {
+            hash.update([1]);
+            for value in [
+                identity.dev,
+                identity.ino,
+                u64::from(identity.mode),
+                identity.size,
+                identity.mtime as u64,
+                identity.mtime_nsec as u64,
+                identity.nlink,
+            ] {
+                hash.update(value.to_le_bytes());
+            }
+        } else {
+            hash.update([0]);
+        }
+        if let Some(bytes) = &snapshot.bytes {
+            hash.update([1]);
+            hash.update((bytes.len() as u64).to_le_bytes());
+            hash.update(bytes);
+        } else {
+            hash.update([0]);
+        }
+        hex(&hash.finalize())
     }
 
     fn restore_owned(
@@ -1441,7 +1759,9 @@ mod native {
         match journal.map(|j| j.phase) {
             None | Some(Phase::Disconnected | Phase::Aborted) => Ok(()),
             Some(Phase::Connected) => Err(Error::AlreadyManaged),
-            Some(Phase::Prepared | Phase::DisconnectPrepared) => Err(Error::RecoveryRequired),
+            Some(Phase::Prepared | Phase::UpdatePrepared | Phase::DisconnectPrepared) => {
+                Err(Error::RecoveryRequired)
+            }
         }
     }
 
@@ -1527,13 +1847,22 @@ mod native {
 
     fn persist_journal(target: &Target, journal: &Journal) -> Result<(), Error> {
         let mut document = DocumentMut::new();
-        document["version"] = value(1);
+        // Old readers must refuse an updated ownership image rather than restore
+        // using the first connected image. Unchanged v1 sessions remain usable.
+        let updated =
+            journal.connected_session != journal.session || journal.phase == Phase::UpdatePrepared;
+        document["version"] = value(if updated { 2 } else { 1 });
         document["target"] = value(&target.binding);
         document["session"] = value(&journal.session);
+        if updated {
+            document["connected_session"] = value(&journal.connected_session);
+            document["update_session"] = value(&journal.update_session);
+        }
         document["disconnect_session"] = value(&journal.disconnect_session);
         document["phase"] = value(match journal.phase {
             Phase::Prepared => "prepared",
             Phase::Connected => "connected",
+            Phase::UpdatePrepared => "update-prepared",
             Phase::DisconnectPrepared => "disconnect-prepared",
             Phase::Disconnected => "disconnected",
             Phase::Aborted => "aborted",
@@ -1571,7 +1900,8 @@ mod native {
             return Ok(None);
         };
         let document = parse(&bytes).map_err(|_| Error::StateInvalid)?;
-        if document.get("version").and_then(Item::as_integer) != Some(1)
+        let version = document.get("version").and_then(Item::as_integer);
+        if !matches!(version, Some(1 | 2))
             || document.get("target").and_then(Item::as_str) != Some(target.binding.as_str())
         {
             return Err(Error::StateInvalid);
@@ -1580,15 +1910,13 @@ mod native {
             .get("session")
             .and_then(Item::as_str)
             .ok_or(Error::StateInvalid)?;
-        if session.is_empty()
-            || session.len() > 80
-            || !session.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
-        {
+        if !valid_session(session, false) {
             return Err(Error::StateInvalid);
         }
         let phase = match document.get("phase").and_then(Item::as_str) {
             Some("prepared") => Phase::Prepared,
             Some("connected") => Phase::Connected,
+            Some("update-prepared") if version == Some(2) => Phase::UpdatePrepared,
             Some("disconnect-prepared") => Phase::DisconnectPrepared,
             Some("disconnected") => Phase::Disconnected,
             Some("aborted") => Phase::Aborted,
@@ -1598,15 +1926,33 @@ mod native {
             .get("disconnect_session")
             .and_then(Item::as_str)
             .ok_or(Error::StateInvalid)?;
-        if disconnect_session.len() > 80
-            || !disconnect_session
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit() || b == b'-')
+        if !valid_session(disconnect_session, true)
             || (matches!(phase, Phase::DisconnectPrepared | Phase::Disconnected)
                 && disconnect_session.is_empty())
         {
             return Err(Error::StateInvalid);
         }
+        let (connected_session, update_session) = if version == Some(2) {
+            let connected = document
+                .get("connected_session")
+                .and_then(Item::as_str)
+                .ok_or(Error::StateInvalid)?;
+            let update = document
+                .get("update_session")
+                .and_then(Item::as_str)
+                .ok_or(Error::StateInvalid)?;
+            if !valid_session(connected, false)
+                || !valid_session(update, true)
+                || ((phase == Phase::UpdatePrepared) == update.is_empty())
+                || (!update.is_empty() && (update == session || update == connected))
+                || matches!(phase, Phase::Prepared | Phase::Aborted)
+            {
+                return Err(Error::StateInvalid);
+            }
+            (connected, update)
+        } else {
+            (session, "")
+        };
         let boolean = |key| {
             document
                 .get(key)
@@ -1625,6 +1971,8 @@ mod native {
         };
         let journal = Journal {
             session: session.to_owned(),
+            connected_session: connected_session.to_owned(),
+            update_session: update_session.to_owned(),
             disconnect_session: disconnect_session.to_owned(),
             phase,
             original_exists: boolean("original_exists")?,
@@ -1643,6 +1991,12 @@ mod native {
             return Err(Error::StateInvalid);
         }
         Ok(Some(journal))
+    }
+
+    fn valid_session(session: &str, empty_allowed: bool) -> bool {
+        (empty_allowed || !session.is_empty())
+            && session.len() <= 80
+            && session.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
     }
 
     fn stored_image(
@@ -1679,7 +2033,18 @@ mod native {
             .get("model")
             .and_then(Item::as_str)
             .ok_or(Error::StateInvalid)?;
-        let base_url = owned_item(&document, 3)
+        let gateway = connected_gateway(&document)?;
+        validate_model(model).map_err(|_| Error::StateInvalid)?;
+        let expected = build_connected(original.as_deref(), model, gateway)
+            .map_err(|_| Error::StateInvalid)?;
+        if expected != connected {
+            return Err(Error::StateInvalid);
+        }
+        Ok((original, connected))
+    }
+
+    fn connected_gateway(document: &DocumentMut) -> Result<SocketAddr, Error> {
+        let base_url = owned_item(document, 3)
             .and_then(Item::as_str)
             .ok_or(Error::StateInvalid)?;
         let address = base_url
@@ -1689,14 +2054,8 @@ mod native {
         let gateway = address
             .parse::<SocketAddr>()
             .map_err(|_| Error::StateInvalid)?;
-        validate_model(model).map_err(|_| Error::StateInvalid)?;
         validate_gateway(gateway).map_err(|_| Error::StateInvalid)?;
-        let expected = build_connected(original.as_deref(), model, gateway)
-            .map_err(|_| Error::StateInvalid)?;
-        if expected != connected {
-            return Err(Error::StateInvalid);
-        }
-        Ok((original, connected))
+        Ok(gateway)
     }
 
     fn ensure_budget(
@@ -1752,14 +2111,48 @@ mod native {
             {
                 continue;
             }
-            let path = previous.image_path(target, suffix);
-            if let Ok(meta) = fs::symlink_metadata(&path) {
-                if checked_meta(&meta, true, true, MAX_CONFIG_BYTES).is_ok() {
-                    let _ = fs::remove_file(path);
-                }
+            discard_image(&previous.image_path(target, suffix));
+        }
+        // A completed update keeps the original image and initial canonical
+        // image. They can be retired only when a later connect owns recovery.
+        if previous.connected_session != previous.session {
+            discard_image(
+                &target
+                    .state
+                    .join(format!("{}-connected.toml", previous.session)),
+            );
+            for suffix in ["update-before", "update-after"] {
+                discard_image(
+                    &target
+                        .state
+                        .join(format!("{}-{suffix}.toml", previous.connected_session)),
+                );
             }
         }
         let _ = sync_dir(&target.state);
+    }
+
+    fn discard_update_images(target: &Target, pending: &Journal, installed: bool) {
+        for suffix in ["update-before", "update-after"] {
+            discard_image(&pending.image_path(target, suffix));
+        }
+        let unused = if installed {
+            &pending.connected_session
+        } else {
+            &pending.update_session
+        };
+        if unused != &pending.session {
+            discard_image(&target.state.join(format!("{unused}-connected.toml")));
+        }
+        let _ = sync_dir(&target.state);
+    }
+
+    fn discard_image(path: &Path) {
+        if let Ok(meta) = fs::symlink_metadata(path) {
+            if checked_meta(&meta, true, true, MAX_CONFIG_BYTES).is_ok() {
+                let _ = fs::remove_file(path);
+            }
+        }
     }
 
     fn nonce() -> String {
