@@ -34,6 +34,8 @@ use crate::{
 };
 
 const BREAKPOINT: f32 = 720.0;
+// Keep the primary navigation in the header; a wide window should give
+// provider and agent lists more room rather than spending it on a sidebar.
 const DOWN: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>"#;
 const CLOSE: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="1.7" stroke-linecap="round"><path d="m6 6 12 12M6 18 18 6"/></svg>"#;
 
@@ -2256,7 +2258,7 @@ impl Render for MagpieWindow {
             );
         let main_header;
         let sidebar;
-        if wide_navigation {
+        if false && wide_navigation {
             sidebar = Some(
                 div()
                     .w(px(172.0))
@@ -2307,10 +2309,10 @@ impl Render for MagpieWindow {
             main_header = div()
                 .flex_none()
                 .px(px(gutter))
-                .py(px(10.0))
+                .py(px(8.0))
                 .flex()
                 .flex_col()
-                .gap(px(8.0))
+                .gap(px(6.0))
                 .border_b_1()
                 .border_color(rgb(palette.border))
                 .child(
