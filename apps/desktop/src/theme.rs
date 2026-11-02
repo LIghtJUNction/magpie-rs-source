@@ -12,7 +12,7 @@ pub enum Appearance {
     Dark,
 }
 
-/// Opaque color tokens: no blur, gradients, animation, or extra GPU effects.
+/// Application surfaces use the same Material semantic scheme as the controls.
 #[derive(Clone, Copy)]
 pub struct Palette {
     pub background: u32,
@@ -39,36 +39,32 @@ impl Palette {
             Appearance::Light => false,
             Appearance::Dark => true,
         };
-        if dark {
-            Self {
-                background: 0x19191c,
-                surface: 0x222225,
-                inset: 0x2d2d32,
-                border: 0x35353b,
-                text: 0xf0f0f2,
-                muted: 0xacacb5,
-                accent: 0x8aa4ff,
-                selected: 0x2d3550,
-                warning: 0xf2c47d,
-                warning_bg: 0x382e21,
-                danger: 0xffaaa5,
-                danger_bg: 0x3d282b,
-            }
-        } else {
-            Self {
-                background: 0xf6f6f7,
-                surface: 0xffffff,
-                inset: 0xf0f0f2,
-                border: 0xe3e3e7,
-                text: 0x202124,
-                muted: 0x65666d,
-                accent: 0x3e61d4,
-                selected: 0xeef2ff,
-                warning: 0x865818,
-                warning_bg: 0xfff5e5,
-                danger: 0xad393e,
-                danger_bg: 0xffeeee,
-            }
+        use gpui_kit_material::color::{
+            ColorRole as C,
+            themes::{Contrast, ThemeId, ThemeMode},
+        };
+        let scheme = ThemeId::Neutral.scheme(
+            if dark {
+                ThemeMode::Dark
+            } else {
+                ThemeMode::Light
+            },
+            Contrast::Standard,
+        );
+        let color = |role| scheme.get(role).to_argb() & 0xffffff;
+        Self {
+            background: color(C::SURFACE),
+            surface: color(C::SURFACE_CONTAINER_LOW),
+            inset: color(C::SURFACE_CONTAINER_HIGH),
+            border: color(C::OUTLINE_VARIANT),
+            text: color(C::ON_SURFACE),
+            muted: color(C::ON_SURFACE_VARIANT),
+            accent: color(C::PRIMARY),
+            selected: color(C::SECONDARY_CONTAINER),
+            warning: color(C::WARNING),
+            warning_bg: color(C::WARNING_BG),
+            danger: color(C::ERROR),
+            danger_bg: color(C::ERROR_CONTAINER),
         }
     }
 }
@@ -190,4 +186,52 @@ pub fn font_for_families(families: &[String], locale: Locale) -> Font {
         result.fallbacks = Some(FontFallbacks::from_fonts(fallbacks));
     }
     result
+}
+
+/// Initialize Material and Kit colors before their first root is rendered.
+pub fn init_material_theme(window: Option<&Window>, cx: &mut App) {
+    use gpui_kit_material::{
+        color::themes::{Contrast, ThemeId, ThemeMode},
+        theme,
+    };
+    let dark = window.map_or_else(
+        || theme::system_dark(cx),
+        |window| {
+            matches!(
+                window.appearance(),
+                WindowAppearance::Dark | WindowAppearance::VibrantDark
+            )
+        },
+    );
+    let mode = if dark {
+        ThemeMode::Dark
+    } else {
+        ThemeMode::Light
+    };
+    theme::init_component_theme(ThemeId::Neutral.scheme(mode, Contrast::Standard), 1.0, cx);
+}
+
+pub(crate) fn apply_material_theme(appearance: Appearance, window: &mut Window, cx: &mut App) {
+    use gpui_kit_material::{
+        color::themes::{Contrast, ThemeId, ThemeMode},
+        theme,
+    };
+    let dark = match appearance {
+        Appearance::System => matches!(
+            window.appearance(),
+            WindowAppearance::Dark | WindowAppearance::VibrantDark
+        ),
+        Appearance::Dark => true,
+        Appearance::Light => false,
+    };
+    let scheme = ThemeId::Neutral.scheme(
+        if dark {
+            ThemeMode::Dark
+        } else {
+            ThemeMode::Light
+        },
+        Contrast::Standard,
+    );
+    theme::init_component_theme(scheme, 1.0, cx);
+    window.refresh();
 }

@@ -28,6 +28,26 @@ The workspace contains `magpie-core`, `magpie-service`, and the `magpie` CLI.
 The separate GPUI desktop shell is in `apps/desktop` and is excluded from the
 default workspace build.
 
+## Development checkpoint · 2026-11-02
+
+The desktop now depends on pinned `gpui-kit-material` and GPUI Kit, using Material
+buttons, navigation and semantic themes. The first native draft was rejected by
+the user; subsequent theme/layout corrections are still awaiting visual review.
+This is saved development progress, not an accepted redesign or a new release.
+
+Provider management now includes persistent metadata, environment-based key
+references, model selection/discovery and bounded connection tests. The desktop
+can start and stop its own loopback gateway; it never adopts or stops an external
+listener. Codex retains preview, explicit connect and drift-aware restoration.
+Other Agent configuration, routing integration, Usage, Profiles, subscription
+accounts, Library and plugins remain incomplete. See [the handoff](docs/NEXT_SESSION.md).
+
+Desktop builds require Rust 1.99.1. Keep artifacts outside this checkout:
+
+```sh
+CARGO_TARGET_DIR=/absolute/build-directory cargo +1.99.1 build --locked --manifest-path apps/desktop/Cargo.toml
+```
+
 ## Current implementation boundary
 
 The CLI provides agent discovery, configuration inspection, explicit Codex
@@ -43,8 +63,10 @@ configuration or sign-ins; only an explicit save or restore writes the selected
 Codex configuration. The desktop requires its matching CLI beside the executable,
 or an explicit absolute `MAGPIE_CLI_PATH` for development; it does not search PATH
 for another Magpie binary.
-Provider sign-in, remote HTTPS forwarding, protocol conversion, full Usage,
-plugins and synchronization remain unimplemented.
+Subscription sign-in, secure credential storage, full Usage, plugins and
+synchronization remain unimplemented. Managed Provider forwarding supports
+Chat, Responses, Messages and Gemini adapters; current verification uses local
+synthetic upstreams, not real remote accounts.
 
 ```sh
 magpie agents --json
@@ -101,7 +123,7 @@ Mutation currently supports Linux, macOS and Android; Windows returns an explici
 unsupported-platform result. Configuration ownership does not prove Provider
 health or a completed Agent request.
 
-Local verification on the current candidate includes 77 workspace tests, 26
+Historical verification on the 2026-10-29 candidate included 77 workspace tests, 26
 real TCP/startup/CLI cases, and an installed Codex 0.165.0 executing against an
 isolated synthetic provider. The native-client case receives a Chinese Responses
 stream through Magpie and restores the original configuration bytes. It does

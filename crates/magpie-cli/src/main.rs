@@ -1,4 +1,5 @@
 mod legacy_agent_display;
+mod provider_commands;
 
 use std::env;
 use std::process::ExitCode;
@@ -74,6 +75,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
             }
             Ok(())
         }
+        "providers" => provider_commands::run(args),
         "config" => config_command(args),
         "models" => models_command(args),
         "gateway" => gateway_command(args),
@@ -615,6 +617,7 @@ fn serve_command(mut args: impl Iterator<Item = String>) -> Result<(), String> {
     let mut address = None;
     let mut catalog_path = None;
     let mut forward_path = None;
+    let mut providers_path = None;
     while let Some(option) = args.next() {
         match option.as_str() {
             "--listen" if address.is_none() => {
@@ -631,6 +634,9 @@ fn serve_command(mut args: impl Iterator<Item = String>) -> Result<(), String> {
                         .ok_or_else(|| "--catalog requires a path".to_owned())?,
                 );
             }
+            "--providers" if providers_path.is_none() => {
+                providers_path = Some(args.next().ok_or("--providers requires an absolute path")?);
+            }
             "--forward" if forward_path.is_none() => {
                 forward_path = Some(
                     args.next()
@@ -639,12 +645,29 @@ fn serve_command(mut args: impl Iterator<Item = String>) -> Result<(), String> {
             }
             _ => {
                 return Err(
-                    "usage: magpie serve [--listen 127.0.0.1:PORT] [--catalog PATH | --forward PATH]".to_owned(),
+                    "usage: magpie serve [--listen 127.0.0.1:PORT] [--catalog PATH | --forward PATH | --providers ABS]".to_owned(),
                 );
             }
         }
     }
     let address = address.unwrap_or_else(magpie_service::default_gateway_addr);
+    if let Some(path) = providers_path {
+        if forward_path.is_some() || catalog_path.is_some() {
+            return Err("--providers is exclusive with --forward/--catalog".into());
+        }
+        let server = magpie_service::forward::ForwardServer::bind_providers(
+            address,
+            std::path::PathBuf::from(path),
+        )
+        .map_err(|error| format!("provider_gateway_error: {error}"))?;
+        println!(
+            "Provider Gateway bound at {} (readiness: GET /health)",
+            server.local_addr().map_err(|_| "gateway_bind_failed")?
+        );
+        return server
+            .run()
+            .map_err(|error| format!("gateway_runtime_error: {error}"));
+    }
     if let Some(path) = forward_path {
         if catalog_path.is_some() {
             return Err("--catalog and --forward are mutually exclusive".into());
@@ -708,8 +731,10 @@ fn models_command(mut args: impl Iterator<Item = String>) -> Result<(), String> 
 
 fn gateway_command(mut args: impl Iterator<Item = String>) -> Result<(), String> {
     const USAGE: &str = "usage: magpie gateway inspect [--listen ADDR] --json";
-    if args.next().as_deref() != Some("inspect") {
-        return Err(USAGE.to_owned());
+    match args.next().as_deref() {
+        Some("provider-inspect") => return provider_commands::inspect_gateway(args),
+        Some("inspect") => {}
+        _ => return Err(USAGE.to_owned()),
     }
     let mut address = None;
     let mut json = false;
@@ -787,7 +812,7 @@ fn json_escape(value: &str) -> String {
 
 fn print_help() {
     println!(
-        "magpie {}\n\nUsage:\n  magpie <command> [options]\n\nCommands:\n  agents [--json]       Discover Codex and inspect its config path\n  agents status codex   Show Codex discovery status\n  agents connect codex --model ID --dry-run   Legacy read-only preview\n  agents connect codex --model ID --config PATH --gateway ADDR <--dry-run|--apply> [--json]\n  agents disconnect codex --config PATH [--json]\n  agents connection-status codex --config PATH [--json]\n  config path [--json]  Show the configuration directory\n  models [--catalog PATH] [--json]  List configured provider/model IDs\n  gateway inspect [--listen ADDR] --json  Inspect the running Gateway catalog\n  serve [--listen ADDR] [--catalog PATH | --forward PATH]  Run the loopback Gateway\n  gui [agents]          Open the GPUI desktop application\n  status [--json]       Show version and target platform\n  --help                Show this help\n  --version             Show version",
+        "magpie {}\n\nUsage:\n  magpie <command> [options]\n\nCommands:\n  agents [--json]       Discover Codex and inspect its config path\n  agents status codex   Show Codex discovery status\n  agents connect codex --model ID --dry-run   Legacy read-only preview\n  agents connect codex --model ID --config PATH --gateway ADDR <--dry-run|--apply> [--json]\n  agents disconnect codex --config PATH [--json]\n  agents connection-status codex --config PATH [--json]\n  providers list [--store ABS] --json  Inspect Provider state\n  providers <add|edit|remove|key-put|key-remove|key-order|models|refresh|test|recover> ...\n  config path [--json]  Show the configuration directory\n  models [--catalog PATH] [--json]  List configured provider/model IDs\n  gateway inspect [--listen ADDR] --json  Inspect the running Gateway catalog\n  gateway provider-inspect --store ABS --listen ADDR --json  Inspect Provider identity and entry protocols\n  serve [--listen ADDR] [--catalog PATH | --forward PATH | --providers ABS]  Run the loopback Gateway\n  gui [agents]          Open the GPUI desktop application\n  status [--json]       Show version and target platform\n  --help                Show this help\n  --version             Show version",
         magpie_core::VERSION
     );
 }

@@ -3,6 +3,15 @@ use crate::{cli_bridge::ErrorKind, localization::Locale};
 #[derive(Clone, Copy)]
 pub enum ActionText {
     WorkspaceIntro,
+    GatewayStart,
+    GatewayStop,
+    GatewayRunning,
+    GatewayNotManaged,
+    GatewayWorking,
+    GatewayLifecycleHint,
+    GatewayStartError,
+    GatewayExited,
+
     ReadOnly,
     Details,
     ConnectShort,
@@ -10,17 +19,9 @@ pub enum ActionText {
     ChooseModel,
     GatewaySettings,
     ClosePanel,
-    More,
     Roadmap,
-    Planned,
     ProvidersPage,
     GatewayPage,
-    RoutesPage,
-    UsagePage,
-    SessionsPage,
-    LibraryPage,
-    PluginsPage,
-    RoadmapHint,
     RowUnknown,
     PickerHint,
     CurrentConfig,
@@ -73,10 +74,11 @@ pub enum ActionText {
     ManagedHint,
     WindowsHint,
     Diagnostics,
-    LocalConfig,
     CliMissingError,
     CliMismatchError,
     GatewayError,
+    ProviderSourceError,
+    ProviderCatalogChangedError,
     ModelError,
     ConfigChangedError,
     ConfigError,
@@ -92,6 +94,63 @@ pub enum ActionText {
 impl Locale {
     pub fn action_text(self, key: ActionText) -> &'static str {
         let values = match key {
+            ActionText::GatewayStart => [
+                "Start gateway",
+                "启动网关",
+                "啟動閘道",
+                "ゲートウェイを起動",
+                "Gateway starten",
+            ],
+            ActionText::GatewayStop => [
+                "Stop gateway",
+                "停止网关",
+                "停止閘道",
+                "ゲートウェイを停止",
+                "Gateway stoppen",
+            ],
+            ActionText::GatewayRunning => [
+                "Gateway running",
+                "网关运行中",
+                "閘道執行中",
+                "ゲートウェイ稼働中",
+                "Gateway läuft",
+            ],
+            ActionText::GatewayNotManaged => [
+                "No gateway started by this window",
+                "此窗口尚未启动网关",
+                "此視窗尚未啟動閘道",
+                "このウィンドウのゲートウェイは停止中",
+                "Kein Gateway von diesem Fenster gestartet",
+            ],
+            ActionText::GatewayWorking => [
+                "Updating gateway…",
+                "正在更新网关状态…",
+                "正在更新閘道狀態…",
+                "ゲートウェイを更新中…",
+                "Gateway wird aktualisiert…",
+            ],
+            ActionText::GatewayLifecycleHint => [
+                "Uses your saved providers. Closing this window stops the gateway it started.",
+                "使用已保存的供应商。关闭此窗口时会停止由它启动的网关。",
+                "使用已儲存的供應商。關閉此視窗會停止由它啟動的閘道。",
+                "保存済みプロバイダーを使用。このウィンドウを閉じると起動したゲートウェイも停止します。",
+                "Nutzt gespeicherte Anbieter. Beim Schließen wird das hier gestartete Gateway beendet.",
+            ],
+            ActionText::GatewayStartError => [
+                "Could not start. Check whether the port is in use or provider settings need repair.",
+                "启动失败。请检查端口是否被占用，以及供应商配置是否需要修复。",
+                "啟動失敗。請檢查連接埠是否被占用，以及供應商設定是否需要修復。",
+                "起動失敗。ポートの使用状況とプロバイダー設定を確認してください。",
+                "Start fehlgeschlagen. Portbelegung und Anbieter-Konfiguration prüfen.",
+            ],
+            ActionText::GatewayExited => [
+                "Gateway exited. Check provider settings and start again.",
+                "网关已退出。检查供应商配置后重新启动。",
+                "閘道已結束。檢查供應商設定後重新啟動。",
+                "ゲートウェイが終了しました。設定を確認して再起動してください。",
+                "Gateway wurde beendet. Anbieter-Konfiguration prüfen und neu starten.",
+            ],
+
             ActionText::WorkspaceIntro => [
                 "Models and connections for the agents on this device.",
                 "管理本机 Agent 的模型与连接。",
@@ -124,7 +183,6 @@ impl Locale {
                 "Gateway-Einstellungen",
             ],
             ActionText::ClosePanel => ["Collapse", "收起", "收合", "閉じる", "Schließen"],
-            ActionText::More => ["More", "更多", "更多", "その他", "Mehr"],
             ActionText::Roadmap => [
                 "Product navigation",
                 "产品导航",
@@ -132,23 +190,10 @@ impl Locale {
                 "製品ナビゲーション",
                 "Produktnavigation",
             ],
-            ActionText::Planned => ["Planned", "规划中", "規劃中", "予定", "Geplant"],
             ActionText::ProvidersPage => {
                 ["Providers", "供应商", "供應商", "プロバイダー", "Anbieter"]
             }
             ActionText::GatewayPage => ["Gateway", "网关", "閘道", "ゲートウェイ", "Gateway"],
-            ActionText::RoutesPage => ["Routing", "路由", "路由", "ルーティング", "Routing"],
-            ActionText::UsagePage => ["Usage", "用量", "用量", "使用量", "Nutzung"],
-            ActionText::SessionsPage => ["Sessions", "会话", "對話", "セッション", "Sitzungen"],
-            ActionText::LibraryPage => ["Library", "资源库", "資源庫", "ライブラリ", "Bibliothek"],
-            ActionText::PluginsPage => ["Plugins", "插件", "外掛", "プラグイン", "Plugins"],
-            ActionText::RoadmapHint => [
-                "This version supports Codex connections. Other detected agents show installation details only. Additional pages are in development.",
-                "当前支持 Codex 连接；其他已检测 Agent 仅显示安装信息。更多功能正在开发中。",
-                "目前支援 Codex 連線；其他已偵測 Agent 僅顯示安裝資訊。更多功能正在開發中。",
-                "現在は Codex の接続に対応し、ほかの Agent はインストール情報のみ表示します。追加機能は開発中です。",
-                "Diese Version unterstützt Codex-Verbindungen. Andere erkannte Agents zeigen nur Installationsdetails. Weitere Funktionen sind in Entwicklung.",
-            ],
             ActionText::RowUnknown => [
                 "Connection unchecked",
                 "连接未核对",
@@ -157,11 +202,11 @@ impl Locale {
                 "Verbindung ungeprüft",
             ],
             ActionText::PickerHint => [
-                "Choose a configured model, then review the change before saving.",
-                "选择已配置模型，预览后再保存连接。",
-                "選擇已設定模型，預覽後再儲存連線。",
-                "設定済みモデルを選び、変更を確認して保存します。",
-                "Konfiguriertes Modell auswählen, Änderung prüfen und speichern.",
+                "Choose a model with Responses support, then review before saving the Codex connection.",
+                "选择支持 Responses 的模型，预览后再保存 Codex 连接。",
+                "選擇支援 Responses 的模型，預覽後再儲存 Codex 連線。",
+                "Responses 対応モデルを選び、確認後に Codex 接続を保存します。",
+                "Modell mit Responses-Unterstützung wählen, prüfen und Codex-Verbindung speichern.",
             ],
             ActionText::CurrentConfig => [
                 "Current configuration",
@@ -193,11 +238,11 @@ impl Locale {
                 "Modelle abfragen",
             ],
             ActionText::GatewayHint => [
-                "Enter a literal loopback address and port. Start the gateway separately.",
-                "输入回环 IP 与端口；请先在外部启动网关。",
-                "輸入回環 IP 與連接埠；請先在外部啟動閘道。",
-                "ループバック IP とポートを入力。ゲートウェイは別途起動してください。",
-                "Loopback-IP und Port eingeben. Gateway separat starten.",
+                "Enter a loopback IP and port for the running gateway. A Provider gateway must use this app's provider configuration.",
+                "输入已启动网关的回环 IP 与端口。供应商网关须使用本应用的同一份供应商配置。",
+                "輸入已啟動閘道的回環 IP 與連接埠。供應商閘道須使用本應用程式的同一份供應商設定。",
+                "起動済みゲートウェイのループバック IP とポートを入力。同じプロバイダー設定を使用してください。",
+                "Loopback-IP und Port des laufenden Gateways eingeben. Ein Anbieter-Gateway muss dieselbe Anbieterkonfiguration verwenden.",
             ],
             ActionText::Search => [
                 "Search models",
@@ -501,13 +546,6 @@ impl Locale {
                 "設定とプログラムの詳細",
                 "Konfigurations- und Programmdetails",
             ],
-            ActionText::LocalConfig => [
-                "Local configuration",
-                "本地配置",
-                "本機設定",
-                "ローカル設定",
-                "Lokale Konfiguration",
-            ],
             ActionText::CliMissingError => [
                 "The packaged Magpie CLI was not found or cannot run. Check installation or absolute MAGPIE_CLI_PATH.",
                 "找不到同包 Magpie CLI 或无法执行。请检查安装或绝对 MAGPIE_CLI_PATH。",
@@ -528,6 +566,20 @@ impl Locale {
                 "無法查詢此閘道。請檢查位址、監聽與模型目錄後重試。",
                 "ゲートウェイを取得できません。アドレス・起動・一覧を確認してください。",
                 "Gateway nicht abfragbar. Adresse, Listener und Modellkatalog prüfen.",
+            ],
+            ActionText::ProviderSourceError => [
+                "This gateway uses a different provider configuration. Use the gateway for this app's provider list.",
+                "此网关使用另一份供应商配置。请改用本应用供应商列表对应的网关。",
+                "此閘道使用另一份供應商設定。請改用本應用程式供應商清單對應的閘道。",
+                "別のプロバイダー設定を使用しています。このアプリと同じ設定のゲートウェイを選んでください。",
+                "Dieses Gateway verwendet eine andere Anbieterkonfiguration. Das Gateway für diese Anbieterliste auswählen.",
+            ],
+            ActionText::ProviderCatalogChangedError => [
+                "Provider settings changed during the query. Refresh the models before continuing.",
+                "查询期间供应商设置发生变化。请重新查询模型后继续。",
+                "查詢期間供應商設定發生變更。請重新查詢模型後繼續。",
+                "取得中にプロバイダー設定が変わりました。モデルを再取得してください。",
+                "Anbietereinstellungen wurden während der Abfrage geändert. Modelle erneut abfragen.",
             ],
             ActionText::ModelError => [
                 "The model is unavailable or unsupported by the current CLI. Query and select again.",
@@ -612,6 +664,8 @@ pub fn error_text(kind: ErrorKind) -> ActionText {
         | ErrorKind::LaunchFailed => ActionText::CliMissingError,
         ErrorKind::CliVersionMismatch | ErrorKind::CliChanged => ActionText::CliMismatchError,
         ErrorKind::GatewayUnavailable => ActionText::GatewayError,
+        ErrorKind::ProviderSourceMismatch => ActionText::ProviderSourceError,
+        ErrorKind::ProviderCatalogChanged => ActionText::ProviderCatalogChangedError,
         ErrorKind::ModelUnavailable | ErrorKind::InvalidModel => ActionText::ModelError,
         ErrorKind::ConfigConflict | ErrorKind::AlreadyManaged | ErrorKind::NotManaged => {
             ActionText::ConfigChangedError

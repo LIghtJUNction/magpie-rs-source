@@ -3,7 +3,7 @@
 //! Build with --features visual-test --example render_preview, then run with
 //! --output /absolute/new/directory [--locale en|zh-CN|zh-TW|ja|de] [--all] [--size WIDTHxHEIGHT].
 //! The default baseline is the real Agents scene, light theme, at 900x560.
-//! --all includes Codex details and Settings at 900/360/440x560 in both themes.
+//! --all includes Provider list, Codex details and Settings in both themes.
 //! Each scene saves a 1x PNG, the native texture and a manifest. No OS window opens.
 
 #[path = "../src/actions_state.rs"]
@@ -16,10 +16,20 @@ mod assets;
 mod cli_bridge;
 #[path = "../src/config_stamp.rs"]
 mod config_stamp;
+#[path = "../src/gateway_process.rs"]
+mod gateway_process;
 #[path = "../src/input_model.rs"]
 mod input_model;
 #[path = "../src/localization.rs"]
 mod localization;
+#[path = "../src/provider_bridge.rs"]
+mod provider_bridge;
+#[path = "../src/provider_state.rs"]
+mod provider_state;
+#[path = "../src/provider_text.rs"]
+mod provider_text;
+#[path = "../src/provider_ui.rs"]
+mod provider_ui;
 #[path = "../src/snapshot.rs"]
 mod snapshot;
 #[path = "../src/text_input.rs"]
@@ -46,6 +56,7 @@ mod ui {
             self.appearance = appearance;
             self.page = match scene {
                 super::Scene::Settings => Page::Settings,
+                super::Scene::Providers => Page::Providers,
                 _ => Page::Agents,
             };
             self.details = matches!(scene, super::Scene::Codex).then_some("codex");
@@ -95,6 +106,10 @@ mod ui {
             })
             .collect();
             self.snapshot = Some(Snapshot { agents });
+            if matches!(scene, super::Scene::Providers) {
+                self.providers
+                    .update(cx, |view, cx| view.preview_fixture(locale, cx));
+            }
             cx.notify();
         }
     }
@@ -123,6 +138,7 @@ enum Scene {
     Agents,
     Codex,
     Settings,
+    Providers,
 }
 
 impl Scene {
@@ -131,6 +147,7 @@ impl Scene {
             Self::Agents => "agents",
             Self::Codex => "codex",
             Self::Settings => "settings",
+            Self::Providers => "providers",
         }
     }
 }
@@ -193,8 +210,8 @@ fn options() -> Result<Option<Options>> {
                 println!(
                     "render_preview --output ABS_NEW_DIRECTORY [--locale en|zh-CN|zh-TW|ja|de] [--all]\n\
                      Default: Agents, light theme, 900x560; one 1x PNG, native texture and manifest.json.\n\
-                     --all: 18 scenes across Agents/Codex/Settings, both themes and three widths.\n\
-                     --size: render one custom viewport; combine with --all for six scene/theme pairs.\n\
+                     --all: 24 scenes across Agents/Codex/Settings/Providers, both themes and three widths.\n\
+                     --size: render one custom viewport; combine with --all for eight scene/theme pairs.\n\
                      Uses an isolated child, real GPUI scene rendering and system fonts."
                 );
                 return Ok(None);
@@ -372,15 +389,20 @@ fn render(options: &Options) -> Result<()> {
     require_external(&options.output)?;
     fs::create_dir(&options.output)?;
     let output = options.output.canonicalize()?;
-    let platform = gpui_platform::current_platform(true);
+    let platform = gpui::platform::current_platform(true);
     let backend = platform.text_system();
     let families = backend.all_font_names();
     let selected_font = theme::font_for_families(&families, options.locale);
     let mut cx = HeadlessAppContext::with_platform(
         backend,
         Arc::new(assets::Assets),
-        gpui_platform::current_headless_renderer,
+        gpui::platform::current_headless_renderer,
     );
+    cx.update(|cx| {
+        gpui::init(cx);
+        gpui_kit_material::init(cx);
+        theme::init_material_theme(None, cx);
+    });
     let viewports: &[(u32, u32)] = match &options.viewport {
         Some(viewport) => std::slice::from_ref(viewport),
         None if options.all => &VIEWPORTS,
@@ -392,22 +414,35 @@ fn render(options: &Options) -> Result<()> {
         &[("light", Appearance::Light)]
     };
     let scenes: &[Scene] = if options.all {
-        &[Scene::Agents, Scene::Codex, Scene::Settings]
+        &[
+            Scene::Agents,
+            Scene::Codex,
+            Scene::Settings,
+            Scene::Providers,
+        ]
     } else {
         &[Scene::Agents]
     };
     let mut records = Vec::new();
     for &(width, height) in viewports {
         for &(theme_name, appearance) in themes {
-            let handle = cx.open_window(size(px(width as f32), px(height as f32)), |_, cx| {
-                cx.new(ui::MagpieWindow::new)
-            })?;
+            let mut application_view = None;
+            let handle =
+                cx.open_window(size(px(width as f32), px(height as f32)), |window, cx| {
+                    let view = cx.new(ui::MagpieWindow::new);
+                    application_view = Some(view.clone());
+                    cx.new(|cx| gpui::base::Root::new(view, window, cx))
+                })?;
+            let application_view = application_view.expect("headless application view");
             // Production discovery sees only the empty synthetic PATH and HOME.
             cx.run_until_parked();
             for &scene in scenes {
-                handle.update(&mut cx, |view, window, cx| {
-                    view.preview_fixture(&fixture, scene, options.locale, appearance, cx);
-                    view.focus(window, cx);
+                handle.update(&mut cx, |_, window, cx| {
+                    theme::apply_material_theme(appearance, window, cx);
+                    application_view.update(cx, |view, cx| {
+                        view.preview_fixture(&fixture, scene, options.locale, appearance, cx);
+                        view.focus(window, cx);
+                    });
                     window.refresh();
                 })?;
                 // Drain asset loads and draw actual production elements, including text and SVGs.

@@ -29,10 +29,14 @@ const ICONS: [(&str, &[u8]); 5] = [
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        Ok(ICONS
+        let own = ICONS
             .iter()
             .find(|(name, _)| *name == path)
-            .map(|(_, bytes)| Cow::Borrowed(*bytes)))
+            .map(|(_, bytes)| Cow::Borrowed(*bytes));
+        match own {
+            Some(bytes) => Ok(Some(bytes)),
+            None => gpui_kit_material::icons::Assets::new().load(path),
+        }
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {

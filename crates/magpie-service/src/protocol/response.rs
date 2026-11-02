@@ -542,7 +542,15 @@ pub fn error_body(protocol: Protocol, error: &GatewayError) -> Value {
         Protocol::OpenAiChat | Protocol::OpenAiResponses => {
             json!({"error":{"type":match error.category {
             ErrorCategory::RateLimit | ErrorCategory::Quota => "rate_limit_error",
-            ErrorCategory::UpstreamServer | ErrorCategory::Internal | ErrorCategory::Network | ErrorCategory::Timeout => "server_error",
+            ErrorCategory::UpstreamServer
+            | ErrorCategory::ProviderBusy
+            | ErrorCategory::ProviderRecoveryRequired
+            | ErrorCategory::ProviderRecoveryConflict
+            | ErrorCategory::ProviderCredentialUnavailable
+            | ErrorCategory::ProviderCredentialInvalid
+            | ErrorCategory::Internal
+            | ErrorCategory::Network
+            | ErrorCategory::Timeout => "server_error",
             _ => "invalid_request_error",
         },"code":message,"message":message,"param":null}})
         }
@@ -563,7 +571,13 @@ pub fn error_body(protocol: Protocol, error: &GatewayError) -> Value {
                 ErrorCategory::Quota | ErrorCategory::RateLimit => "RESOURCE_EXHAUSTED",
             ErrorCategory::UpstreamClient | ErrorCategory::Compatibility => "INVALID_ARGUMENT",
                 ErrorCategory::Timeout => "DEADLINE_EXCEEDED",
-                ErrorCategory::Network | ErrorCategory::UpstreamServer => "UNAVAILABLE",
+                ErrorCategory::Network
+                | ErrorCategory::UpstreamServer
+                | ErrorCategory::ProviderBusy
+                | ErrorCategory::ProviderRecoveryRequired
+                | ErrorCategory::ProviderRecoveryConflict
+                | ErrorCategory::ProviderCredentialUnavailable
+                | ErrorCategory::ProviderCredentialInvalid => "UNAVAILABLE",
                 ErrorCategory::Internal => "INTERNAL",
             }}})
         }

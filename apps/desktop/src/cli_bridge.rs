@@ -22,12 +22,13 @@ use std::{
 
 use async_io::Timer;
 use async_process::Command;
-use futures_lite::{AsyncRead, AsyncReadExt, future};
+use futures_lite::{AsyncRead, AsyncReadExt, AsyncWriteExt, future};
 use serde::Deserialize;
 
 const PROTOCOL_VERSION: &str = "0.2.0";
 const VERSION_LINE: &[u8] = b"magpie 0.2.0";
 const STDOUT_LIMIT: usize = 256 * 1024;
+const PROVIDER_INSPECT_LIMIT: usize = 4 * 1024 * 1024;
 const STDERR_LIMIT: usize = 8 * 1024;
 const MAX_MODELS: usize = 512;
 const OWNED_FIELDS: [&str; 7] = [
@@ -222,6 +223,8 @@ pub enum ErrorKind {
     InvalidReply,
     CliRejected,
     GatewayUnavailable,
+    ProviderSourceMismatch,
+    ProviderCatalogChanged,
     ModelUnavailable,
     ConfigConflict,
     ConfigInvalid,
@@ -252,6 +255,8 @@ impl ErrorKind {
             Self::InvalidReply => "cli_reply_invalid",
             Self::CliRejected => "cli_request_rejected",
             Self::GatewayUnavailable => "gateway_unavailable",
+            Self::ProviderSourceMismatch => "provider_store_mismatch",
+            Self::ProviderCatalogChanged => "provider_catalog_changed",
             Self::ModelUnavailable => "model_unavailable",
             Self::ConfigConflict => "config_conflict",
             Self::ConfigInvalid => "config_invalid",
@@ -537,6 +542,34 @@ fn resolve_from(desktop: &Path, explicit: Option<OsString>) -> Result<Executable
     Err(BridgeError::new(ErrorKind::CliMissing))
 }
 
+/// Resolve and version-check the packaged CLI before starting an owned gateway.
+pub(crate) async fn gateway_command() -> Result<std::process::Command, BridgeError> {
+    let mut admission = Admission::acquire()?;
+    let desktop = env::current_exe().map_err(|_| BridgeError::new(ErrorKind::CliMissing))?;
+    let executable = resolve_from(&desktop, env::var_os("MAGPIE_CLI_PATH"))?;
+    let limits = Limits::default();
+    let version = capture(
+        &executable,
+        &["--version".into()],
+        false,
+        &Cancellation::new(),
+        Instant::now() + limits.version,
+        limits,
+        &mut admission,
+    )
+    .await?;
+    let line = version
+        .stdout
+        .strip_suffix(b"\n")
+        .unwrap_or(&version.stdout);
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    if !version.success || !version.stderr.is_empty() || line != VERSION_LINE {
+        return Err(BridgeError::new(ErrorKind::CliVersionMismatch));
+    }
+    executable.verify_unchanged()?;
+    Ok(std::process::Command::new(executable.path))
+}
+
 /// Run on the GUI's background executor, retaining the task until it completes.
 /// Use `Cancellation::cancel` instead of dropping a running future. Dropping a
 /// future kills its child but intentionally locks admission until app restart:
@@ -557,6 +590,72 @@ pub async fn run(request: Request, cancellation: Cancellation) -> Result<Reply, 
         admission,
     )
     .await
+}
+
+/// Narrow extension used only by the Provider adapter. No shell/PATH fallback;
+/// version, output/time bounds, cancellation, reaping and uncertainty are shared
+/// with the already validated Codex bridge.
+pub(crate) async fn run_provider(
+    arguments: Vec<OsString>,
+    input: Option<Vec<u8>>,
+    mutation: bool,
+    cancellation: Cancellation,
+) -> Result<(bool, Vec<u8>), BridgeError> {
+    if arguments.first().is_none_or(|arg| arg != "providers")
+        || arguments.last().is_none_or(|arg| arg != "--json")
+        || arguments.len() > 16
+        || input.as_ref().is_some_and(|bytes| bytes.len() > 128 * 1024)
+    {
+        return Err(BridgeError::new(ErrorKind::InvalidReply));
+    }
+    let mut admission = Admission::acquire()?;
+    let desktop = env::current_exe().map_err(|_| BridgeError::new(ErrorKind::CliMissing))?;
+    let executable = resolve_from(&desktop, env::var_os("MAGPIE_CLI_PATH"))?;
+    let limits = Limits {
+        stdout: 4 * 1024 * 1024,
+        ..Limits::default()
+    };
+    let deadline = Instant::now() + limits.request;
+    let version = capture(
+        &executable,
+        &["--version".into()],
+        false,
+        &cancellation,
+        deadline.min(Instant::now() + limits.version),
+        limits,
+        &mut admission,
+    )
+    .await?;
+    let line = version
+        .stdout
+        .strip_suffix(b"\n")
+        .unwrap_or(&version.stdout);
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    if !version.success || !version.stderr.is_empty() || line != VERSION_LINE {
+        return Err(BridgeError::new(ErrorKind::CliVersionMismatch));
+    }
+    let captured = capture_with_input(
+        &executable,
+        &arguments,
+        mutation,
+        &cancellation,
+        deadline,
+        limits,
+        &mut admission,
+        input.as_deref(),
+    )
+    .await?;
+    // Stderr is bounded and discarded. Only the typed JSON error envelope can
+    // cross into presentation; it never displays arbitrary process output.
+    if captured.success && !captured.stderr.is_empty() {
+        return Err(BridgeError::after_spawn(ErrorKind::InvalidReply, mutation));
+    }
+    let json = if !captured.success && captured.stdout.is_empty() {
+        captured.stderr
+    } else {
+        captured.stdout
+    };
+    Ok((captured.success, json))
 }
 
 async fn run_resolved(
@@ -587,13 +686,17 @@ async fn run_resolved(
         return Err(BridgeError::new(ErrorKind::CliVersionMismatch));
     }
 
-    // The frozen status/disconnect contract must remain usable offline. Query
-    // and writes involving a model additionally prove inspect capability and
-    // re-check the chosen catalog entry on this same executable each time.
-    if let Request::Preview { model, address, .. } | Request::Apply { model, address, .. } =
-        &request
-    {
-        let inspect = Request::Inspect { address: *address };
+    // Status/disconnect stay offline. Model operations validate the frozen
+    // catalog plus the additive Provider identity/capability contract on this
+    // same executable and deadline. A managed Chat-only row cannot enter the
+    // Codex picker or pass a later Preview/Apply by reusing an old selection.
+    if let Some(address) = match &request {
+        Request::Inspect { address }
+        | Request::Preview { address, .. }
+        | Request::Apply { address, .. } => Some(*address),
+        Request::Status { .. } | Request::Disconnect { .. } => None,
+    } {
+        let inspect = Request::Inspect { address };
         let output = capture(
             &executable,
             &inspect.arguments(),
@@ -607,8 +710,23 @@ async fn run_resolved(
         let Reply::Inspected(gateway) = decode(&inspect, output)? else {
             return Err(BridgeError::new(ErrorKind::InvalidReply));
         };
-        if !gateway.models.iter().any(|item| item.id == *model) {
-            return Err(BridgeError::new(ErrorKind::ModelUnavailable));
+        let gateway = inspect_provider_catalog(
+            gateway,
+            &executable,
+            &cancellation,
+            deadline,
+            limits,
+            &mut admission,
+        )
+        .await?;
+        match &request {
+            Request::Inspect { .. } => return Ok(Reply::Inspected(gateway)),
+            Request::Preview { model, .. } | Request::Apply { model, .. } => {
+                if !gateway.models.iter().any(|item| item.id == *model) {
+                    return Err(BridgeError::new(ErrorKind::ModelUnavailable));
+                }
+            }
+            _ => unreachable!("only catalog requests enter this branch"),
         }
     }
     let output = capture(
@@ -622,6 +740,73 @@ async fn run_resolved(
     )
     .await?;
     decode(&request, output)
+}
+
+async fn inspect_provider_catalog(
+    legacy: GatewayInfo,
+    executable: &Executable,
+    cancellation: &Cancellation,
+    deadline: Instant,
+    limits: Limits,
+    admission: &mut Admission,
+) -> Result<GatewayInfo, BridgeError> {
+    let path = magpie_core::providers::ProviderStore::default_path()
+        .map_err(|_| BridgeError::new(ErrorKind::ProviderSourceMismatch))?;
+    let arguments = vec![
+        "gateway".into(),
+        "provider-inspect".into(),
+        "--store".into(),
+        path.as_os_str().to_owned(),
+        "--listen".into(),
+        legacy.address.to_string().into(),
+        "--json".into(),
+    ];
+    let captured = capture(
+        executable,
+        &arguments,
+        false,
+        cancellation,
+        deadline,
+        Limits {
+            stdout: limits.stdout.saturating_mul(16).min(PROVIDER_INSPECT_LIMIT),
+            ..limits
+        },
+        admission,
+    )
+    .await?;
+    if !captured.success {
+        if !captured.stdout.is_empty() {
+            return Err(BridgeError::new(ErrorKind::InvalidReply));
+        }
+        let wire: ErrorWire = serde_json::from_slice(&captured.stderr)
+            .map_err(|_| BridgeError::new(ErrorKind::CliRejected))?;
+        if wire.version != PROTOCOL_VERSION {
+            return Err(BridgeError::new(ErrorKind::CliVersionMismatch));
+        }
+        // A positively identified legacy forward catalog is the only fallback.
+        // Missing commands, partial metadata and wrong stores never take it.
+        if wire.error.code == "provider_gateway_unmanaged" {
+            return Ok(legacy);
+        }
+        let kind = match wire.error.code.as_str() {
+            "provider_store_mismatch" => ErrorKind::ProviderSourceMismatch,
+            "provider_catalog_changed" | "provider_read_conflict" => {
+                ErrorKind::ProviderCatalogChanged
+            }
+            "provider_gateway_inspect_timeout" => ErrorKind::TimedOut,
+            "provider_gateway_unavailable" => ErrorKind::GatewayUnavailable,
+            "provider_gateway_invalid_response" => ErrorKind::InvalidReply,
+            _ => ErrorKind::CliRejected,
+        };
+        return Err(BridgeError::new(kind));
+    }
+    if !captured.stderr.is_empty() {
+        return Err(BridgeError::new(ErrorKind::InvalidReply));
+    }
+    let expected_identity = magpie_core::providers::ProviderStore::new(path)
+        .identity()
+        .map_err(|_| BridgeError::new(ErrorKind::ProviderSourceMismatch))?;
+    decode_provider_catalog(&captured.stdout, legacy, &expected_identity)
 }
 
 // Not Debug: captured bytes can contain malicious output or private values.
@@ -673,6 +858,32 @@ async fn capture(
     limits: Limits,
     admission: &mut Admission,
 ) -> Result<Captured, BridgeError> {
+    capture_with_input(
+        executable,
+        arguments,
+        mutation,
+        cancellation,
+        deadline,
+        limits,
+        admission,
+        None,
+    )
+    .await
+}
+
+// Provider mutations share the exact same child lifecycle and admission gate.
+// Input is bounded structured metadata, never placed on a command line.
+#[allow(clippy::too_many_arguments)]
+async fn capture_with_input(
+    executable: &Executable,
+    arguments: &[OsString],
+    mutation: bool,
+    cancellation: &Cancellation,
+    deadline: Instant,
+    limits: Limits,
+    admission: &mut Admission,
+    input: Option<&[u8]>,
+) -> Result<Captured, BridgeError> {
     if cancellation.is_cancelled() {
         return Err(BridgeError::new(ErrorKind::Cancelled));
     }
@@ -689,7 +900,11 @@ async fn capture(
     }
     let mut command = Command::from(native);
     command
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
@@ -706,15 +921,29 @@ async fn capture(
     admission.safe_to_release = false;
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
+    let stdin = child.stdin.take();
     let result = {
         // Dropping this future closes Unix async pipes. There are no reader
         // threads to join if a descendant keeps its inherited writer open.
         let collect = async {
             let stdout = stdout.ok_or(ErrorKind::InvalidReply)?;
             let stderr = stderr.ok_or(ErrorKind::InvalidReply)?;
-            let (stdout, stderr) = future::try_zip(
-                read_bounded(stdout, limits.stdout),
-                read_bounded(stderr, limits.stderr),
+            let write_input = async {
+                if let Some(input) = input {
+                    let mut pipe = stdin.ok_or(ErrorKind::InvalidReply)?;
+                    pipe.write_all(input)
+                        .await
+                        .map_err(|_| ErrorKind::InvalidReply)?;
+                    pipe.close().await.map_err(|_| ErrorKind::InvalidReply)?;
+                }
+                Ok::<(), ErrorKind>(())
+            };
+            let ((stdout, stderr), ()) = future::try_zip(
+                future::try_zip(
+                    read_bounded(stdout, limits.stdout),
+                    read_bounded(stderr, limits.stderr),
+                ),
+                write_input,
             )
             .await?;
             let status = child.status().await.map_err(|_| ErrorKind::InvalidReply)?;
@@ -780,6 +1009,124 @@ struct GatewayWire {
 struct ModelWire {
     id: String,
     source: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderInspectWire {
+    version: String,
+    provider_gateway: ProviderGatewayWire,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderGatewayWire {
+    address: String,
+    mode: String,
+    store_identity: String,
+    revision: u64,
+    token: String,
+    provider_health: String,
+    models: Vec<ProviderModelWire>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderModelWire {
+    id: String,
+    source: String,
+    native_endpoints: Vec<String>,
+    client_endpoints: Vec<String>,
+}
+
+fn decode_provider_catalog(
+    bytes: &[u8],
+    legacy: GatewayInfo,
+    expected_identity: &str,
+) -> Result<GatewayInfo, BridgeError> {
+    let invalid = || BridgeError::new(ErrorKind::InvalidReply);
+    let wire: ProviderInspectWire = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    if wire.version != PROTOCOL_VERSION {
+        return Err(BridgeError::new(ErrorKind::CliVersionMismatch));
+    }
+    let gateway = wire.provider_gateway;
+    let address = parse_address(&gateway.address).map_err(|_| invalid())?;
+    let digest = |value: &str| {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    let token_prefix = format!("{}:", gateway.revision);
+    if address != legacy.address
+        || gateway.mode != "provider_store"
+        || gateway.provider_health != "not_probed"
+        || gateway.models.len() > MAX_MODELS
+        || gateway.revision > i64::MAX as u64
+        || !gateway
+            .token
+            .strip_prefix(&token_prefix)
+            .is_some_and(digest)
+        || !gateway
+            .store_identity
+            .strip_prefix("provider-store-v1:")
+            .is_some_and(digest)
+    {
+        return Err(invalid());
+    }
+    if gateway.store_identity != expected_identity {
+        return Err(BridgeError::new(ErrorKind::ProviderSourceMismatch));
+    }
+    let endpoints_valid = |values: &[String]| {
+        values.len() <= 4
+            && values
+                .iter()
+                .all(|value| matches!(value.as_str(), "chat" | "responses" | "messages" | "gemini"))
+            && values.iter().collect::<HashSet<_>>().len() == values.len()
+    };
+    let mut seen = HashSet::with_capacity(gateway.models.len());
+    for model in &gateway.models {
+        let Some((provider, name)) = model.id.split_once('/') else {
+            return Err(invalid());
+        };
+        if model.source != "configured"
+            || !magpie_core::providers::is_valid_provider_id(provider)
+            || !magpie_core::providers::is_valid_model_id(name)
+            || !seen.insert(model.id.as_str())
+            || model.native_endpoints.len() > 1
+            || !endpoints_valid(&model.native_endpoints)
+            || !endpoints_valid(&model.client_endpoints)
+            || (model.native_endpoints.is_empty() && !model.client_endpoints.is_empty())
+            || model
+                .native_endpoints
+                .iter()
+                .any(|native| !model.client_endpoints.contains(native))
+        {
+            return Err(invalid());
+        }
+    }
+    let previous: HashSet<_> = legacy
+        .models
+        .iter()
+        .map(|model| model.id.as_str())
+        .collect();
+    if previous != seen {
+        return Err(BridgeError::new(ErrorKind::ProviderCatalogChanged));
+    }
+    Ok(GatewayInfo {
+        address,
+        models: gateway
+            .models
+            .into_iter()
+            .filter(|model| {
+                model
+                    .client_endpoints
+                    .iter()
+                    .any(|endpoint| endpoint == "responses")
+            })
+            .map(|model| ModelInfo { id: model.id })
+            .collect(),
+    })
 }
 
 #[derive(Deserialize)]
@@ -1267,6 +1614,108 @@ mod tests {
         let mut empty = gateway_json();
         empty["gateway"]["models"] = json!([]);
         assert!(parse_ok(&request, empty).is_ok());
+    }
+
+    fn managed_catalog_fixture() -> (GatewayInfo, serde_json::Value, String) {
+        let identity = format!("provider-store-v1:{}", "a".repeat(64));
+        let ids = ["local/chat@2026", "local/response", "local/unintegrated"];
+        let legacy = GatewayInfo {
+            address: address(),
+            models: ids
+                .iter()
+                .map(|id| ModelInfo { id: (*id).into() })
+                .collect(),
+        };
+        let wire = json!({"version":"0.2.0","provider_gateway":{
+        "address":"127.0.0.1:3425","mode":"provider_store",
+        "store_identity":identity,"revision":7,"token":format!("7:{}","b".repeat(64)),
+        "provider_health":"not_probed","models":[
+            {"id":ids[0],"source":"configured","native_endpoints":["chat"],"client_endpoints":["chat"]},
+            {"id":ids[1],"source":"configured","native_endpoints":["responses"],"client_endpoints":["responses"]},
+            {"id":ids[2],"source":"configured","native_endpoints":[],"client_endpoints":[]}
+        ]}});
+        (legacy, wire, identity)
+    }
+
+    #[test]
+    fn managed_picker_requires_responses_capability_and_allows_real_conversion() {
+        let (legacy, mut wire, identity) = managed_catalog_fixture();
+        let result = decode_provider_catalog(
+            &serde_json::to_vec(&wire).unwrap(),
+            legacy.clone(),
+            &identity,
+        )
+        .unwrap();
+        assert_eq!(
+            result.models,
+            vec![ModelInfo {
+                id: "local/response".into()
+            }]
+        );
+        wire["provider_gateway"]["models"][0]["client_endpoints"] =
+            json!(["chat", "responses", "messages", "gemini"]);
+        let result = decode_provider_catalog(
+            &serde_json::to_vec(&wire).unwrap(),
+            legacy.clone(),
+            &identity,
+        )
+        .unwrap();
+        assert_eq!(result.models.len(), 2);
+        assert_eq!(result.models[0].id, "local/chat@2026");
+        wire["provider_gateway"]["models"][1]["native_endpoints"] = json!(["chat"]);
+        wire["provider_gateway"]["models"][1]["client_endpoints"] = json!(["chat"]);
+        wire["provider_gateway"]["models"][0]["client_endpoints"] = json!(["chat"]);
+        assert!(
+            decode_provider_catalog(&serde_json::to_vec(&wire).unwrap(), legacy, &identity)
+                .unwrap()
+                .models
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn managed_picker_rejects_wrong_store_token_catalog_and_forged_capabilities() {
+        let (legacy, wire, identity) = managed_catalog_fixture();
+        let decode = |value: &serde_json::Value| {
+            decode_provider_catalog(
+                &serde_json::to_vec(value).unwrap(),
+                legacy.clone(),
+                &identity,
+            )
+        };
+        let mut changed = wire.clone();
+        changed["provider_gateway"]["store_identity"] =
+            format!("provider-store-v1:{}", "c".repeat(64)).into();
+        assert_eq!(
+            decode(&changed).unwrap_err().kind,
+            ErrorKind::ProviderSourceMismatch
+        );
+        let mut changed = wire.clone();
+        changed["provider_gateway"]["models"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        assert_eq!(
+            decode(&changed).unwrap_err().kind,
+            ErrorKind::ProviderCatalogChanged
+        );
+        for field in ["token", "store_identity"] {
+            let mut changed = wire.clone();
+            changed["provider_gateway"][field] = "invalid".into();
+            assert_eq!(decode(&changed).unwrap_err().kind, ErrorKind::InvalidReply);
+        }
+        for endpoints in [
+            json!(["responses", "responses"]),
+            json!(["invented"]),
+            json!(["responses"]),
+        ] {
+            let mut changed = wire.clone();
+            changed["provider_gateway"]["models"][2]["client_endpoints"] = endpoints;
+            assert_eq!(decode(&changed).unwrap_err().kind, ErrorKind::InvalidReply);
+        }
+        let mut changed = wire;
+        changed["provider_gateway"]["models"][0]["id"] = "local/bad?secret=value".into();
+        assert_eq!(decode(&changed).unwrap_err().kind, ErrorKind::InvalidReply);
     }
 
     #[test]
@@ -1922,6 +2371,9 @@ fn main() {
  }
  if mode=="invalid-json" {println!("{{}} {{}}");return;}
  if mode=="secret-error" {eprintln!("{{\"version\":\"0.2.0\",\"error\":{{\"code\":\"untrusted\",\"message\":\"PRIVATE_CANARY\"}}}}");std::process::exit(2);}
+ if args.get(1).map(String::as_str)==Some("provider-inspect") {
+   eprintln!("{{\"version\":\"0.2.0\",\"error\":{{\"code\":\"provider_gateway_unmanaged\",\"message\":\"Provider operation failed.\"}}}}");std::process::exit(2);
+ }
  if inspect {
    let model=if mode=="missing-model" {"local/removed"} else {"local/model"};
    println!("{{\"version\":\"0.2.0\",\"gateway\":{{\"address\":\"127.0.0.1:3425\",\"mode\":\"forward_candidate\",\"provider_health\":\"not_probed\",\"models\":[{{\"id\":\"{model}\",\"source\":\"configured\"}}]}}}}");

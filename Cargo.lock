@@ -488,6 +488,7 @@ version = "0.2.0"
 dependencies = [
  "magpie-core",
  "magpie-service",
+ "serde_json",
 ]
 
 [[package]]

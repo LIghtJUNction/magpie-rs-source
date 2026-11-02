@@ -6,10 +6,11 @@ name = "magpie-desktop"
 version = "0.2.0"
 edition = "2024"
 license = "MIT"
+rust-version = "1.99.1"
 
 [features]
 default = []
-visual-test = ["gpui/test-support", "gpui_platform/test-support"]
+visual-test = ["gpui/test-support"]
 
 [[example]]
 name = "render_preview"
@@ -25,14 +26,11 @@ futures-lite = "=2.6.1"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 unicode-segmentation = "=1.13.3"
-gpui = { git = "https://github.com/zed-industries/zed", rev = "37faef81f74fc1bb08be9939c4cffc8ede6ced2f", default-features = false }
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "37faef81f74fc1bb08be9939c4cffc8ede6ced2f", default-features = false, features = ["font-kit", "wayland", "x11"] }
+gpui = { package = "gpui-kit", git = "https://github.com/longbridge/gpui-kit", rev = "bb85882e1faab845d9e7be33b69a152879a90f69" }
+gpui-kit-material = { git = "https://github.com/mizorewww/gpui-kit-material", rev = "47895b92558883d24e19d54fdeb876ed551d9394", default-features = false, features = ["buttons", "selection", "navigation", "inputs", "feedback", "containment", "embedded-symbols"] }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "=1.1.6", features = ["process", "fs"] }
-
-[target.'cfg(target_os = "windows")'.dependencies]
-gpui = { git = "https://github.com/zed-industries/zed", rev = "37faef81f74fc1bb08be9939c4cffc8ede6ced2f", default-features = false, features = ["windows-manifest"] }
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -46,3 +44,16 @@ lto = "thin"
 codegen-units = 1
 strip = "symbols"
 panic = "unwind"
+
+[patch.crates-io]
+gpui-base = { git = "https://github.com/mizorewww/gpui-kit-material", rev = "47895b92558883d24e19d54fdeb876ed551d9394" }
+gpui-pre = { git = "https://github.com/mizorewww/gpui-kit-material", rev = "47895b92558883d24e19d54fdeb876ed551d9394" }
+gpui-pre-apple = { git = "https://github.com/mizorewww/gpui-kit-material", rev = "47895b92558883d24e19d54fdeb876ed551d9394" }
+gpui-pre-web = { git = "https://github.com/mizorewww/gpui-kit-material", rev = "47895b92558883d24e19d54fdeb876ed551d9394" }
+gpui-fast = { git = "https://github.com/mizorewww/gpui-kit-material", rev = "47895b92558883d24e19d54fdeb876ed551d9394" }
+gpui-fast-apple = { git = "https://github.com/mizorewww/gpui-kit-material", rev = "47895b92558883d24e19d54fdeb876ed551d9394" }
+gpui-fast-web = { git = "https://github.com/mizorewww/gpui-kit-material", rev = "47895b92558883d24e19d54fdeb876ed551d9394" }
+
+[patch."https://github.com/longbridge/gpui-kit"]
+gpui-kit = { git = "https://github.com/mizorewww/gpui-kit-material", rev = "47895b92558883d24e19d54fdeb876ed551d9394" }
+gpui-base = { git = "https://github.com/mizorewww/gpui-kit-material", rev = "47895b92558883d24e19d54fdeb876ed551d9394" }
