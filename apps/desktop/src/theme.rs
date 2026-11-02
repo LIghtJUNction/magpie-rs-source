@@ -224,6 +224,13 @@ pub(crate) fn apply_material_theme(appearance: Appearance, window: &mut Window, 
         Appearance::Dark => true,
         Appearance::Light => false,
     };
+    if cx
+        .try_global::<AppliedMaterialMode>()
+        .is_some_and(|mode| mode.0 == dark)
+    {
+        return;
+    }
+    cx.set_global(AppliedMaterialMode(dark));
     let scheme = ThemeId::Neutral.scheme(
         if dark {
             ThemeMode::Dark
@@ -235,3 +242,6 @@ pub(crate) fn apply_material_theme(appearance: Appearance, window: &mut Window, 
     theme::init_component_theme(scheme, 1.0, cx);
     window.refresh();
 }
+
+struct AppliedMaterialMode(bool);
+impl gpui::Global for AppliedMaterialMode {}

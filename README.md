@@ -1,11 +1,19 @@
 # Magpie Rust
 
-Rust implementation for the `magpie-rs` Recipkg project. Version 0.2.0 is an
-early preview with a standalone CLI, bounded local-provider forwarding,
-recoverable Codex configuration changes, and GPUI desktop actions.
-The full product contract remains under active implementation. Both previous Pro visual directions were rejected; a further redesign is
-required. Local Linux builds, functional tests and native font shaping checks
-do not establish visual acceptance. This checkpoint is not a desktop release.
+Choose a Provider and model, connect an Agent, and send its requests through a
+local gateway. This Rust implementation has a standalone CLI and a native GPUI
+desktop application. Version 0.2.0 remains a development preview of the complete
+99-requirement Magpie contract, including the six additions identified in the
+original Magpie 0.1.2185 changelog.
+
+Shared Provider management, system-keyring API keys, live multi-Provider
+forwarding, model discovery and the native Providers page remain the foundation.
+The latest iteration adds desktop-owned Gateway lifecycle management, model
+updates for an already connected Codex, and bounded Chat token-parameter
+compatibility. See [the latest verification and full feature audit](docs/changelog-parity-2026-10-30.md)
+and [the previous Provider/UI record](docs/provider-ui-parity-2026-10-30.md)
+for exact scope. These are incremental implementations; complete original
+feature parity, all-platform validation and user visual acceptance remain open.
 
 ## Install
 
@@ -28,32 +36,96 @@ The workspace contains `magpie-core`, `magpie-service`, and the `magpie` CLI.
 The separate GPUI desktop shell is in `apps/desktop` and is excluded from the
 default workspace build.
 
-## Development checkpoint · 2026-11-02
+On Linux, system-keyring support requires the D-Bus development library at build
+time (`libdbus-1-dev` on Debian/Ubuntu) and an unlocked Secret Service such as
+GNOME Keyring or KWallet at runtime. A headless installation can explicitly use
+an environment reference. The application never falls back to a plaintext key
+in its public configuration.
 
-The desktop now depends on pinned `gpui-kit-material` and GPUI Kit, using Material
-buttons, navigation and semantic themes. The first native draft was rejected by
-the user; subsequent theme/layout corrections are still awaiting visual review.
-This is saved development progress, not an accepted redesign or a new release.
-
-Provider management now includes persistent metadata, environment-based key
-references, model selection/discovery and bounded connection tests. The desktop
-can start and stop its own loopback gateway; it never adopts or stops an external
-listener. Codex retains preview, explicit connect and drift-aware restoration.
-Other Agent configuration, routing integration, Usage, Profiles, subscription
-accounts, Library and plugins remain incomplete. See [the handoff](docs/NEXT_SESSION.md).
-
-Desktop builds require Rust 1.99.1. Keep artifacts outside this checkout:
+The desktop uses the pinned `gpui-kit-material` revision
+`47895b92558883d24e19d54fdeb876ed551d9394` with real Material buttons, navigation,
+and shared semantic colors. Its independent toolchain requires Rust 1.99.1:
 
 ```sh
-CARGO_TARGET_DIR=/absolute/build-directory cargo +1.99.1 build --locked --manifest-path apps/desktop/Cargo.toml
+CARGO_TARGET_DIR=/tmp/magpie-material-target cargo +1.99.1 build --locked --manifest-path apps/desktop/Cargo.toml
 ```
+
+The current development branch integrates the shared Provider store, system
+keyring, persistent preferences, supervised Gateway and Codex model updates from
+`9ff5477` with the Material frontend. Native visual acceptance and full feature
+parity remain open; the earlier draft was rejected by the user. Provider drafts
+now require explicit discard when cancelling or closing the window.
+
+## Providers and the shared Gateway
+
+The desktop Providers page and `magpie providers` use the same versioned
+`providers.toml` in the Magpie configuration directory. Set `MAGPIE_CONFIG_DIR`
+to use an isolated directory. Saving validates fields without contacting the
+Provider; **Refresh models** is a separate, explicit network operation.
+
+```sh
+# Replace example-model with a model installed on your local inference server.
+magpie providers add local --name "Local inference" \
+  --url http://127.0.0.1:11434/v1 --protocol openai_chat --model example-model
+magpie providers refresh local --json
+magpie providers list --json
+magpie models --json
+magpie serve --listen 127.0.0.1:3425
+```
+
+Open `magpie gui` to let the desktop start its own Gateway. Its Gateway page
+shows the actual server version, address and ownership, with Start/Stop for its
+own process. A Gateway already started by `serve` is displayed as external and
+cannot be stopped by the desktop. The desktop's saved address is a local
+preference; standalone CLI invocations still select their address with `--listen`.
+Stopping or changing this address does not silently rewrite Agent settings.
+
+Add, edit, disable or remove Providers in either interface; the running Gateway reads the current
+configuration on every new request. Disabled Providers retain their settings
+and disappear from the available model list. In-flight requests retain the
+upstream already selected for that request.
+
+Each Provider chooses `openai_chat`, `openai_responses`, `anthropic_messages` or
+`gemini`. HTTPS verifies certificates and refuses redirects. Plain HTTP is
+limited to explicitly configured loopback endpoints. Cross-protocol conversion
+uses the existing bounded JSON/SSE implementation. The listener remains local;
+LAN sharing and remote client authentication are separate work.
+
+Enter a key in the masked desktop field to save it in the system credential
+store. CLI automation can pipe a key to `--key-stdin`, or explicitly use
+`--key-env VARIABLE_NAME`; a key is never accepted as a command-line value.
+Editing other fields keeps the current key. **Remove saved key** or
+`--clear-key` clears it. Validation failures and revision conflicts preserve the
+previous configuration. If a filesystem commit cannot be confirmed, reload
+before retrying.
+If deleting a superseded key fails after the new configuration is committed,
+the result reports that cleanup remains pending.
+
+```sh
+magpie providers edit local --name "Development models"
+magpie providers disable local
+magpie providers enable local
+magpie providers remove local --yes
+magpie providers --help
+```
+
+Model discovery handles bounded OpenAI-style, Anthropic and Gemini catalogs,
+including supported pagination. It saves the complete validated result using
+the original revision; failed, oversized or incomplete responses keep the old
+list. The public store is limited to 1 MiB, 128 Providers, 4,096 models per
+Provider and 16,384 models in total. Limits reject the operation instead of
+silently truncating data.
+
+GPUI uses side navigation on wide windows, top navigation on smaller windows,
+compact Agent/Provider rows, five languages, and persistent appearance/language
+preferences. Large model pickers render only the visible rows.
 
 ## Current implementation boundary
 
 The CLI provides agent discovery, configuration inspection, explicit Codex
 connection/restore transactions, status output, and loopback-only gateways.
-Agent discovery checks installed Codex, Claude Code, Gemini CLI,
-OpenCode and Zed executables on PATH. Only Codex configuration is inspected;
+The catalog retains 68 Agent types, with executable discovery for a subset
+including Codex, Claude Code, Gemini CLI, OpenCode and Zed. Only Codex configuration is inspected;
 its explicit model, provider and reasoning effort are read without credentials.
 The GPUI application reads local snapshots and calls the packaged CLI for model
 queries, selection, read-only connection previews, explicit saves, ownership
@@ -63,10 +135,33 @@ configuration or sign-ins; only an explicit save or restore writes the selected
 Codex configuration. The desktop requires its matching CLI beside the executable,
 or an explicit absolute `MAGPIE_CLI_PATH` for development; it does not search PATH
 for another Magpie binary.
-Subscription sign-in, secure credential storage, full Usage, plugins and
-synchronization remain unimplemented. Managed Provider forwarding supports
-Chat, Responses, Messages and Gemini adapters; current verification uses local
-synthetic upstreams, not real remote accounts.
+Provider subscription sign-in, multi-account/key scheduling, the full preset
+catalog, complete Usage, routing-group integration, plugins, Library and
+synchronization remain under development. Other Agent configuration writers,
+Web/TUI/tray workflows are still incomplete. Desktop ownership uses a private
+stdin lease: normal shutdown or owner process loss stops only that owned child.
+Provider writes currently support Linux, macOS and Android; Windows returns an
+explicit unsupported-platform result. System-keyring integration was exercised
+on Linux; macOS/Windows need their own OS validation.
+
+To change an already connected Codex model, use the existing desktop model
+picker or the explicit CLI operation. Preview is read-only; passing its revision
+to apply rejects changes made between the two steps. Disconnect still restores
+the configuration from before the first connection, even after repeated model
+updates. Replace paths and model IDs with your own configured values:
+
+```sh
+magpie agents set-model codex --config /absolute/path/config.toml \
+  --model local/another-model --dry-run --json
+magpie agents set-model codex --config /absolute/path/config.toml \
+  --model local/another-model --apply --if-revision REVISION_FROM_PREVIEW --json
+```
+
+The forwarding implementation recognizes the Chat output-limit rename for
+OpenAI's actual domain. A compatible upstream that explicitly rejects the
+current token field in an HTTP 400 can be retried once with the requested field;
+other failures and streams that have already started are not replayed. This
+does not add general retry/fallback routing or usage accounting.
 
 ```sh
 magpie agents --json
@@ -90,14 +185,15 @@ validated snapshot is shared across Gateway workers and loaded once at startup.
 Listing a model does not enable forwarding to an upstream. Consult the parent
 recipe for full requirements and acceptance status.
 
-### Actual local-provider forwarding and Codex connection
+### Legacy fixture forwarding and Codex connection
 
 `--forward` accepts the public JSON shape in `examples/forward-local.json`.
 It supports one explicitly configured literal-loopback HTTP provider through
 OpenAI Chat Completions and Responses, including bounded SSE, cancellation,
 four active requests and immediate overload rejection. Credentials, when needed,
 come from a named environment variable; the file contains only that reference.
-It does not implement remote providers or the full Gateway contract.
+This legacy fixture mode is retained; use the shared Provider store above for
+multiple Providers and HTTPS upstreams.
 The example expects an already running provider at port 18081 and the named
 credential environment variable. Replace its address/models/reference for your
 provider, or omit `api_key_env` for an unauthenticated local provider.
@@ -123,7 +219,7 @@ Mutation currently supports Linux, macOS and Android; Windows returns an explici
 unsupported-platform result. Configuration ownership does not prove Provider
 health or a completed Agent request.
 
-Historical verification on the 2026-10-29 candidate included 77 workspace tests, 26
+The earlier local verification record includes 77 workspace tests, 26
 real TCP/startup/CLI cases, and an installed Codex 0.165.0 executing against an
 isolated synthetic provider. The native-client case receives a Chinese Responses
 stream through Magpie and restores the original configuration bytes. It does
@@ -152,8 +248,23 @@ Recorded evidence and exact binary/source/fixture hashes are in `tests/results/`
 The two ignored test-worker entry points are executed explicitly by their parent
 cases; the desktop adds one ignored worker explicitly run twice by its Python
 coordinator. These are not separate completed product requirements. Actual native
-window interactions, IME, screen readers, other Agent clients, external TLS and
-the full 93 requirements remain open.
+window interactions, IME, screen readers, other Agent clients, real external accounts and
+the full 99 requirements remain open.
+
+### Reproduce the new Provider checks
+
+```sh
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --manifest-path apps/desktop/Cargo.toml --locked --features visual-test --lib
+python3 scripts/verify-provider-keyring.py --magpie /absolute/path/to/magpie
+```
+
+The last command requires Linux, `dbus-run-session` and `gnome-keyring-daemon`.
+It creates private temporary XDG directories and its own D-Bus session, uses
+synthetic keys and a loopback HTTP upstream, and checks key rotation, Provider disable/removal
+and Codex preview/apply/restore. It never reads an existing account or Agent
+configuration.
 
 ## Performance measurements
 

@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-02",
+  "platform": "Linux x86_64 Wayland Hyprland, native GPUI window",
+  "synthetic": true,
+  "credentials": "none; real Agent config directories masked by bubblewrap",
+  "fixture_script": "scripts/desktop-fixture.py",
+  "fixture_path": "/home/lightjunction/.cache/magpie-rs-build/smoke-20261102/runtime-active",
+  "binary_and_fixture_sha256": {
+    "/home/lightjunction/.cache/magpie-rs-build/smoke-20261102/target-cli/debug/magpie": "53f26a839729aebbc2beb446370cebce61a37b1d00086a6b613c63ff3b3523cd",
+    "/home/lightjunction/.cache/magpie-rs-build/smoke-20261102/target-material/debug/magpie-desktop": "25761b96bbdf582d8247cc9b334f5dfcb3744a6259b27b8c42ad126545a0e1be",
+    "/home/lightjunction/.cache/magpie-rs-build/smoke-20261102/runtime-active/codex/config.toml": "b68495c82acc7745d40a0838772faba9da9e65a8ef7b86d09436f7a70291f7a0",
+    "/home/lightjunction/.cache/magpie-rs-build/smoke-20261102/runtime-active/config/providers.toml": "ac8ff894690abbe7cdc0e6c3040d8c95beeb12697ea90aa7be5d779a1724628d",
+    "/home/lightjunction/.cache/magpie-rs-build/smoke-20261102/runtime-active/config/desktop-preferences.json": "b2a6d39dc693f54357af30539f8a854ed31a3aa2dcadbac171743b6fb62e09e8"
+  },
+  "manual_native_steps": [
+    "changed Provider draft: cancel/keep preserves inputs; window close requests discard; explicit discard then closes and releases owned gateway",
+    "create Provider through native form: revision 1, model-a/model-b",
+    "refresh models through native button: revision 2; live CLI and Gateway agree",
+    "real HTTP Responses request routes fixture/model-a to upstream model-a and returns fixture-ok",
+    "Codex connect preview leaves original bytes; save chooses model-a",
+    "native connected model change preview/save: model-a to model-b; keep_me retained",
+    "native disconnect restores exact original commented TOML bytes",
+    "native Settings writes locale-de and dark; actual close/reopen displays both",
+    "native owned Gateway stop releases port; start succeeds; normal window close also releases port",
+    "reopened final desktop binary with debug tracing removed; 360px German Provider page inspected"
+  ],
+  "transport_health_after_restart": {
+    "address": "127.0.0.1:46011",
+    "config_source": "provider_store",
+    "counter_semantics": "upstream_protocol_completion_not_client_delivery_or_usage",
+    "instance_id": "23370d-18e425980f1e7825-0",
+    "limits": {
+      "active_catalog_responses": 2,
+      "active_requests": 4,
+      "catalog_response_bytes": 33554432,
+      "connections": 16,
+      "forward_chunk_bytes": 16384,
+      "json_response_bytes": 4194304,
+      "request_bytes": 1048576,
+      "sse_event_bytes": 4194304,
+      "waiting_requests": 0
+    },
+    "mode": "forward_candidate",
+    "provider_health": "not_probed",
+    "server_version": "0.2.0",
+    "status": "ok",
+    "transport_counters": {
+      "active": 0,
+      "cancelled": 0,
+      "completed": 0,
+      "failed": 0
+    },
+    "usage_accounting": "not_implemented"
+  },
+  "tests": {
+    "workspace_passed": 327,
+    "workspace_ignored": 4,
+    "desktop_visual_test_passed": 79,
+    "desktop_ignored": 3,
+    "workspace_clippy": "passed",
+    "desktop_clippy": "passed",
+    "fmt": "passed",
+    "workspace_doc_no_deps": "passed",
+    "supervised_owner_crash": "passed",
+    "desktop_headless_help_version": "passed"
+  },
+  "rendering": {
+    "directory": "/home/lightjunction/.cache/magpie-rs-build/smoke-20261102/merged-visual-2",
+    "scenes": 80,
+    "locales": [
+      "zh-CN"
+    ],
+    "sizes": [
+      "1280x720",
+      "900x560",
+      "440x560",
+      "360x560"
+    ],
+    "themes": [
+      "light",
+      "dark"
+    ],
+    "all_generated_not_all_visually_inspected": true
+  },
+  "limitations": [
+    "current visual direction awaits user acceptance",
+    "AT-SPI exposed only application root; reader not accepted",
+    "full native IME/keyboard workflow not accepted",
+    "external accounts, other Agents and other OS not accepted",
+    "no release package or system install",
+    "Usage, routing, plugins, Profile, Library and other full requirements remain open"
+  ]
+}

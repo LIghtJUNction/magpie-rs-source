@@ -194,7 +194,8 @@ def linux_packages(payload, scratch, output, args, arch, debarch, epoch, gui):
     variant = "CLI and GPUI desktop" if gui else "CLI only"
     conflicts = CONFLICTS + ["magpie-rs-bin", "magpie-rs-git", "magpie-rs" if not gui else "magpie-rs-cli"]
     env = {**os.environ, "SOURCE_DATE_EPOCH": str(epoch)}
-    # Let the native Debian tooling calculate ELF dependencies, including symbol versions.
+    # Let native Debian tooling calculate ELF dependencies, including libdbus
+    # for Linux system credentials and the required symbol versions.
     debian = scratch / "debian"
     write(debian / "control", f"Source: {package}\n\nPackage: {package}\nArchitecture: any\nDescription: Magpie Rust preview\n")
     executables = list((system / "usr/bin").glob("*"))
@@ -218,7 +219,7 @@ def linux_packages(payload, scratch, output, args, arch, debarch, epoch, gui):
     deb = output / f"{package}_{args.version}-1_{debarch}.deb"
     run("dpkg-deb", "--root-owner-group", "--build", system, deb, env=env)
     shutil.rmtree(system / "DEBIAN")
-    arch_dependencies = ["glibc", "gcc-libs"]
+    arch_dependencies = ["glibc", "gcc-libs", "dbus"]
     if gui:
         arch_dependencies += [
             "fontconfig", "freetype2", "libxcb", "libxkbcommon", "libxkbcommon-x11", "libx11",

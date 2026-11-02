@@ -36,6 +36,21 @@ fn commit_connect(
     public_transaction::commit_connect(plan)
 }
 
+fn prepare_model_update(
+    path: &Path,
+    model: &str,
+) -> Result<public_transaction::PreparedModelUpdate, TransactionError> {
+    let _scope = test_support::descriptor_scope();
+    public_transaction::prepare_model_update(path, model)
+}
+
+fn commit_model_update(
+    plan: public_transaction::PreparedModelUpdate,
+) -> Result<public_transaction::ModelUpdateOutcome, TransactionError> {
+    let _scope = test_support::descriptor_scope();
+    public_transaction::commit_model_update(plan)
+}
+
 fn connection_status(path: &Path) -> Result<ConnectionStatus, TransactionError> {
     let _scope = test_support::descriptor_scope();
     public_transaction::connection_status(path)
@@ -125,10 +140,11 @@ impl Fixture {
 
     fn image(&self, suffix: &str) -> Vec<u8> {
         let journal = self.journal();
-        let key = if matches!(suffix, "disconnect-before" | "disconnected") {
-            "disconnect_session"
-        } else {
-            "session"
+        let key = match suffix {
+            "disconnect-before" | "disconnected" => "disconnect_session",
+            "update-before" | "update-after" => "update_session",
+            "connected" if journal.contains_key("connected_session") => "connected_session",
+            _ => "session",
         };
         let session = journal[key].as_str().unwrap();
         fs::read(self.state().join(format!("{session}-{suffix}.toml"))).unwrap()
@@ -259,9 +275,355 @@ fn transaction_crash_worker() {
         "disconnect" => {
             crash_candidate::disconnect(&config).unwrap();
         }
+        "update" => {
+            let plan =
+                crash_candidate::prepare_model_update(&config, "fixture/updated-model").unwrap();
+            crash_candidate::commit_model_update(plan).unwrap();
+        }
         _ => panic!("unknown fixture operation"),
     }
     panic!("operation completed without reaching the armed crash point");
+}
+
+#[test]
+fn model_update_retains_first_original_across_multiple_models_and_disconnect() {
+    for original in [Some(ORIGINAL.as_bytes()), None] {
+        let fixture = Fixture::new(original);
+        fixture.connect();
+        let first_session = fixture.journal()["session"].as_str().unwrap().to_owned();
+        let original_image = fixture.image("original");
+        for model in ["fixture/second", "other/third", "fixture/vendor-model-v2"] {
+            let plan = prepare_model_update(&fixture.config, model).unwrap();
+            assert_eq!(plan.gateway_addr(), endpoint());
+            assert_eq!(plan.changed_fields(), &["model"]);
+            let revision = plan.revision().to_owned();
+            let outcome = commit_model_update(plan).unwrap();
+            assert!(outcome.changed);
+            assert_eq!(outcome.status, ConnectionStatus::Connected);
+            assert_ne!(outcome.revision, revision);
+            assert_eq!(fixture.document()["model"].as_str(), Some(model));
+            assert_eq!(
+                fixture.journal()["session"].as_str(),
+                Some(first_session.as_str())
+            );
+            assert_eq!(fixture.image("original"), original_image);
+            assert_eq!(fixture.journal()["version"].as_integer(), Some(2));
+        }
+        let outcome = disconnect(&fixture.config).unwrap();
+        assert_eq!(outcome.restored_fields, 7);
+        assert_eq!(outcome.preserved_fields, 0);
+        assert_eq!(
+            connection_status(&fixture.config).unwrap(),
+            ConnectionStatus::Unmanaged
+        );
+        assert_eq!(fs::read(&fixture.config).ok().as_deref(), original);
+    }
+}
+
+#[test]
+fn model_update_preserves_user_comments_profiles_headers_and_effort() {
+    let fixture = Fixture::new(Some(ORIGINAL.as_bytes()));
+    fixture.connect();
+    let before = fixture
+        .text()
+        .replace("X-Team = \"before\"", "X-Team = \"after\"");
+    let before =
+        format!("# comment added while connected\n{before}\n# retained trailing comment\n");
+    fs::write(&fixture.config, &before).unwrap();
+    let plan = prepare_model_update(&fixture.config, "fixture/updated-model").unwrap();
+    commit_model_update(plan).unwrap();
+    assert_eq!(
+        fixture.text(),
+        before.replace("fixture/vendor-model-v2", "fixture/updated-model")
+    );
+    let updated = fixture.document();
+    assert_eq!(updated["model_reasoning_effort"].as_str(), Some("high"));
+    assert_eq!(
+        updated["profiles"]["work"]["model"].as_str(),
+        Some("profile/unchanged")
+    );
+    assert_eq!(
+        updated["model_providers"]["user"]["http_headers"]["X-Team"].as_str(),
+        Some("after")
+    );
+    disconnect(&fixture.config).unwrap();
+    let restored = fixture.text();
+    assert!(restored.contains("# comment added while connected"));
+    assert!(restored.contains("# retained trailing comment"));
+    assert!(restored.contains("X-Team = \"after\""));
+    assert_eq!(fixture.document()["model"].as_str(), Some("user/original"));
+}
+
+#[test]
+fn model_update_preview_and_same_model_apply_do_not_write_or_expose_values() {
+    let fixture = Fixture::new(Some(ORIGINAL.as_bytes()));
+    fixture.connect();
+    let before = fixture.text();
+    let journal = fs::read(fixture.state().join("journal.toml")).unwrap();
+    let identity = fs::metadata(&fixture.config).unwrap().ino();
+    let usage = state_usage(&fixture);
+    let plan = prepare_model_update(&fixture.config, "fixture/vendor-model-v2").unwrap();
+    assert!(plan.changed_fields().is_empty());
+    let revision = plan.revision().to_owned();
+    let debug = format!("{plan:?}");
+    assert!(!debug.contains("SYNTHETIC_PRIVATE_SENTINEL_NEVER_PRINT"));
+    assert!(!debug.contains("fixture/vendor-model-v2"));
+    let outcome = commit_model_update(plan).unwrap();
+    assert!(!outcome.changed);
+    assert_eq!(outcome.revision, revision);
+    assert_eq!(fixture.text(), before);
+    assert_eq!(fs::metadata(&fixture.config).unwrap().ino(), identity);
+    assert_eq!(
+        fs::read(fixture.state().join("journal.toml")).unwrap(),
+        journal
+    );
+    assert_eq!(state_usage(&fixture), usage);
+}
+
+#[test]
+fn model_update_rejects_a_stale_plan_after_another_update_even_if_model_cycles_back() {
+    let fixture = Fixture::new(Some(ORIGINAL.as_bytes()));
+    fixture.connect();
+    let stale = prepare_model_update(&fixture.config, "fixture/stale-choice").unwrap();
+    for model in ["fixture/other-choice", "fixture/vendor-model-v2"] {
+        commit_model_update(prepare_model_update(&fixture.config, model).unwrap()).unwrap();
+    }
+    let before = fixture.text();
+    assert_eq!(
+        commit_model_update(stale),
+        Err(TransactionError::OriginalChanged)
+    );
+    assert_eq!(fixture.text(), before);
+    disconnect(&fixture.config).unwrap();
+    assert_eq!(fixture.text(), ORIGINAL);
+}
+
+#[test]
+fn model_update_preserves_external_edits_before_preparation_and_before_commit() {
+    for before_preparation in [false, true] {
+        let fixture = Fixture::new(Some(ORIGINAL.as_bytes()));
+        fixture.connect();
+        let plan = if before_preparation {
+            None
+        } else {
+            Some(prepare_model_update(&fixture.config, "fixture/next").unwrap())
+        };
+        let external = fixture
+            .text()
+            .replace("fixture/vendor-model-v2", "user/external");
+        fs::write(&fixture.config, &external).unwrap();
+        if let Some(plan) = plan {
+            assert_eq!(
+                commit_model_update(plan),
+                Err(TransactionError::OriginalChanged)
+            );
+        } else {
+            assert_eq!(
+                prepare_model_update(&fixture.config, "fixture/next").unwrap_err(),
+                TransactionError::OriginalChanged
+            );
+        }
+        assert_eq!(fixture.text(), external);
+        assert_eq!(
+            connection_status(&fixture.config).unwrap(),
+            ConnectionStatus::Drifted
+        );
+        disconnect(&fixture.config).unwrap();
+        assert_eq!(fixture.document()["model"].as_str(), Some("user/external"));
+    }
+}
+
+#[test]
+fn model_update_does_not_adopt_a_user_owned_magpie_provider() {
+    let original = b"model = 'private/model'\nmodel_provider = 'magpie'\n[model_providers.magpie]\nname = 'My private endpoint'\nbase_url = 'https://user.invalid/v1'\n[model_providers.magpie.http_headers]\nAuthorization = 'SYNTHETIC_PRIVATE_SENTINEL_NEVER_PRINT'\n";
+    let fixture = Fixture::new(Some(original));
+    for _ in 0..2 {
+        assert_eq!(
+            connection_status(&fixture.config).unwrap(),
+            ConnectionStatus::Unmanaged
+        );
+        assert_eq!(
+            prepare_model_update(&fixture.config, "fixture/next").unwrap_err(),
+            TransactionError::NotManaged
+        );
+        assert_eq!(
+            disconnect(&fixture.config),
+            Err(TransactionError::NotManaged)
+        );
+        assert_eq!(fs::read(&fixture.config).unwrap(), original);
+        assert!(!fixture.state().exists());
+    }
+}
+
+#[test]
+fn model_update_preinstall_failure_retains_previous_connection_and_recovery_point() {
+    let fixture = Fixture::new(Some(ORIGINAL.as_bytes()));
+    fixture.connect();
+    let before = fixture.text();
+    let journal = fs::read(fixture.state().join("journal.toml")).unwrap();
+    let plan = crash_candidate::prepare_model_update(&fixture.config, "fixture/next").unwrap();
+    test_support::arm(Point::BeforeInstall, &fixture.config, 1, Action::Fail);
+    assert_eq!(
+        crash_candidate::commit_model_update(plan),
+        Err(crash_candidate::TransactionError::Write)
+    );
+    assert_eq!(fixture.text(), before);
+    assert_eq!(
+        fs::read(fixture.state().join("journal.toml")).unwrap(),
+        journal
+    );
+    assert_eq!(
+        connection_status(&fixture.config).unwrap(),
+        ConnectionStatus::Connected
+    );
+    disconnect(&fixture.config).unwrap();
+    assert_eq!(fixture.text(), ORIGINAL);
+}
+
+#[test]
+fn model_update_interrupted_before_or_after_install_can_restore_the_first_original() {
+    for point in ["install", "parent-sync"] {
+        let fixture = Fixture::new(Some(ORIGINAL.as_bytes()));
+        fixture.connect();
+        // The pending update is deliberately not the first update in the chain.
+        commit_model_update(prepare_model_update(&fixture.config, "fixture/second").unwrap())
+            .unwrap();
+        crash_at(&fixture, "update", point, 1);
+        assert_eq!(fixture.journal()["phase"].as_str(), Some("update-prepared"));
+        assert_eq!(
+            connection_status(&fixture.config).unwrap(),
+            ConnectionStatus::RecoveryRequired
+        );
+        assert_eq!(
+            prepare_model_update(&fixture.config, "fixture/third").unwrap_err(),
+            TransactionError::RecoveryRequired
+        );
+        disconnect(&fixture.config).unwrap();
+        assert_eq!(fixture.text(), ORIGINAL);
+        assert_eq!(
+            connection_status(&fixture.config).unwrap(),
+            ConnectionStatus::Unmanaged
+        );
+    }
+}
+
+#[test]
+fn model_update_ambiguous_recovery_and_tampered_images_never_overwrite_configuration() {
+    for tamper_image in [false, true] {
+        let fixture = Fixture::new(Some(ORIGINAL.as_bytes()));
+        fixture.connect();
+        crash_at(&fixture, "update", "parent-sync", 1);
+        if tamper_image {
+            let journal = fixture.journal();
+            let session = journal["update_session"].as_str().unwrap();
+            let image = fixture.state().join(format!("{session}-update-after.toml"));
+            fs::write(image, b"model = 'fixture/tampered'\n").unwrap();
+        } else {
+            let external = fixture
+                .text()
+                .replace("fixture/updated-model", "user/newer");
+            fs::write(&fixture.config, external).unwrap();
+        }
+        let before = fixture.text();
+        assert_eq!(
+            disconnect(&fixture.config),
+            Err(if tamper_image {
+                TransactionError::StateInvalid
+            } else {
+                TransactionError::RecoveryRequired
+            })
+        );
+        assert_eq!(fixture.text(), before);
+    }
+}
+
+#[test]
+fn model_update_directory_sync_failure_reports_uncertainty_and_retains_recovery() {
+    let fixture = Fixture::new(Some(ORIGINAL.as_bytes()));
+    fixture.connect();
+    let plan = crash_candidate::prepare_model_update(&fixture.config, "fixture/next").unwrap();
+    test_support::arm(
+        Point::BeforeDirectorySync,
+        &fixture.directory,
+        1,
+        Action::Fail,
+    );
+    assert_eq!(
+        crash_candidate::commit_model_update(plan),
+        Err(crash_candidate::TransactionError::CommitUncertain)
+    );
+    assert_eq!(fixture.document()["model"].as_str(), Some("fixture/next"));
+    assert_eq!(
+        connection_status(&fixture.config).unwrap(),
+        ConnectionStatus::RecoveryRequired
+    );
+    disconnect(&fixture.config).unwrap();
+    assert_eq!(fixture.text(), ORIGINAL);
+}
+
+#[test]
+fn model_update_pending_or_final_journal_sync_failure_retains_sufficient_recovery_images() {
+    // Lock durability and recovery-image durability precede both publications.
+    for occurrence in [3, 4] {
+        let fixture = Fixture::new(Some(ORIGINAL.as_bytes()));
+        fixture.connect();
+        let plan = crash_candidate::prepare_model_update(&fixture.config, "fixture/next").unwrap();
+        test_support::arm(
+            Point::BeforeDirectorySync,
+            &fixture.state(),
+            occurrence,
+            Action::Fail,
+        );
+        let expected = if occurrence == 3 {
+            crash_candidate::TransactionError::RecoveryRequired
+        } else {
+            crash_candidate::TransactionError::CommitUncertain
+        };
+        assert_eq!(crash_candidate::commit_model_update(plan), Err(expected));
+        assert_eq!(
+            fixture.document()["model"].as_str(),
+            Some(if occurrence == 3 {
+                "fixture/vendor-model-v2"
+            } else {
+                "fixture/next"
+            })
+        );
+        assert_eq!(
+            connection_status(&fixture.config).unwrap(),
+            if occurrence == 3 {
+                ConnectionStatus::RecoveryRequired
+            } else {
+                ConnectionStatus::Connected
+            }
+        );
+        disconnect(&fixture.config).unwrap();
+        assert_eq!(fixture.text(), ORIGINAL);
+    }
+}
+
+#[test]
+fn model_update_budget_rejection_is_read_only_and_completed_updates_do_not_accumulate_images() {
+    let fixture = Fixture::new(Some(ORIGINAL.as_bytes()));
+    fixture.connect();
+    for index in 0..20 {
+        let model = format!("fixture/model-{index}");
+        commit_model_update(prepare_model_update(&fixture.config, &model).unwrap()).unwrap();
+        assert!(
+            state_usage(&fixture).1 <= 6,
+            "completed updates must retire their transient images"
+        );
+    }
+    let padding = fill_state_bytes(&fixture, 1024);
+    let before = fixture.text();
+    let plan = prepare_model_update(&fixture.config, "fixture/over-budget").unwrap();
+    assert_eq!(
+        commit_model_update(plan),
+        Err(TransactionError::StorageLimit)
+    );
+    assert_eq!(fixture.text(), before);
+    fs::remove_file(padding).unwrap();
+    disconnect(&fixture.config).unwrap();
+    assert_eq!(fixture.text(), ORIGINAL);
 }
 
 #[test]

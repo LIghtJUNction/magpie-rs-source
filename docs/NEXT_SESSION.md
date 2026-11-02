@@ -1,37 +1,15 @@
-# 下次接续：Material 与原版功能对齐
+# 当前接续进度 · 2026-11-02
 
-## 推送分支与合并前提
+已将远端 main 的共享 Provider、系统凭据、偏好持久化、监督网关、Codex 连续换模与 Material 实现整合。旧环境变量 Provider 原型和旧网关进程实现已由共享实现取代；原草稿仍可从 500c441/36086d0 及 wip/usage-recording-20261102 恢复，不把未接入 Usage 文件算成实现。
 
-收尾推送时发现远端 main 已有另一组 Provider、系统钥匙串、监督网关与 Codex 模型更新实现，当前工作从较旧的 f20439b 基线开始，双方已经分叉。因此本轮源码保存到 `wip/material-desktop-20261102`，配方仓库同名分支指向本轮源码；不覆盖远端 main。文档中的功能与测试状态仅对应本轮 checkpoint，不代表远端 main 的完整能力。
+配方保留远端 1.4.0 的全部 99 REQ，并升级到 1.4.1。ISSUE_FEEDBACK.md 记录本项目/源码仓库/Material 无 issue 的查询与三条相关上游报告，区分已修复 #4343、待确认 #4851/#4855 和本地复现。下一阶段优先检查刷新时保留显式模型选择、流内错误归属及 Usage 账务，随后贯通路由和更多 Agent 配置；完整功能与平台目标没有缩小。
 
-下次先对照远端 main 与本分支，保留两边有效工作，在更新的 Provider/网关实现上整合 Material UI，再跑完整测试。不要直接采用某一方文件覆盖另一方，也不要重复开发远端已有功能。
+## 本轮验证
 
+- workspace 327 passed、4 ignored；Material 桌面含交互特性 79 passed、3 ignored。真实监督网关 owner 崩溃测试通过，CLI 无 GUI 启动依赖。
+- 80 个中文真实 GPUI Scene（宽/中/440/360px、浅深主题、10 场景），渲染导出推进模拟时钟，避免把 Material 导航入场动画的透明初帧作为截图。
+- Linux Wayland 原生窗口：供应商新建/刷新后，从 CLI 和实际 Gateway 读到相同模型；真实合成 HTTP 请求返回 fixture-ok；Codex 预览不改文件，连接 a → 直接换 b → 断开恢复最初配置的原始字节，未知字段保留。主题/语言偏好实际保存到磁盘，网关原生停止释放端口、重启产生新实例。
+- 取消和窗口关闭的未保存草稿确认已接到共享 Provider 页面，继续编辑保留内容；明确放弃才擦除尚未保存的密钥。组件回归与原生窗口已检查。
+- 原生 AT-SPI 仅返回应用根，不能宣称读屏通过。自动注入 ASCII 时会被本机拼音组合拦截，结束组合并切直接输入后 Ctrl+A/Tab 正常；这不等同完整 IME 验收。用户对当前视觉尚未认可，全部其他页面、真实账户和多平台仍未完成。
 
-2026-11-02 用户明确反馈“太丑了”“功能比原版少了不少”，随后要求尽快提交推送、结束，下次继续。此 checkpoint 保存工作，不代表用户认可 UI，也不是完成原版重建。
-
-## 当前已经落地
-
-- 保留并提交本轮开始时已有的 Provider 管理与协议转换工作；涉及 core、service、CLI 与 GPUI，未删除既有功能。
-- 组件库固定 `mizorewww/gpui-kit-material@47895b92558883d24e19d54fdeb876ed551d9394`，真实 MaterialButton、NavigationRail、主题与图标资产已接入；桌面工具链 1.99.1，独立 CLI 工作区保留。
-- 新增窗口拥有的 Gateway 子进程：后台启动、绑定回执、端口冲突失败、退出监测、停止并回收、窗口销毁时清理；外部服务不被接管/终止。
-- 初版在 Linux Wayland 真实打开过。用户拒绝该视觉方案；随后修复系统主题初始状态与观察回调、调整导航断点、字号与容器。这些后续更改尚未重新完成实际窗口验收。
-
-## 已验证与未验证
-
-- 初始同一业务源树：workspace 293 passed，5 个 helper ignored；Provider 合并回归 18/18，包含本地跨协议请求。
-- Material 桌面库：77 passed，2 ignored；另显式运行真实 CLI 网关所有权/停止/端口冲突/Drop 清理用例，通过。
-- 收尾重新检查 desktop 全目标与 visual-test 示例。正式发布包、其他操作系统和真实账号未验证。
-- 原始日志与隔离 runtime：`/home/lightjunction/.cache/magpie-rs-build/smoke-20261102/`。不使用用户真实 ~/.codex；测试 key 为合成数据。
-
-## 下一次优先做
-
-1. 先读父配方 MATERIAL_UI.md、COVERAGE.md 与完整递归规格。保留全部 93 条需求。
-2. 对照原版 `yetone/magpie/site/public/img/agents-light.png` 与实际页面。保留“Agent 行列表、行内模型、连接开关”的信息结构；解决空散布局与字体、间距、主题一致性后重新打开窗口检查，不把换组件等同于重构验收。
-3. 核心缺口是多 Agent 的真实配置连接（当前只有 Codex），不是加导航入口。Claude/OpenCode/Gemini 的格式、未知字段与恢复契约需逐项实现和验证。
-4. 路由模块目前是纯决策基础，尚未接入 Gateway、持久化 CRUD 和真实 failover。Usage、Profiles、订阅账户、Library、插件和同步也未交付。
-5. 未接入的 Usage 原型单独保存在源码分支 `wip/usage-recording-20261102`。它不是产品功能；需要补依赖、挂载模块、接入实际请求/流终态、隐私与去重测试和 UI，再合并。
-6. Settings 仍只作用于当前窗口，偏好持久化未做。Provider 目前用环境变量名引用密钥，不支持粘贴密钥至系统钥匙串或订阅登录。
-
-## 发布边界
-
-本轮只提交源码和配方进度，不触发 CI、不生成发行版；源码须先推送，再更新父仓库 gitlink。GitHub 安全页的 5 条历史告警已按测试数据/公开安装式 OAuth 常量关闭；Dependabot 为 0，Code scanning 没有分析记录，不能称已通过源码安全扫描。
+日志/像素/合成状态位于 /home/lightjunction/.cache/magpie-rs-build/smoke-20261102/。使用 scripts/desktop-fixture.py --cli PATH --desktop PATH --output NEW_EXTERNAL_DIR 启动隔离窗口；--reuse 复用本脚本的合成目录进行重启检查。真实认证目录被 bubblewrap 隔离，所有 API 调用只到 loopback fixture。未发布软件包，提交均跳过 CI。

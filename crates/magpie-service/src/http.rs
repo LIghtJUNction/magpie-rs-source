@@ -1,5 +1,5 @@
 use std::io::{self, BufRead, BufReader, Write};
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
 use crate::GatewayLimits;
@@ -36,6 +36,7 @@ enum HeaderError {
 
 enum RequestError {
     BadRequest,
+    Forbidden,
     ContentTooLarge,
     HeadersTooLarge,
 }
@@ -44,9 +45,15 @@ pub(super) fn handle_connection(mut stream: TcpStream, limits: GatewayLimits, mo
     let _ = stream.set_read_timeout(Some(SOCKET_TIMEOUT));
     let _ = stream.set_write_timeout(Some(SOCKET_TIMEOUT));
 
+    let Ok(address) = stream.local_addr() else {
+        return;
+    };
+    if !stream.peer_addr().is_ok_and(|peer| peer.ip().is_loopback()) {
+        return;
+    }
     let request = {
         let mut reader = BufReader::with_capacity(4096, &mut stream);
-        read_request(&mut reader, limits)
+        read_request(&mut reader, limits, address)
     };
 
     match request {
@@ -57,6 +64,13 @@ pub(super) fn handle_connection(mut stream: TcpStream, limits: GatewayLimits, mo
             400,
             "Bad Request",
             "{\"error\":\"bad_request\"}",
+            false,
+        ),
+        Err(RequestError::Forbidden) => write_response(
+            &mut stream,
+            403,
+            "Forbidden",
+            "{\"error\":\"untrusted_local_request\"}",
             false,
         ),
         Err(RequestError::ContentTooLarge) => write_response(
@@ -90,6 +104,7 @@ pub(super) fn write_overloaded(stream: &mut TcpStream) {
 fn read_request(
     reader: &mut impl BufRead,
     limits: GatewayLimits,
+    address: SocketAddr,
 ) -> Result<Option<Request>, RequestError> {
     let header = match read_header(reader) {
         Ok(Some(header)) => header,
@@ -153,10 +168,16 @@ fn read_request(
         {
             return Err(RequestError::BadRequest);
         }
+        if crate::local_access::untrusted_browser_or_proxy_header(name) {
+            return Err(RequestError::Forbidden);
+        }
         if name.eq_ignore_ascii_case("host") {
             host_count += 1;
             if value.is_empty() {
                 return Err(RequestError::BadRequest);
+            }
+            if !crate::local_access::valid_local_host(value, address) {
+                return Err(RequestError::Forbidden);
             }
         } else if name.eq_ignore_ascii_case("content-length") {
             if content_length.is_some() {
@@ -171,7 +192,7 @@ fn read_request(
             return Err(RequestError::BadRequest);
         }
     }
-    if host_count > 1 || (protocol == "HTTP/1.1" && host_count != 1) {
+    if host_count != 1 {
         return Err(RequestError::BadRequest);
     }
 

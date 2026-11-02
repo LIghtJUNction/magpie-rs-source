@@ -22,15 +22,17 @@ use std::{
 
 use async_io::Timer;
 use async_process::Command;
-use futures_lite::{AsyncRead, AsyncReadExt, AsyncWriteExt, future};
+use futures_lite::{AsyncRead, AsyncReadExt, future};
 use serde::Deserialize;
+
+#[path = "cli_bridge/owned_gateway.rs"]
+pub(crate) mod owned_gateway;
 
 const PROTOCOL_VERSION: &str = "0.2.0";
 const VERSION_LINE: &[u8] = b"magpie 0.2.0";
-const STDOUT_LIMIT: usize = 256 * 1024;
-const PROVIDER_INSPECT_LIMIT: usize = 4 * 1024 * 1024;
+const STDOUT_LIMIT: usize = 32 * 1024 * 1024;
 const STDERR_LIMIT: usize = 8 * 1024;
-const MAX_MODELS: usize = 512;
+const MAX_MODELS: usize = magpie_core::provider_store::MAX_TOTAL_MODELS;
 const OWNED_FIELDS: [&str; 7] = [
     "model",
     "model_provider",
@@ -44,9 +46,16 @@ const OWNED_FIELDS: [&str; 7] = [
 // 0: idle; 1: admitted request; 2: cleanup could not be proved complete.
 // A dropped request never admits an unbounded succession of orphaned children.
 static ADMISSION: AtomicU8 = AtomicU8::new(0);
+#[cfg(test)]
+pub(crate) static PROCESS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
+    RefreshProvider {
+        store: PathBuf,
+        id: String,
+        revision: u64,
+    },
     Inspect {
         address: SocketAddr,
     },
@@ -60,6 +69,18 @@ pub enum Request {
         model: String,
         address: SocketAddr,
     },
+    ModelPreview {
+        config: PathBuf,
+        model: String,
+        /// False is a read-only ownership/address observation usable offline.
+        check_catalog: bool,
+    },
+    ModelApply {
+        config: PathBuf,
+        model: String,
+        address: SocketAddr,
+        revision: String,
+    },
     Status {
         config: PathBuf,
     },
@@ -70,12 +91,46 @@ pub enum Request {
 
 impl Request {
     pub const fn is_mutation(&self) -> bool {
-        matches!(self, Self::Apply { .. } | Self::Disconnect { .. })
+        matches!(
+            self,
+            Self::Apply { .. }
+                | Self::ModelApply { .. }
+                | Self::Disconnect { .. }
+                | Self::RefreshProvider { .. }
+        )
     }
 
     fn validate(&self) -> Result<(), BridgeError> {
         match self {
+            Self::RefreshProvider {
+                store,
+                id,
+                revision,
+            } => {
+                validate_config(store)?;
+                if !magpie_core::catalog::valid_provider_id(id) || *revision == u64::MAX {
+                    return Err(BridgeError::new(ErrorKind::ConfigInvalid));
+                }
+            }
             Self::Inspect { address } => validate_address(*address)?,
+            Self::ModelPreview { config, model, .. } | Self::ModelApply { config, model, .. } => {
+                validate_config(config)?;
+                if !writable_model(model) {
+                    return Err(BridgeError::new(ErrorKind::InvalidModel));
+                }
+                if !transactions_supported() {
+                    return Err(BridgeError::new(ErrorKind::PlatformUnsupported));
+                }
+                if let Self::ModelApply {
+                    address, revision, ..
+                } = self
+                {
+                    validate_address(*address)?;
+                    if !valid_revision(revision) {
+                        return Err(BridgeError::new(ErrorKind::ConfigConflict));
+                    }
+                }
+            }
             Self::Preview {
                 config,
                 model,
@@ -108,6 +163,28 @@ impl Request {
             values.iter().map(OsString::from).collect()
         }
         match self {
+            Self::RefreshProvider {
+                store,
+                id,
+                revision,
+            } => {
+                let mut args = words(&["providers", "refresh", id, "--store"]);
+                args.push(store.as_os_str().to_owned());
+                args.extend(words(&["--if-revision", &revision.to_string(), "--json"]));
+                args
+            }
+            Self::ModelPreview { config, model, .. } | Self::ModelApply { config, model, .. } => {
+                let mut args = words(&["agents", "set-model", "codex", "--config"]);
+                args.push(config.as_os_str().to_owned());
+                args.extend(words(&["--model", model]));
+                if let Self::ModelApply { revision, .. } = self {
+                    args.extend(words(&["--apply", "--if-revision", revision]));
+                } else {
+                    args.push("--dry-run".into());
+                }
+                args.push("--json".into());
+                args
+            }
             Self::Inspect { address } => {
                 let mut args = words(&["gateway", "inspect", "--listen"]);
                 args.extend([address.to_string().into(), "--json".into()]);
@@ -162,11 +239,23 @@ pub struct ModelInfo {
 pub struct GatewayInfo {
     pub address: SocketAddr,
     pub models: Vec<ModelInfo>,
+    /// Reported by the running service, never inferred from the CLI version.
+    pub server_version: Option<String>,
+    pub instance_id: Option<String>,
+    pub config_source: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreviewInfo {
     pub config_existed: bool,
+    pub changed_fields: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelUpdateInfo {
+    pub revision: String,
+    pub address: SocketAddr,
+    pub ownership: Ownership,
     pub changed_fields: Vec<String>,
 }
 
@@ -198,9 +287,12 @@ pub struct DisconnectInfo {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reply {
+    ProviderRefreshed { provider_id: String, revision: u64 },
     Inspected(GatewayInfo),
     Previewed(PreviewInfo),
     Applied(PreviewInfo),
+    ModelPreviewed(ModelUpdateInfo),
+    ModelUpdated(ModelUpdateInfo),
     Status(Ownership),
     Disconnected(DisconnectInfo),
 }
@@ -223,8 +315,6 @@ pub enum ErrorKind {
     InvalidReply,
     CliRejected,
     GatewayUnavailable,
-    ProviderSourceMismatch,
-    ProviderCatalogChanged,
     ModelUnavailable,
     ConfigConflict,
     ConfigInvalid,
@@ -255,8 +345,6 @@ impl ErrorKind {
             Self::InvalidReply => "cli_reply_invalid",
             Self::CliRejected => "cli_request_rejected",
             Self::GatewayUnavailable => "gateway_unavailable",
-            Self::ProviderSourceMismatch => "provider_store_mismatch",
-            Self::ProviderCatalogChanged => "provider_catalog_changed",
             Self::ModelUnavailable => "model_unavailable",
             Self::ConfigConflict => "config_conflict",
             Self::ConfigInvalid => "config_invalid",
@@ -360,6 +448,13 @@ pub fn writable_model(model: &str) -> bool {
         && !name.bytes().any(|byte| b"\\\"'?#".contains(&byte))
 }
 
+fn valid_revision(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 pub fn parse_address(value: &str) -> Result<SocketAddr, BridgeError> {
     let address = value
         .trim()
@@ -418,6 +513,8 @@ impl Default for Limits {
 
 struct Admission {
     safe_to_release: bool,
+    global: bool,
+    isolated_poison: Option<Arc<AtomicBool>>,
 }
 
 impl Admission {
@@ -425,16 +522,34 @@ impl Admission {
         match ADMISSION.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire) {
             Ok(_) => Ok(Self {
                 safe_to_release: true,
+                global: true,
+                isolated_poison: None,
             }),
             Err(2) => Err(BridgeError::new(ErrorKind::CleanupPending)),
             Err(_) => Err(BridgeError::new(ErrorKind::Busy)),
+        }
+    }
+
+    // A single Gateway supervisor owns its own bounded probes. Its long-lived
+    // child must never hold, reset, or bypass an active short-command admission.
+    fn isolated(poison: Arc<AtomicBool>) -> Self {
+        Self {
+            safe_to_release: true,
+            global: false,
+            isolated_poison: Some(poison),
         }
     }
 }
 
 impl Drop for Admission {
     fn drop(&mut self) {
-        ADMISSION.store(if self.safe_to_release { 0 } else { 2 }, Ordering::Release);
+        if self.global {
+            ADMISSION.store(if self.safe_to_release { 0 } else { 2 }, Ordering::Release);
+        } else if !self.safe_to_release
+            && let Some(poison) = &self.isolated_poison
+        {
+            poison.store(true, Ordering::Release);
+        }
     }
 }
 
@@ -542,34 +657,6 @@ fn resolve_from(desktop: &Path, explicit: Option<OsString>) -> Result<Executable
     Err(BridgeError::new(ErrorKind::CliMissing))
 }
 
-/// Resolve and version-check the packaged CLI before starting an owned gateway.
-pub(crate) async fn gateway_command() -> Result<std::process::Command, BridgeError> {
-    let mut admission = Admission::acquire()?;
-    let desktop = env::current_exe().map_err(|_| BridgeError::new(ErrorKind::CliMissing))?;
-    let executable = resolve_from(&desktop, env::var_os("MAGPIE_CLI_PATH"))?;
-    let limits = Limits::default();
-    let version = capture(
-        &executable,
-        &["--version".into()],
-        false,
-        &Cancellation::new(),
-        Instant::now() + limits.version,
-        limits,
-        &mut admission,
-    )
-    .await?;
-    let line = version
-        .stdout
-        .strip_suffix(b"\n")
-        .unwrap_or(&version.stdout);
-    let line = line.strip_suffix(b"\r").unwrap_or(line);
-    if !version.success || !version.stderr.is_empty() || line != VERSION_LINE {
-        return Err(BridgeError::new(ErrorKind::CliVersionMismatch));
-    }
-    executable.verify_unchanged()?;
-    Ok(std::process::Command::new(executable.path))
-}
-
 /// Run on the GUI's background executor, retaining the task until it completes.
 /// Use `Cancellation::cancel` instead of dropping a running future. Dropping a
 /// future kills its child but intentionally locks admission until app restart:
@@ -590,72 +677,6 @@ pub async fn run(request: Request, cancellation: Cancellation) -> Result<Reply, 
         admission,
     )
     .await
-}
-
-/// Narrow extension used only by the Provider adapter. No shell/PATH fallback;
-/// version, output/time bounds, cancellation, reaping and uncertainty are shared
-/// with the already validated Codex bridge.
-pub(crate) async fn run_provider(
-    arguments: Vec<OsString>,
-    input: Option<Vec<u8>>,
-    mutation: bool,
-    cancellation: Cancellation,
-) -> Result<(bool, Vec<u8>), BridgeError> {
-    if arguments.first().is_none_or(|arg| arg != "providers")
-        || arguments.last().is_none_or(|arg| arg != "--json")
-        || arguments.len() > 16
-        || input.as_ref().is_some_and(|bytes| bytes.len() > 128 * 1024)
-    {
-        return Err(BridgeError::new(ErrorKind::InvalidReply));
-    }
-    let mut admission = Admission::acquire()?;
-    let desktop = env::current_exe().map_err(|_| BridgeError::new(ErrorKind::CliMissing))?;
-    let executable = resolve_from(&desktop, env::var_os("MAGPIE_CLI_PATH"))?;
-    let limits = Limits {
-        stdout: 4 * 1024 * 1024,
-        ..Limits::default()
-    };
-    let deadline = Instant::now() + limits.request;
-    let version = capture(
-        &executable,
-        &["--version".into()],
-        false,
-        &cancellation,
-        deadline.min(Instant::now() + limits.version),
-        limits,
-        &mut admission,
-    )
-    .await?;
-    let line = version
-        .stdout
-        .strip_suffix(b"\n")
-        .unwrap_or(&version.stdout);
-    let line = line.strip_suffix(b"\r").unwrap_or(line);
-    if !version.success || !version.stderr.is_empty() || line != VERSION_LINE {
-        return Err(BridgeError::new(ErrorKind::CliVersionMismatch));
-    }
-    let captured = capture_with_input(
-        &executable,
-        &arguments,
-        mutation,
-        &cancellation,
-        deadline,
-        limits,
-        &mut admission,
-        input.as_deref(),
-    )
-    .await?;
-    // Stderr is bounded and discarded. Only the typed JSON error envelope can
-    // cross into presentation; it never displays arbitrary process output.
-    if captured.success && !captured.stderr.is_empty() {
-        return Err(BridgeError::after_spawn(ErrorKind::InvalidReply, mutation));
-    }
-    let json = if !captured.success && captured.stdout.is_empty() {
-        captured.stderr
-    } else {
-        captured.stdout
-    };
-    Ok((captured.success, json))
 }
 
 async fn run_resolved(
@@ -686,17 +707,14 @@ async fn run_resolved(
         return Err(BridgeError::new(ErrorKind::CliVersionMismatch));
     }
 
-    // Status/disconnect stay offline. Model operations validate the frozen
-    // catalog plus the additive Provider identity/capability contract on this
-    // same executable and deadline. A managed Chat-only row cannot enter the
-    // Codex picker or pass a later Preview/Apply by reusing an old selection.
-    if let Some(address) = match &request {
-        Request::Inspect { address }
-        | Request::Preview { address, .. }
-        | Request::Apply { address, .. } => Some(*address),
-        Request::Status { .. } | Request::Disconnect { .. } => None,
-    } {
-        let inspect = Request::Inspect { address };
+    // The frozen status/disconnect contract must remain usable offline. Query
+    // and writes involving a model additionally prove inspect capability and
+    // re-check the chosen catalog entry on this same executable each time.
+    if let Request::Preview { model, address, .. }
+    | Request::Apply { model, address, .. }
+    | Request::ModelApply { model, address, .. } = &request
+    {
+        let inspect = Request::Inspect { address: *address };
         let output = capture(
             &executable,
             &inspect.arguments(),
@@ -710,23 +728,8 @@ async fn run_resolved(
         let Reply::Inspected(gateway) = decode(&inspect, output)? else {
             return Err(BridgeError::new(ErrorKind::InvalidReply));
         };
-        let gateway = inspect_provider_catalog(
-            gateway,
-            &executable,
-            &cancellation,
-            deadline,
-            limits,
-            &mut admission,
-        )
-        .await?;
-        match &request {
-            Request::Inspect { .. } => return Ok(Reply::Inspected(gateway)),
-            Request::Preview { model, .. } | Request::Apply { model, .. } => {
-                if !gateway.models.iter().any(|item| item.id == *model) {
-                    return Err(BridgeError::new(ErrorKind::ModelUnavailable));
-                }
-            }
-            _ => unreachable!("only catalog requests enter this branch"),
+        if !gateway.models.iter().any(|item| item.id == *model) {
+            return Err(BridgeError::new(ErrorKind::ModelUnavailable));
         }
     }
     let output = capture(
@@ -739,74 +742,37 @@ async fn run_resolved(
         &mut admission,
     )
     .await?;
-    decode(&request, output)
-}
-
-async fn inspect_provider_catalog(
-    legacy: GatewayInfo,
-    executable: &Executable,
-    cancellation: &Cancellation,
-    deadline: Instant,
-    limits: Limits,
-    admission: &mut Admission,
-) -> Result<GatewayInfo, BridgeError> {
-    let path = magpie_core::providers::ProviderStore::default_path()
-        .map_err(|_| BridgeError::new(ErrorKind::ProviderSourceMismatch))?;
-    let arguments = vec![
-        "gateway".into(),
-        "provider-inspect".into(),
-        "--store".into(),
-        path.as_os_str().to_owned(),
-        "--listen".into(),
-        legacy.address.to_string().into(),
-        "--json".into(),
-    ];
-    let captured = capture(
-        executable,
-        &arguments,
-        false,
-        cancellation,
-        deadline,
-        Limits {
-            stdout: limits.stdout.saturating_mul(16).min(PROVIDER_INSPECT_LIMIT),
-            ..limits
+    let reply = decode(&request, output)?;
+    if let (
+        Request::ModelPreview {
+            model,
+            check_catalog: true,
+            ..
         },
-        admission,
-    )
-    .await?;
-    if !captured.success {
-        if !captured.stdout.is_empty() {
-            return Err(BridgeError::new(ErrorKind::InvalidReply));
-        }
-        let wire: ErrorWire = serde_json::from_slice(&captured.stderr)
-            .map_err(|_| BridgeError::new(ErrorKind::CliRejected))?;
-        if wire.version != PROTOCOL_VERSION {
-            return Err(BridgeError::new(ErrorKind::CliVersionMismatch));
-        }
-        // A positively identified legacy forward catalog is the only fallback.
-        // Missing commands, partial metadata and wrong stores never take it.
-        if wire.error.code == "provider_gateway_unmanaged" {
-            return Ok(legacy);
-        }
-        let kind = match wire.error.code.as_str() {
-            "provider_store_mismatch" => ErrorKind::ProviderSourceMismatch,
-            "provider_catalog_changed" | "provider_read_conflict" => {
-                ErrorKind::ProviderCatalogChanged
-            }
-            "provider_gateway_inspect_timeout" => ErrorKind::TimedOut,
-            "provider_gateway_unavailable" => ErrorKind::GatewayUnavailable,
-            "provider_gateway_invalid_response" => ErrorKind::InvalidReply,
-            _ => ErrorKind::CliRejected,
+        Reply::ModelPreviewed(info),
+    ) = (&request, &reply)
+    {
+        let inspect = Request::Inspect {
+            address: info.address,
         };
-        return Err(BridgeError::new(kind));
+        let output = capture(
+            &executable,
+            &inspect.arguments(),
+            false,
+            &cancellation,
+            deadline,
+            limits,
+            &mut admission,
+        )
+        .await?;
+        let Reply::Inspected(gateway) = decode(&inspect, output)? else {
+            return Err(BridgeError::new(ErrorKind::InvalidReply));
+        };
+        if !gateway.models.iter().any(|item| item.id == *model) {
+            return Err(BridgeError::new(ErrorKind::ModelUnavailable));
+        }
     }
-    if !captured.stderr.is_empty() {
-        return Err(BridgeError::new(ErrorKind::InvalidReply));
-    }
-    let expected_identity = magpie_core::providers::ProviderStore::new(path)
-        .identity()
-        .map_err(|_| BridgeError::new(ErrorKind::ProviderSourceMismatch))?;
-    decode_provider_catalog(&captured.stdout, legacy, &expected_identity)
+    Ok(reply)
 }
 
 // Not Debug: captured bytes can contain malicious output or private values.
@@ -858,32 +824,6 @@ async fn capture(
     limits: Limits,
     admission: &mut Admission,
 ) -> Result<Captured, BridgeError> {
-    capture_with_input(
-        executable,
-        arguments,
-        mutation,
-        cancellation,
-        deadline,
-        limits,
-        admission,
-        None,
-    )
-    .await
-}
-
-// Provider mutations share the exact same child lifecycle and admission gate.
-// Input is bounded structured metadata, never placed on a command line.
-#[allow(clippy::too_many_arguments)]
-async fn capture_with_input(
-    executable: &Executable,
-    arguments: &[OsString],
-    mutation: bool,
-    cancellation: &Cancellation,
-    deadline: Instant,
-    limits: Limits,
-    admission: &mut Admission,
-    input: Option<&[u8]>,
-) -> Result<Captured, BridgeError> {
     if cancellation.is_cancelled() {
         return Err(BridgeError::new(ErrorKind::Cancelled));
     }
@@ -900,11 +840,7 @@ async fn capture_with_input(
     }
     let mut command = Command::from(native);
     command
-        .stdin(if input.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
@@ -921,29 +857,15 @@ async fn capture_with_input(
     admission.safe_to_release = false;
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let stdin = child.stdin.take();
     let result = {
         // Dropping this future closes Unix async pipes. There are no reader
         // threads to join if a descendant keeps its inherited writer open.
         let collect = async {
             let stdout = stdout.ok_or(ErrorKind::InvalidReply)?;
             let stderr = stderr.ok_or(ErrorKind::InvalidReply)?;
-            let write_input = async {
-                if let Some(input) = input {
-                    let mut pipe = stdin.ok_or(ErrorKind::InvalidReply)?;
-                    pipe.write_all(input)
-                        .await
-                        .map_err(|_| ErrorKind::InvalidReply)?;
-                    pipe.close().await.map_err(|_| ErrorKind::InvalidReply)?;
-                }
-                Ok::<(), ErrorKind>(())
-            };
-            let ((stdout, stderr), ()) = future::try_zip(
-                future::try_zip(
-                    read_bounded(stdout, limits.stdout),
-                    read_bounded(stderr, limits.stderr),
-                ),
-                write_input,
+            let (stdout, stderr) = future::try_zip(
+                read_bounded(stdout, limits.stdout),
+                read_bounded(stderr, limits.stderr),
             )
             .await?;
             let status = child.status().await.map_err(|_| ErrorKind::InvalidReply)?;
@@ -1002,6 +924,12 @@ struct GatewayWire {
     mode: String,
     provider_health: String,
     models: Vec<ModelWire>,
+    #[serde(default)]
+    server_version: Option<String>,
+    #[serde(default)]
+    instance_id: Option<String>,
+    #[serde(default)]
+    config_source: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1013,124 +941,6 @@ struct ModelWire {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ProviderInspectWire {
-    version: String,
-    provider_gateway: ProviderGatewayWire,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProviderGatewayWire {
-    address: String,
-    mode: String,
-    store_identity: String,
-    revision: u64,
-    token: String,
-    provider_health: String,
-    models: Vec<ProviderModelWire>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ProviderModelWire {
-    id: String,
-    source: String,
-    native_endpoints: Vec<String>,
-    client_endpoints: Vec<String>,
-}
-
-fn decode_provider_catalog(
-    bytes: &[u8],
-    legacy: GatewayInfo,
-    expected_identity: &str,
-) -> Result<GatewayInfo, BridgeError> {
-    let invalid = || BridgeError::new(ErrorKind::InvalidReply);
-    let wire: ProviderInspectWire = serde_json::from_slice(bytes).map_err(|_| invalid())?;
-    if wire.version != PROTOCOL_VERSION {
-        return Err(BridgeError::new(ErrorKind::CliVersionMismatch));
-    }
-    let gateway = wire.provider_gateway;
-    let address = parse_address(&gateway.address).map_err(|_| invalid())?;
-    let digest = |value: &str| {
-        value.len() == 64
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    };
-    let token_prefix = format!("{}:", gateway.revision);
-    if address != legacy.address
-        || gateway.mode != "provider_store"
-        || gateway.provider_health != "not_probed"
-        || gateway.models.len() > MAX_MODELS
-        || gateway.revision > i64::MAX as u64
-        || !gateway
-            .token
-            .strip_prefix(&token_prefix)
-            .is_some_and(digest)
-        || !gateway
-            .store_identity
-            .strip_prefix("provider-store-v1:")
-            .is_some_and(digest)
-    {
-        return Err(invalid());
-    }
-    if gateway.store_identity != expected_identity {
-        return Err(BridgeError::new(ErrorKind::ProviderSourceMismatch));
-    }
-    let endpoints_valid = |values: &[String]| {
-        values.len() <= 4
-            && values
-                .iter()
-                .all(|value| matches!(value.as_str(), "chat" | "responses" | "messages" | "gemini"))
-            && values.iter().collect::<HashSet<_>>().len() == values.len()
-    };
-    let mut seen = HashSet::with_capacity(gateway.models.len());
-    for model in &gateway.models {
-        let Some((provider, name)) = model.id.split_once('/') else {
-            return Err(invalid());
-        };
-        if model.source != "configured"
-            || !magpie_core::providers::is_valid_provider_id(provider)
-            || !magpie_core::providers::is_valid_model_id(name)
-            || !seen.insert(model.id.as_str())
-            || model.native_endpoints.len() > 1
-            || !endpoints_valid(&model.native_endpoints)
-            || !endpoints_valid(&model.client_endpoints)
-            || (model.native_endpoints.is_empty() && !model.client_endpoints.is_empty())
-            || model
-                .native_endpoints
-                .iter()
-                .any(|native| !model.client_endpoints.contains(native))
-        {
-            return Err(invalid());
-        }
-    }
-    let previous: HashSet<_> = legacy
-        .models
-        .iter()
-        .map(|model| model.id.as_str())
-        .collect();
-    if previous != seen {
-        return Err(BridgeError::new(ErrorKind::ProviderCatalogChanged));
-    }
-    Ok(GatewayInfo {
-        address,
-        models: gateway
-            .models
-            .into_iter()
-            .filter(|model| {
-                model
-                    .client_endpoints
-                    .iter()
-                    .any(|endpoint| endpoint == "responses")
-            })
-            .map(|model| ModelInfo { id: model.id })
-            .collect(),
-    })
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ConnectWire {
     operation: String,
     candidate: bool,
@@ -1138,6 +948,21 @@ struct ConnectWire {
     writes_performed: bool,
     config_existed: bool,
     state: String,
+    gateway_readiness: String,
+    provider_readiness: String,
+    agent_execution: String,
+    changed_fields: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelUpdateWire {
+    operation: String,
+    dry_run: bool,
+    writes_performed: bool,
+    state: String,
+    revision: String,
+    gateway_address: String,
     gateway_readiness: String,
     provider_readiness: String,
     agent_execution: String,
@@ -1192,6 +1017,16 @@ fn catalog_model(model: &str) -> bool {
         && !name.bytes().any(|byte| b"\\\"'?#".contains(&byte))
 }
 
+fn identity_field(value: &Option<String>) -> bool {
+    value.as_ref().is_none_or(|value| {
+        !value.is_empty()
+            && value.len() <= 128
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._-+".contains(&byte))
+    })
+}
+
 fn decode(request: &Request, captured: Captured) -> Result<Reply, BridgeError> {
     let error = |kind| BridgeError::after_spawn(kind, request.is_mutation());
     if !captured.success {
@@ -1209,6 +1044,29 @@ fn decode(request: &Request, captured: Captured) -> Result<Reply, BridgeError> {
         return Err(error(ErrorKind::InvalidReply));
     }
     match request {
+        Request::RefreshProvider { id, revision, .. } => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Refreshed {
+                version: String,
+                operation: String,
+                provider_id: String,
+                revision: u64,
+            }
+            let wire: Refreshed = serde_json::from_slice(&captured.stdout)
+                .map_err(|_| error(ErrorKind::InvalidReply))?;
+            if wire.version != PROTOCOL_VERSION
+                || wire.operation != "providers.refresh"
+                || &wire.provider_id != id
+                || wire.revision != revision + 1
+            {
+                return Err(error(ErrorKind::InvalidReply));
+            }
+            Ok(Reply::ProviderRefreshed {
+                provider_id: wire.provider_id,
+                revision: wire.revision,
+            })
+        }
         Request::Inspect { address } => {
             let wire: InspectWire = serde_json::from_slice(&captured.stdout)
                 .map_err(|_| error(ErrorKind::InvalidReply))?;
@@ -1221,6 +1079,9 @@ fn decode(request: &Request, captured: Captured) -> Result<Reply, BridgeError> {
                 || wire.gateway.mode != "forward_candidate"
                 || wire.gateway.provider_health != "not_probed"
                 || wire.gateway.models.len() > MAX_MODELS
+                || !identity_field(&wire.gateway.server_version)
+                || !identity_field(&wire.gateway.instance_id)
+                || !identity_field(&wire.gateway.config_source)
             {
                 return Err(error(ErrorKind::InvalidReply));
             }
@@ -1235,6 +1096,9 @@ fn decode(request: &Request, captured: Captured) -> Result<Reply, BridgeError> {
             }
             Ok(Reply::Inspected(GatewayInfo {
                 address: actual,
+                server_version: wire.gateway.server_version,
+                instance_id: wire.gateway.instance_id,
+                config_source: wire.gateway.config_source,
                 models: wire
                     .gateway
                     .models
@@ -1242,6 +1106,46 @@ fn decode(request: &Request, captured: Captured) -> Result<Reply, BridgeError> {
                     .map(|model| ModelInfo { id: model.id })
                     .collect(),
             }))
+        }
+        Request::ModelPreview { .. } | Request::ModelApply { .. } => {
+            let wire: ModelUpdateWire = serde_json::from_slice(&captured.stdout)
+                .map_err(|_| error(ErrorKind::InvalidReply))?;
+            let apply = request.is_mutation();
+            let address =
+                parse_address(&wire.gateway_address).map_err(|_| error(ErrorKind::InvalidReply))?;
+            if wire.operation != "agents.set-model"
+                || wire.dry_run == apply
+                || wire.writes_performed != apply
+                || !valid_revision(&wire.revision)
+                || (wire.state != "connected" && !(apply && wire.state == "drifted"))
+                || wire.gateway_readiness
+                    != if apply {
+                        "listener_and_configured_model_checked"
+                    } else {
+                        "not_checked"
+                    }
+                || wire.provider_readiness != "not_probed"
+                || wire.agent_execution != "not_checked"
+                || (!wire.changed_fields.is_empty() && wire.changed_fields != ["model"])
+                || matches!(request, Request::ModelApply { address: expected, .. } if *expected != address)
+            {
+                return Err(error(ErrorKind::InvalidReply));
+            }
+            let info = ModelUpdateInfo {
+                revision: wire.revision,
+                address,
+                ownership: if wire.state == "connected" {
+                    Ownership::Connected
+                } else {
+                    Ownership::Drifted
+                },
+                changed_fields: wire.changed_fields,
+            };
+            Ok(if apply {
+                Reply::ModelUpdated(info)
+            } else {
+                Reply::ModelPreviewed(info)
+            })
         }
         Request::Preview { .. } | Request::Apply { .. } => {
             let wire: ConnectWire = serde_json::from_slice(&captured.stdout)
@@ -1448,6 +1352,31 @@ mod tests {
     }
 
     #[test]
+    fn provider_refresh_reply_is_bound_to_provider_and_next_revision() {
+        let request = Request::RefreshProvider {
+            store: config(),
+            id: "fixture".into(),
+            revision: 12,
+        };
+        let good = json!({"version":"0.2.0","operation":"providers.refresh","provider_id":"fixture","revision":13});
+        assert!(matches!(
+            parse_ok(&request, good.clone()),
+            Ok(Reply::ProviderRefreshed { revision: 13, .. })
+        ));
+        for (key, value) in [
+            ("provider_id", json!("other")),
+            ("revision", json!(12)),
+            ("operation", json!("providers.update")),
+        ] {
+            let mut bad = good.clone();
+            bad[key] = value;
+            assert!(parse_ok(&request, bad).is_err());
+        }
+        assert!(request.is_mutation());
+        assert_eq!(request.arguments()[1], "refresh");
+    }
+
+    #[test]
     fn accepts_only_literal_loopback_and_nonzero_ports() {
         for valid in [
             "127.0.0.1:1",
@@ -1616,108 +1545,6 @@ mod tests {
         assert!(parse_ok(&request, empty).is_ok());
     }
 
-    fn managed_catalog_fixture() -> (GatewayInfo, serde_json::Value, String) {
-        let identity = format!("provider-store-v1:{}", "a".repeat(64));
-        let ids = ["local/chat@2026", "local/response", "local/unintegrated"];
-        let legacy = GatewayInfo {
-            address: address(),
-            models: ids
-                .iter()
-                .map(|id| ModelInfo { id: (*id).into() })
-                .collect(),
-        };
-        let wire = json!({"version":"0.2.0","provider_gateway":{
-        "address":"127.0.0.1:3425","mode":"provider_store",
-        "store_identity":identity,"revision":7,"token":format!("7:{}","b".repeat(64)),
-        "provider_health":"not_probed","models":[
-            {"id":ids[0],"source":"configured","native_endpoints":["chat"],"client_endpoints":["chat"]},
-            {"id":ids[1],"source":"configured","native_endpoints":["responses"],"client_endpoints":["responses"]},
-            {"id":ids[2],"source":"configured","native_endpoints":[],"client_endpoints":[]}
-        ]}});
-        (legacy, wire, identity)
-    }
-
-    #[test]
-    fn managed_picker_requires_responses_capability_and_allows_real_conversion() {
-        let (legacy, mut wire, identity) = managed_catalog_fixture();
-        let result = decode_provider_catalog(
-            &serde_json::to_vec(&wire).unwrap(),
-            legacy.clone(),
-            &identity,
-        )
-        .unwrap();
-        assert_eq!(
-            result.models,
-            vec![ModelInfo {
-                id: "local/response".into()
-            }]
-        );
-        wire["provider_gateway"]["models"][0]["client_endpoints"] =
-            json!(["chat", "responses", "messages", "gemini"]);
-        let result = decode_provider_catalog(
-            &serde_json::to_vec(&wire).unwrap(),
-            legacy.clone(),
-            &identity,
-        )
-        .unwrap();
-        assert_eq!(result.models.len(), 2);
-        assert_eq!(result.models[0].id, "local/chat@2026");
-        wire["provider_gateway"]["models"][1]["native_endpoints"] = json!(["chat"]);
-        wire["provider_gateway"]["models"][1]["client_endpoints"] = json!(["chat"]);
-        wire["provider_gateway"]["models"][0]["client_endpoints"] = json!(["chat"]);
-        assert!(
-            decode_provider_catalog(&serde_json::to_vec(&wire).unwrap(), legacy, &identity)
-                .unwrap()
-                .models
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn managed_picker_rejects_wrong_store_token_catalog_and_forged_capabilities() {
-        let (legacy, wire, identity) = managed_catalog_fixture();
-        let decode = |value: &serde_json::Value| {
-            decode_provider_catalog(
-                &serde_json::to_vec(value).unwrap(),
-                legacy.clone(),
-                &identity,
-            )
-        };
-        let mut changed = wire.clone();
-        changed["provider_gateway"]["store_identity"] =
-            format!("provider-store-v1:{}", "c".repeat(64)).into();
-        assert_eq!(
-            decode(&changed).unwrap_err().kind,
-            ErrorKind::ProviderSourceMismatch
-        );
-        let mut changed = wire.clone();
-        changed["provider_gateway"]["models"]
-            .as_array_mut()
-            .unwrap()
-            .pop();
-        assert_eq!(
-            decode(&changed).unwrap_err().kind,
-            ErrorKind::ProviderCatalogChanged
-        );
-        for field in ["token", "store_identity"] {
-            let mut changed = wire.clone();
-            changed["provider_gateway"][field] = "invalid".into();
-            assert_eq!(decode(&changed).unwrap_err().kind, ErrorKind::InvalidReply);
-        }
-        for endpoints in [
-            json!(["responses", "responses"]),
-            json!(["invented"]),
-            json!(["responses"]),
-        ] {
-            let mut changed = wire.clone();
-            changed["provider_gateway"]["models"][2]["client_endpoints"] = endpoints;
-            assert_eq!(decode(&changed).unwrap_err().kind, ErrorKind::InvalidReply);
-        }
-        let mut changed = wire;
-        changed["provider_gateway"]["models"][0]["id"] = "local/bad?secret=value".into();
-        assert_eq!(decode(&changed).unwrap_err().kind, ErrorKind::InvalidReply);
-    }
-
     #[test]
     fn rejects_wrong_inspect_address_mode_health_source_and_version() {
         let request = Request::Inspect { address: address() };
@@ -1860,6 +1687,67 @@ mod tests {
         let error = parse_ok(&apply(), connect_json(false)).expect_err("apply is never dry run");
         assert_eq!(error.kind, ErrorKind::InvalidReply);
         assert!(error.mutation_may_have_run);
+    }
+
+    #[test]
+    fn model_update_receipts_require_exact_revision_fields_and_managed_address() {
+        let preview = Request::ModelPreview {
+            config: config(),
+            model: "local/next".into(),
+            check_catalog: true,
+        };
+        let apply = Request::ModelApply {
+            config: config(),
+            model: "local/next".into(),
+            address: address(),
+            revision: "a".repeat(64),
+        };
+        let wire = |apply: bool| {
+            json!({"operation":"agents.set-model","dry_run":!apply,"writes_performed":apply,
+            "state":"connected","revision":"b".repeat(64),"gateway_address":"127.0.0.1:3425",
+            "gateway_readiness": if apply {"listener_and_configured_model_checked"} else {"not_checked"},
+            "provider_readiness":"not_probed","agent_execution":"not_checked","changed_fields":["model"]})
+        };
+        assert!(matches!(
+            parse_ok(&preview, wire(false)).unwrap(),
+            Reply::ModelPreviewed(_)
+        ));
+        assert!(matches!(
+            parse_ok(&apply, wire(true)).unwrap(),
+            Reply::ModelUpdated(_)
+        ));
+        let args = apply.arguments();
+        assert!(args.iter().any(|arg| arg == "--if-revision"));
+        assert!(!args.iter().any(|arg| arg == "--gateway"));
+        for (field, value) in [
+            ("revision", json!("x".repeat(64))),
+            ("revision", json!("A".repeat(64))),
+            ("revision", json!("a".repeat(63))),
+            ("writes_performed", json!(true)),
+            ("changed_fields", json!(["model", "model_provider"])),
+            ("state", json!("drifted")),
+            ("gateway_address", json!("0.0.0.0:3425")),
+        ] {
+            let mut invalid = wire(false);
+            invalid[field] = value;
+            assert_eq!(
+                parse_ok(&preview, invalid).unwrap_err().kind,
+                ErrorKind::InvalidReply,
+                "{field}"
+            );
+        }
+        let mut mismatch = wire(true);
+        mismatch["gateway_address"] = json!("127.0.0.1:4321");
+        assert!(
+            parse_ok(&apply, mismatch)
+                .unwrap_err()
+                .mutation_may_have_run
+        );
+        let mut drifted = wire(true);
+        drifted["state"] = json!("drifted");
+        assert!(
+            matches!(parse_ok(&apply, drifted).unwrap(), Reply::ModelUpdated(info) if info.ownership == Ownership::Drifted)
+        );
     }
 
     #[test]
@@ -2091,6 +1979,9 @@ mod tests {
         // admission gate is exercised without test runner races or env changes.
         #[test]
         fn real_isolated_process_protocol_deadline_cancel_output_and_reaping() {
+            let _guard = PROCESS_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             let fixture = Fixture::new();
             future::block_on(async {
                 fixture.mode("ok");
@@ -2371,9 +2262,6 @@ fn main() {
  }
  if mode=="invalid-json" {println!("{{}} {{}}");return;}
  if mode=="secret-error" {eprintln!("{{\"version\":\"0.2.0\",\"error\":{{\"code\":\"untrusted\",\"message\":\"PRIVATE_CANARY\"}}}}");std::process::exit(2);}
- if args.get(1).map(String::as_str)==Some("provider-inspect") {
-   eprintln!("{{\"version\":\"0.2.0\",\"error\":{{\"code\":\"provider_gateway_unmanaged\",\"message\":\"Provider operation failed.\"}}}}");std::process::exit(2);
- }
  if inspect {
    let model=if mode=="missing-model" {"local/removed"} else {"local/model"};
    println!("{{\"version\":\"0.2.0\",\"gateway\":{{\"address\":\"127.0.0.1:3425\",\"mode\":\"forward_candidate\",\"provider_health\":\"not_probed\",\"models\":[{{\"id\":\"{model}\",\"source\":\"configured\"}}]}}}}");

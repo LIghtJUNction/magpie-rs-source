@@ -60,6 +60,7 @@ pub(crate) struct TextInput {
     label: SharedString,
     colors: InputColors,
     disabled: bool,
+    secret: bool,
     dragging: bool,
     last_line: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
@@ -97,6 +98,7 @@ impl TextInput {
                 selected: 0xeef2ff,
             },
             disabled: false,
+            secret: false,
             dragging: false,
             last_line: None,
             last_bounds: None,
@@ -104,6 +106,36 @@ impl TextInput {
             native_state_dirty: false,
             ime_keys: ImeKeyGuard::default(),
             a11y_run_id: Rc::new(Cell::new(None)),
+        }
+    }
+
+    /// Password mode keeps the real value out of paint, accessibility and
+    /// clipboard output. Only the owning form reads `text()` when saving.
+    pub(crate) fn set_limit(&mut self, limit: usize) {
+        if let Ok(edit) = EditBuffer::with_limit(self.edit.text(), limit) {
+            self.edit = edit;
+        }
+    }
+
+    pub(crate) fn set_secret(&mut self, secret: bool) {
+        self.secret = secret;
+        self.last_line = None;
+        self.native_state_dirty = true;
+    }
+
+    fn display_text(&self) -> String {
+        if self.secret {
+            mask_text(self.edit.text())
+        } else {
+            self.edit.text().to_owned()
+        }
+    }
+
+    fn display_index(&self, byte: usize) -> usize {
+        if self.secret {
+            self.edit.byte_to_scalar(byte) * '•'.len_utf8()
+        } else {
+            byte
         }
     }
 
@@ -185,7 +217,7 @@ impl TextInput {
     }
 
     fn copy(&self, cx: &mut Context<Self>) {
-        if !self.edit.selection().is_empty() {
+        if !self.secret && !self.edit.selection().is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(
                 self.edit.selected_text().to_owned(),
             ));
@@ -324,11 +356,16 @@ impl TextInput {
         if self.edit.text().is_empty() {
             return 0;
         }
-        if line.text.as_ref() != self.edit.text() {
+        if line.text.as_ref() != self.display_text() {
             return self.edit.cursor();
         }
-        self.edit
-            .nearest_grapheme(line.closest_index_for_x(position.x - bounds.left() + self.scroll_x))
+        let index = line.closest_index_for_x(position.x - bounds.left() + self.scroll_x);
+        let byte = if self.secret {
+            self.edit.scalar_to_byte(index / '•'.len_utf8())
+        } else {
+            index
+        };
+        self.edit.nearest_grapheme(byte)
     }
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -387,7 +424,12 @@ impl EntityInputHandler for TextInput {
     ) -> Option<String> {
         let bytes = self.edit.bytes_for_utf16(range);
         *adjusted_range = Some(self.edit.utf16_range(bytes.clone()));
-        Some(self.edit.text()[bytes].to_owned())
+        Some(if self.secret {
+            // Match native UTF-16 lengths without exposing password characters.
+            "*".repeat(self.edit.text()[bytes].encode_utf16().count())
+        } else {
+            self.edit.text()[bytes].to_owned()
+        })
     }
 
     fn selected_text_range(
@@ -462,13 +504,13 @@ impl EntityInputHandler for TextInput {
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let line = self.last_line.as_ref()?;
-        if !self.edit.text().is_empty() && line.text.as_ref() != self.edit.text() {
+        if !self.edit.text().is_empty() && line.text.as_ref() != self.display_text() {
             return None;
         }
         let range = self.edit.bytes_for_utf16(range_utf16);
         let origin_x = bounds.left() - self.scroll_x;
-        let first = origin_x + line.x_for_index(range.start);
-        let last = origin_x + line.x_for_index(range.end);
+        let first = origin_x + line.x_for_index(self.display_index(range.start));
+        let last = origin_x + line.x_for_index(self.display_index(range.end));
         let start = first.min(last).max(bounds.left()).min(bounds.right());
         let end = first.max(last).max(start).min(bounds.right());
         Some(Bounds::new(
@@ -599,7 +641,7 @@ impl Element for TextElement {
         let text: SharedString = if is_placeholder {
             input.placeholder.clone()
         } else {
-            input.edit.text().to_owned().into()
+            input.display_text().into()
         };
         let color = if is_placeholder || input.disabled {
             input.colors.muted
@@ -615,6 +657,7 @@ impl Element for TextElement {
             strikethrough: None,
         };
         let runs = if let Some(marked) = input.edit.marked() {
+            let marked = input.display_index(marked.start)..input.display_index(marked.end);
             vec![
                 TextRun {
                     len: marked.start,
@@ -647,7 +690,7 @@ impl Element for TextElement {
         let caret_x = if is_placeholder {
             px(0.)
         } else {
-            line.x_for_index(input.edit.cursor())
+            line.x_for_index(input.display_index(input.edit.cursor()))
         };
         let viewport = (bounds.size.width - px(2.)).max(px(0.));
         let mut scroll_x = if is_placeholder {
@@ -666,8 +709,8 @@ impl Element for TextElement {
         let origin = point(bounds.left() - scroll_x, bounds.top());
         let range = input.edit.selection();
         let selection = (!range.is_empty()).then(|| {
-            let first = origin.x + line.x_for_index(range.start);
-            let last = origin.x + line.x_for_index(range.end);
+            let first = origin.x + line.x_for_index(input.display_index(range.start));
+            let last = origin.x + line.x_for_index(input.display_index(range.end));
             fill(
                 Bounds::from_corners(
                     point(first.min(last), bounds.top()),
@@ -765,7 +808,7 @@ impl Render for TextInput {
         }
         let colors = self.colors;
         let disabled = self.disabled;
-        let text = self.edit.text().to_owned();
+        let text = self.display_text();
         let anchor = self.edit.byte_to_scalar(self.edit.anchor());
         let cursor = self.edit.byte_to_scalar(self.edit.cursor());
         let run_id = self.a11y_run_id.clone();
@@ -777,7 +820,11 @@ impl Render for TextInput {
             .track_focus(&self.focus_handle)
             .tab_index(0)
             .tab_stop(!disabled)
-            .role(Role::TextInput)
+            .role(if self.secret {
+                Role::PasswordInput
+            } else {
+                Role::TextInput
+            })
             .aria_label(self.label.clone())
             .aria_value(text.clone())
             .aria_placeholder(self.placeholder.clone())
@@ -875,5 +922,42 @@ impl Render for TextInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
             .child(TextElement { input: cx.entity() })
+    }
+}
+
+fn mask_text(value: &str) -> String {
+    "•".repeat(value.chars().count())
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::mask_text;
+
+    #[test]
+    fn secret_presentation_contains_no_original_characters() {
+        assert_eq!(mask_text("sk-test-密钥😀"), "•".repeat(11));
+        assert_eq!(mask_text(""), "");
+    }
+
+    #[cfg(feature = "visual-test")]
+    #[gpui::test]
+    fn copying_a_secret_keeps_the_clipboard_unchanged(cx: &mut gpui::TestAppContext) {
+        use gpui::{AppContext, ClipboardItem};
+        let input = cx.new(|cx| {
+            let mut input =
+                super::TextInput::new("test-secret", "synthetic-secret", "", "API key", cx);
+            input.set_secret(true);
+            input.edit.select_all();
+            input
+        });
+        cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string("clipboard-before".into())));
+        input.update(cx, |input, cx| {
+            input.copy(cx);
+            assert_eq!(input.display_text(), "•".repeat(16));
+        });
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("clipboard-before".into())
+        );
     }
 }

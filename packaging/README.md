@@ -35,25 +35,38 @@ The independent jobs build:
 | aarch64-pc-windows-msvc | zip + portable install.ps1 | None; cross compiled, not run on x64 |
 
 CLI jobs do not depend on the desktop jobs. Linux CLI runners use Ubuntu
-22.04. Linux GUI archives built on the parent's Arch host require its
+22.04 and install `libdbus-1-dev` plus `pkg-config` for the shared core's Linux
+Secret Service backend. Both CLI and GUI link libdbus. Linux GUI archives built
+on the parent's Arch host require its
 glibc 2.44 runtime and GPUI graphics dependencies; they are not compatible
 with Ubuntu 22.04. The AUR binary template declares `glibc>=2.44`. An ARM
 GUI is not promised. macOS and Windows GUI jobs are build attempts, not
 evidence of native graphical interaction acceptance.
 
-Portable static Linux CLI archives additionally target x86_64, AArch64,
-ARMv7 hard-float, and RISC-V64 GC using musl. These have no glibc interpreter;
-they are useful on Linux systems such as NixOS without adding a glibc loader.
-The x86_64 binary was run on the build host; ARM and RISC-V binaries were
-checked under QEMU user emulation. This does not establish native NixOS or
-hardware compatibility. Android CLI archives cover ARM64, ARMv7, x86_64 and
-i686 at API23; ARM versions were run on an API34 device.
+Earlier portable static Linux CLI archives targeted x86_64, AArch64,
+ARMv7 hard-float, and RISC-V64 GC using musl. Their x86_64 binary was run on the
+build host and ARM/RISC-V binaries under QEMU user emulation. Those results
+predate the Linux Secret Service dependency and do not validate this revision's
+musl builds or native NixOS/hardware compatibility.
 
-Build portable CLI targets with `RUSTFLAGS='-C linker=rust-lld'`. RISC-V also
-requires `-C target-feature=+crt-static -C link-self-contained=yes` because its
-musl target defaults to dynamic linking. Use the same locked workspace and
-`cargo build --release --locked -p magpie-cli --target TARGET`, then package
-the binary with `scripts/package-release.py` without `--native-packages`.
+The Linux keyring backend now also requires target-compatible libdbus headers,
+libraries and `dbus-1.pc` metadata. For a static musl archive, supply a musl-built
+static libdbus and its native dependency closure, with the cross C toolchain and
+target-specific pkg-config search/sysroot configured. Host glibc development
+libraries cannot satisfy this requirement. `RUSTFLAGS='-C linker=rust-lld'`
+alone is no longer a complete build recipe. RISC-V additionally needs
+`-C target-feature=+crt-static -C link-self-contained=yes` because its musl
+target defaults to dynamic linking. Rebuild with the locked workspace, inspect
+the actual ELF interpreter and shared-library requirements, and execute the
+result before labeling a new archive static. No updated musl build is claimed
+by this dependency correction. Package verified musl binaries with
+`scripts/package-release.py` without `--native-packages`.
+
+Earlier Android CLI archives cover ARM64, ARMv7, x86_64 and i686 at API23;
+ARM versions were run on an API34 device. Android does not enable the Linux
+Secret Service dependency; its current Provider credential source is an explicit
+`--key-env NAME` reference. Direct key storage is unavailable there and does not
+silently fall back to a file or an environment variable.
 
 Download artifacts from the source run; the parent publishes their contents
 under `LIghtJUNction/magpie-rs`, as a **pre-release**:
@@ -78,8 +91,18 @@ The actual release filenames are:
 ## Local commands
 
 Requires Python 3.11+, stable Rust, and the target's native build tools.
-Native Linux system packaging requires Debian/Ubuntu `dpkg-dev`,
+Linux source builds require Debian/Ubuntu `libdbus-1-dev` and `pkg-config`,
+or Arch `dbus` and `pkgconf`; this applies to CLI-only builds as well. Arch's
+[`dbus` package](https://archlinux.org/packages/core/x86_64/dbus/files/)
+contains both the runtime library and development headers/metadata, so its
+runtime `depends` entry also supplies the source package's build dependency.
+Native Linux system packaging additionally requires Debian/Ubuntu `dpkg-dev`,
 `libarchive-tools`, `zstd`; use makepkg for a native Arch desktop package.
+The Deb packager uses `dpkg-shlibdeps` to calculate ELF dependencies, including
+`libdbus-1-3` and its required version. Arch release packages and both AUR
+variants explicitly depend on `dbus`. Neither package selects or starts a
+Secret Service implementation: saving a key requires the user's available,
+unlocked service; headless use can explicitly select `--key-env NAME`.
 macOS packaging requires Apple's `pkgbuild`; Windows requires NSIS
 (`makensis` on PATH). All build/output paths must be absolute and outside every
 Git checkout, including the parent recipe repository. Existing output directories

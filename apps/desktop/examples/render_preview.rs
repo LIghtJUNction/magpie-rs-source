@@ -3,11 +3,52 @@
 //! Build with --features visual-test --example render_preview, then run with
 //! --output /absolute/new/directory [--locale en|zh-CN|zh-TW|ja|de] [--all] [--size WIDTHxHEIGHT].
 //! The default baseline is the real Agents scene, light theme, at 900x560.
-//! --all includes Provider list, Codex details and Settings in both themes.
+//! --all includes Agents, Codex details, Providers, the Provider form and its
+//! credentials section, Gateway states, and Settings at four viewport sizes in both themes.
 //! Each scene saves a 1x PNG, the native texture and a manifest. No OS window opens.
 
-#[path = "../src/actions_state.rs"]
-mod actions_state;
+mod actions_state {
+    include!("../src/actions_state.rs");
+    impl ActionsState {
+        pub(super) fn model_update_fixture(&mut self, config: PathBuf) {
+            self.set_config_path(Some(config.clone()));
+            self.acknowledge_snapshot_refresh(true);
+            self.current_model = Some("fixture/preview-model".into());
+            self.ownership = Some(Ownership::Connected);
+            self.managed = Some(ManagedConnection {
+                address: "127.0.0.1:3425".parse().unwrap(),
+                model: "fixture/preview-model".into(),
+            });
+            self.catalog = Some(GatewayInfo {
+                address: "127.0.0.1:3425".parse().unwrap(),
+                models: vec![
+                    ModelInfo {
+                        id: "fixture/preview-model".into(),
+                    },
+                    ModelInfo {
+                        id: "fixture/next-model".into(),
+                    },
+                ],
+                server_version: Some("0.2.0".into()),
+                instance_id: Some("preview-scene".into()),
+                config_source: Some("provider_store".into()),
+            });
+            self.catalog_valid = true;
+            self.catalog_generation = 1;
+            self.selected = Some("fixture/next-model".into());
+            self.preview = Some(PreviewTicket {
+                binding: self.binding().unwrap(),
+                info: PreviewInfo {
+                    config_existed: true,
+                    changed_fields: vec!["model".into()],
+                },
+                stamp: ConfigStamp::capture(&config).unwrap(),
+                revision: Some("a".repeat(64)),
+            });
+            self.notice = Some(Notice::PreviewReady);
+        }
+    }
+}
 #[path = "../src/actions_text.rs"]
 mod actions_text;
 #[path = "../src/assets.rs"]
@@ -16,20 +57,20 @@ mod assets;
 mod cli_bridge;
 #[path = "../src/config_stamp.rs"]
 mod config_stamp;
-#[path = "../src/gateway_process.rs"]
-mod gateway_process;
+#[path = "../src/gateway_page.rs"]
+mod gateway_page;
+#[path = "../src/gateway_text.rs"]
+mod gateway_text;
 #[path = "../src/input_model.rs"]
 mod input_model;
 #[path = "../src/localization.rs"]
 mod localization;
-#[path = "../src/provider_bridge.rs"]
-mod provider_bridge;
-#[path = "../src/provider_state.rs"]
-mod provider_state;
+#[path = "../src/preferences.rs"]
+mod preferences;
 #[path = "../src/provider_text.rs"]
 mod provider_text;
-#[path = "../src/provider_ui.rs"]
-mod provider_ui;
+#[path = "../src/providers.rs"]
+mod providers;
 #[path = "../src/snapshot.rs"]
 mod snapshot;
 #[path = "../src/text_input.rs"]
@@ -56,10 +97,35 @@ mod ui {
             self.appearance = appearance;
             self.page = match scene {
                 super::Scene::Settings => Page::Settings,
-                super::Scene::Providers => Page::Providers,
+                super::Scene::Gateway
+                | super::Scene::GatewayExternal
+                | super::Scene::GatewayError => Page::Gateway,
+                super::Scene::Providers
+                | super::Scene::ProviderEditor
+                | super::Scene::ProviderCredentials => Page::Providers,
                 _ => Page::Agents,
             };
-            self.details = matches!(scene, super::Scene::Codex).then_some("codex");
+            self.providers.update(cx, |page, cx| {
+                page.set_presentation(locale, appearance, cx);
+                page.preview_fixture(
+                    matches!(
+                        scene,
+                        super::Scene::ProviderEditor | super::Scene::ProviderCredentials
+                    ),
+                    matches!(scene, super::Scene::ProviderCredentials),
+                    self.compact,
+                    cx,
+                );
+            });
+            self.gateway.update(cx, |page, cx| {
+                page.preview_fixture(
+                    matches!(scene, super::Scene::GatewayExternal),
+                    matches!(scene, super::Scene::GatewayError),
+                    cx,
+                )
+            });
+            self.details =
+                matches!(scene, super::Scene::Codex | super::Scene::CodexUpdate).then_some("codex");
             self.gateway_settings = matches!(scene, super::Scene::Codex);
             self.copied = None;
             self.pending_action = None;
@@ -73,6 +139,10 @@ mod ui {
                 .set_config_path(Some(root.join("codex/config.toml")));
             self.actions.acknowledge_snapshot_refresh(true);
             self.actions.ownership = Some(Ownership::Unmanaged);
+            if matches!(scene, super::Scene::CodexUpdate) {
+                self.actions
+                    .model_update_fixture(root.join("codex/config.toml"));
+            }
             let agents = [
                 ("codex", "Codex", Some("icons/codex-color.svg")),
                 ("claude", "Claude Code", Some("icons/claudecode-color.svg")),
@@ -106,10 +176,6 @@ mod ui {
             })
             .collect();
             self.snapshot = Some(Snapshot { agents });
-            if matches!(scene, super::Scene::Providers) {
-                self.providers
-                    .update(cx, |view, cx| view.preview_fixture(locale, cx));
-            }
             cx.notify();
         }
     }
@@ -131,14 +197,20 @@ use theme::Appearance;
 const GPUI_REVISION: &str = "37faef81f74fc1bb08be9939c4cffc8ede6ced2f";
 const FIXTURE_CONFIG: &str = "model = \"fixture/preview-model\"\n\
     model_provider = \"fixture\"\nmodel_reasoning_effort = \"high\"\n";
-const VIEWPORTS: [(u32, u32); 3] = [(900, 560), (360, 560), (440, 560)];
+const VIEWPORTS: [(u32, u32); 4] = [(900, 560), (360, 560), (440, 560), (1280, 720)];
 
 #[derive(Clone, Copy)]
 enum Scene {
     Agents,
     Codex,
-    Settings,
+    CodexUpdate,
     Providers,
+    ProviderEditor,
+    ProviderCredentials,
+    Settings,
+    Gateway,
+    GatewayExternal,
+    GatewayError,
 }
 
 impl Scene {
@@ -146,8 +218,14 @@ impl Scene {
         match self {
             Self::Agents => "agents",
             Self::Codex => "codex",
-            Self::Settings => "settings",
+            Self::CodexUpdate => "codex-update",
             Self::Providers => "providers",
+            Self::ProviderEditor => "provider-editor",
+            Self::ProviderCredentials => "provider-credentials",
+            Self::Settings => "settings",
+            Self::Gateway => "gateway",
+            Self::GatewayExternal => "gateway-external",
+            Self::GatewayError => "gateway-error",
         }
     }
 }
@@ -210,8 +288,8 @@ fn options() -> Result<Option<Options>> {
                 println!(
                     "render_preview --output ABS_NEW_DIRECTORY [--locale en|zh-CN|zh-TW|ja|de] [--all]\n\
                      Default: Agents, light theme, 900x560; one 1x PNG, native texture and manifest.json.\n\
-                     --all: 24 scenes across Agents/Codex/Settings/Providers, both themes and three widths.\n\
-                     --size: render one custom viewport; combine with --all for eight scene/theme pairs.\n\
+                     --all: 80 scenes across Agents/Codex/model update/Providers/Provider form/credentials/Gateway states/Settings, both themes and four viewports.\n\
+                     --size: render one custom viewport; combine with --all for 20 scene/theme pairs.\n\
                      Uses an isolated child, real GPUI scene rendering and system fonts."
                 );
                 return Ok(None);
@@ -265,6 +343,46 @@ impl FixtureDirectory {
             builder.create(fixture.0.join(name))?;
         }
         fs::write(fixture.0.join("codex/config.toml"), FIXTURE_CONFIG)?;
+        use magpie_core::provider_store::{Provider, ProviderProtocol, ProviderStore};
+        let path = fixture.0.join("config/providers.toml");
+        for (index, (id, name, protocol, base_url)) in [
+            (
+                "fixture-openai",
+                "Fixture · Research models",
+                ProviderProtocol::OpenAiResponses,
+                "https://models.example.invalid/v1",
+            ),
+            (
+                "fixture-anthropic",
+                "Fixture · Writing models",
+                ProviderProtocol::AnthropicMessages,
+                "https://writing.example.invalid",
+            ),
+            (
+                "fixture-local",
+                "Fixture · Local workspace",
+                ProviderProtocol::OpenAiChat,
+                "http://127.0.0.1:8099/v1",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            ProviderStore::create(
+                &path,
+                Provider {
+                    id: id.into(),
+                    name: name.into(),
+                    protocol,
+                    base_url: base_url.into(),
+                    api_key_env: (index < 2).then(|| "SYNTHETIC_PREVIEW_API_KEY".into()),
+                    credential_ref: None,
+                    models: vec!["fixture-model-a".into(), "fixture-model-b".into()],
+                    enabled: index != 1,
+                },
+                index as u64,
+            )?;
+        }
         Ok(fixture)
     }
 }
@@ -417,8 +535,14 @@ fn render(options: &Options) -> Result<()> {
         &[
             Scene::Agents,
             Scene::Codex,
-            Scene::Settings,
+            Scene::CodexUpdate,
             Scene::Providers,
+            Scene::ProviderEditor,
+            Scene::ProviderCredentials,
+            Scene::Settings,
+            Scene::Gateway,
+            Scene::GatewayExternal,
+            Scene::GatewayError,
         ]
     } else {
         &[Scene::Agents]
@@ -426,27 +550,29 @@ fn render(options: &Options) -> Result<()> {
     let mut records = Vec::new();
     for &(width, height) in viewports {
         for &(theme_name, appearance) in themes {
-            let mut application_view = None;
             let handle =
                 cx.open_window(size(px(width as f32), px(height as f32)), |window, cx| {
-                    let view = cx.new(ui::MagpieWindow::new);
-                    application_view = Some(view.clone());
-                    cx.new(|cx| gpui::base::Root::new(view, window, cx))
+                    cx.new(|cx| {
+                        gpui::base::Root::new(cx.new(ui::MagpieWindow::new_for_preview), window, cx)
+                    })
                 })?;
-            let application_view = application_view.expect("headless application view");
             // Production discovery sees only the empty synthetic PATH and HOME.
             cx.run_until_parked();
             for &scene in scenes {
-                handle.update(&mut cx, |_, window, cx| {
-                    theme::apply_material_theme(appearance, window, cx);
-                    application_view.update(cx, |view, cx| {
-                        view.preview_fixture(&fixture, scene, options.locale, appearance, cx);
-                        view.focus(window, cx);
-                    });
+                handle.update(&mut cx, |view, window, cx| {
+                    view.view()
+                        .clone()
+                        .downcast::<ui::MagpieWindow>()
+                        .expect("preview root contains MagpieWindow")
+                        .update(cx, |view, cx| {
+                            view.preview_fixture(&fixture, scene, options.locale, appearance, cx);
+                            view.focus(window, cx);
+                        });
                     window.refresh();
                 })?;
                 // Drain asset loads and draw actual production elements, including text and SVGs.
-                for _ in 0..3 {
+                for _ in 0..4 {
+                    cx.advance_clock(std::time::Duration::from_millis(250));
                     cx.run_until_parked();
                     cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))?;
                 }
@@ -519,7 +645,7 @@ fn render(options: &Options) -> Result<()> {
             "mode": if options.all { "all" } else { "baseline" },
             "render_path": "HeadlessAppContext + native platform text system + current_headless_renderer",
             "ui_source": "include!(../src/ui.rs); production MagpieWindow Render implementation",
-            "data": "five synthetic agents; one credential-free Codex configuration; no live accounts",
+            "data": "five synthetic agents; one credential-free Codex configuration; three providers in an isolated real ProviderStore; synthetic password-input fixture, Gateway owned/external/error snapshots and model-update preview; no keyring writes, live accounts or supervised services launched by this renderer",
             "fonts": families, "primary_font": selected_font.family.as_ref(),
             "fallback_fonts": selected_font.fallbacks.as_ref().map(|fonts| fonts.fallback_list()),
             "ui_source_bytes": include_bytes!("../src/ui.rs").len(),
@@ -528,7 +654,7 @@ fn render(options: &Options) -> Result<()> {
                 "Offscreen scene/text/SVG raster evidence; no OS screen capture or desktop input.",
                 "GPU or software-adapter availability and installed fonts affect raster output.",
                 "PNG creation is not visual approval, workflow acceptance or original feature parity.",
-                "Only Agents, Codex details and Settings exist in this captured UI; no invented Providers page.",
+                "Captures the implemented Agents/Codex, Providers and Settings pages. Other upstream pages remain explicitly unimplemented.",
                 "No original visual baseline or cross-platform execution is attested."
             ]
         }))?,

@@ -462,16 +462,6 @@ pub enum ErrorCategory {
     RateLimit,
     UpstreamClient,
     UpstreamServer,
-    /// The local Provider store lock is held by another operation.
-    ProviderBusy,
-    /// A previous Provider store transaction needs recovery.
-    ProviderRecoveryRequired,
-    /// Provider store recovery could not reconcile its transaction artifacts.
-    ProviderRecoveryConflict,
-    /// A configured Provider credential is missing or inactive.
-    ProviderCredentialUnavailable,
-    /// A configured Provider credential reference or value is invalid.
-    ProviderCredentialInvalid,
     Network,
     Timeout,
     Internal,
@@ -495,11 +485,6 @@ impl GatewayError {
             ErrorCategory::RateLimit => "rate_limit_error",
             ErrorCategory::UpstreamClient => "upstream_request_error",
             ErrorCategory::UpstreamServer => "upstream_server_error",
-            ErrorCategory::ProviderBusy => "provider_busy",
-            ErrorCategory::ProviderRecoveryRequired => "provider_recovery_required",
-            ErrorCategory::ProviderRecoveryConflict => "provider_recovery_conflict",
-            ErrorCategory::ProviderCredentialUnavailable => "provider_credential_unavailable",
-            ErrorCategory::ProviderCredentialInvalid => "provider_credential_invalid",
             ErrorCategory::Network => "network_error",
             ErrorCategory::Timeout => "timeout_error",
             ErrorCategory::Internal => "internal_error",

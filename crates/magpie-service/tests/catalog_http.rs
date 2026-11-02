@@ -166,7 +166,7 @@ models = ["c"]
     );
     let get = request(
         address,
-        "GET /v1/models?client=fixture HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        &format!("GET /v1/models?client=fixture HTTP/1.1\r\nHost: {address}\r\n\r\n"),
     );
     assert!(get.headers.starts_with("HTTP/1.1 200 OK\r\n"));
     assert!(
@@ -181,7 +181,7 @@ models = ["c"]
 
     let head = request(
         address,
-        "HEAD /v1/models HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        &format!("HEAD /v1/models HTTP/1.1\r\nHost: {address}\r\n\r\n"),
     );
     assert_eq!(head.headers, get.headers);
     assert!(head.body.is_empty(), "HEAD must not send catalog bytes");
@@ -191,7 +191,7 @@ models = ["c"]
             thread::spawn(move || {
                 request(
                     address,
-                    "GET /v1/models HTTP/1.1\r\nHost: localhost\r\n\r\n",
+                    &format!("GET /v1/models HTTP/1.1\r\nHost: {address}\r\n\r\n"),
                 )
             })
         })
@@ -208,7 +208,7 @@ fn existing_bind_with_limits_still_serves_an_empty_catalog() {
     let (_server, address) = ServerProcess::start("empty", None);
     let response = request(
         address,
-        "GET /v1/models HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        &format!("GET /v1/models HTTP/1.1\r\nHost: {address}\r\n\r\n"),
     );
     assert!(response.headers.starts_with("HTTP/1.1 200 OK\r\n"));
     assert_eq!(response.body, EMPTY_MODELS_JSON);
@@ -239,7 +239,7 @@ fn catalog_does_not_enable_forwarding_or_allow_request_bodies() {
     let (_server, address) = ServerProcess::start("configured", Some(&fixture.0));
     let response = request(
         address,
-        "GET /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        &format!("GET /v1/chat/completions HTTP/1.1\r\nHost: {address}\r\n\r\n"),
     );
     assert!(
         response
@@ -251,7 +251,7 @@ fn catalog_does_not_enable_forwarding_or_allow_request_bodies() {
         let response = request(
             address,
             &format!(
-                "{method} /v1/models HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\n\r\nx"
+                "{method} /v1/models HTTP/1.1\r\nHost: {address}\r\nContent-Length: 1\r\n\r\nx"
             ),
         );
         assert!(response.headers.starts_with("HTTP/1.1 400 Bad Request\r\n"));
@@ -273,4 +273,52 @@ fn configured_catalog_still_rejects_nonloopback_listeners() {
     .expect_err("public listener requires a separate authorization design");
     assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     assert!(error.to_string().contains("loopback"));
+}
+
+#[test]
+fn catalog_loopback_exemption_rejects_browser_proxy_and_rebinding_requests() {
+    let (_server, address) = ServerProcess::start("empty", None);
+    for extra in [
+        "Origin: null\r\n",
+        "Origin: http://127.0.0.1\r\n",
+        "oRiGiN: https://example.org\r\n",
+        "Forwarded: for=127.0.0.1\r\n",
+        "X-Forwarded-Host: localhost\r\n",
+        "x-FoRwArDeD-for: 127.0.0.1\r\n",
+    ] {
+        let response = request(
+            address,
+            &format!("GET /v1/models HTTP/1.1\r\nHost: {address}\r\n{extra}\r\n"),
+        );
+        assert!(response.headers.starts_with("HTTP/1.1 403 Forbidden\r\n"));
+        assert!(!response.body.contains("\"data\""));
+    }
+    for host in [
+        "example.org",
+        "127.0.0.1:1",
+        "localhost",
+        "127.0.0.1.example.org",
+    ] {
+        let response = request(
+            address,
+            &format!("GET /health HTTP/1.1\r\nHost: {host}\r\n\r\n"),
+        );
+        assert!(response.headers.starts_with("HTTP/1.1 403 Forbidden\r\n"));
+    }
+    let missing = request(address, "GET /v1/models HTTP/1.0\r\n\r\n");
+    assert!(missing.headers.starts_with("HTTP/1.1 400 Bad Request\r\n"));
+    let duplicate = request(
+        address,
+        &format!("GET /v1/models HTTP/1.1\r\nHost: {address}\r\nHost: {address}\r\n\r\n"),
+    );
+    assert!(
+        duplicate
+            .headers
+            .starts_with("HTTP/1.1 400 Bad Request\r\n")
+    );
+    let direct = request(
+        address,
+        &format!("GET /v1/models HTTP/1.1\r\nHost: {address}\r\n\r\n"),
+    );
+    assert!(direct.headers.starts_with("HTTP/1.1 200 OK\r\n"));
 }

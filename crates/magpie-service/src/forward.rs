@@ -1,5 +1,13 @@
-//! Bounded local-provider candidate with optional, explicitly selected translation.
+//! Bounded provider forwarding with optional, explicitly selected translation.
 //! Not the full gateway contract: no account routing, prompt logging, or Usage accounting.
+
+mod lifecycle;
+pub(crate) mod source;
+mod token_field;
+
+pub use lifecycle::GatewayIdentity;
+
+use source::ForwardSource;
 
 use crate::protocol::{
     self, ErrorCategory, ErrorKind, FinishReason, GatewayError, Limits, Outcome, Protocol,
@@ -16,8 +24,10 @@ use hyper::{
     service::service_fn,
 };
 use hyper_util::rt::{TokioIo, TokioTimer};
+use magpie_core::catalog::{valid_model_id, valid_provider_id};
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeSet,
     convert::Infallible,
     fs::File,
     io::{self, Read},
@@ -39,10 +49,14 @@ use tokio::{
 const CONFIG_LIMIT: u64 = 64 * 1024;
 const REQUEST_LIMIT: usize = 1024 * 1024;
 const JSON_RESPONSE_LIMIT: usize = 4 * 1024 * 1024;
+// 16,384 rows with maximum validated IDs, JSON-escaped display names and
+// metadata fit below 24 MiB even without the tighter 1 MiB store-file cap.
+const CATALOG_RESPONSE_LIMIT: usize = 32 * 1024 * 1024;
+const CATALOG_MODELS_LIMIT: usize = magpie_core::provider_store::MAX_TOTAL_MODELS;
+const CATALOG_ACTIVE_LIMIT: usize = 2;
 // Responses terminal events can include the complete output; a tiny delta-size
 // cap would reject otherwise valid long responses. This is still a finite cap.
 const EVENT_LIMIT: usize = 4 * 1024 * 1024;
-const NATIVE_TERMINAL_BUFFER_LIMIT: usize = EVENT_LIMIT * 2;
 const CHUNK_LIMIT: usize = 16 * 1024;
 const ACTIVE_LIMIT: usize = 4;
 const CONNECTION_LIMIT: usize = 16;
@@ -211,94 +225,41 @@ fn transport_error() -> io::Error {
 pub struct ForwardServer {
     listener: TcpListener,
     source: ForwardSource,
+    identity: GatewayIdentity,
 }
 impl ForwardServer {
     pub fn bind(address: SocketAddr, config: ForwardConfig) -> io::Result<Self> {
-        if !address.ip().is_loopback() {
-            return Err(invalid("candidate_requires_loopback_listener"));
-        }
-        let listener = TcpListener::bind(address)?;
-        listener.set_nonblocking(true)?;
-        Ok(Self {
-            listener,
-            source: ForwardSource::Legacy(config),
-        })
+        Self::bind_source(address, ForwardSource::legacy(config))
     }
-    /// Bind the host's bounded four-protocol chain to the shared Provider store.
-    pub fn bind_providers(address: SocketAddr, path: PathBuf) -> io::Result<Self> {
+
+    /// Serves the shared Provider store. Edits and revocations apply to the next
+    /// request; an in-flight request keeps its already selected upstream.
+    pub fn bind_store(address: SocketAddr, path: PathBuf) -> io::Result<Self> {
+        Self::bind_source(address, ForwardSource::store(path)?)
+    }
+
+    fn bind_source(address: SocketAddr, source: ForwardSource) -> io::Result<Self> {
         if !address.ip().is_loopback() {
             return Err(invalid("candidate_requires_loopback_listener"));
         }
-        let source = crate::provider_gateway::ProviderSource::new(path)?;
         let listener = TcpListener::bind(address)?;
         listener.set_nonblocking(true)?;
+        let identity = GatewayIdentity::new(
+            listener.local_addr()?,
+            if matches!(&source, ForwardSource::Store { .. }) {
+                "provider_store"
+            } else {
+                "legacy_forward"
+            },
+        );
         Ok(Self {
             listener,
-            source: ForwardSource::Providers(source),
+            source,
+            identity,
         })
     }
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.listener.local_addr()
-    }
-    pub fn run(self) -> io::Result<()> {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?
-            .block_on(self.run_async())
-    }
-    async fn run_async(self) -> io::Result<()> {
-        let address = self.listener.local_addr()?;
-        if let ForwardSource::Legacy(config) = &self.source {
-            if address == config.upstream {
-                return Err(invalid("forward_config_self_target"));
-            }
-            // Retain the host's startup failure for an unavailable legacy key.
-            legacy_headers(config).map_err(invalid)?;
-        }
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy()
-            .retry(reqwest::retry::never())
-            .connect_timeout(Duration::from_secs(3))
-            .read_timeout(IDLE_TIMEOUT)
-            .pool_max_idle_per_host(ACTIVE_LIMIT)
-            .pool_idle_timeout(Duration::from_secs(30))
-            .http1_only()
-            .build()
-            .map_err(|_| invalid("provider_transport_initialization_failed"))?;
-        let requests = Arc::new(Semaphore::new(ACTIVE_LIMIT));
-        let connections = Arc::new(Semaphore::new(CONNECTION_LIMIT));
-        let state = Arc::new(State {
-            source: self.source,
-            address,
-            client,
-            requests,
-            stats: Arc::new(Stats::default()),
-        });
-        let listener = tokio::net::TcpListener::from_std(self.listener)?;
-        loop {
-            // A permit is acquired before accept: live connection tasks are bounded.
-            let permit = connections
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|_| invalid("listener_closed"))?;
-            let (socket, peer) = listener.accept().await?;
-            if !peer.ip().is_loopback() {
-                continue;
-            }
-            let state = state.clone();
-            tokio::spawn(async move {
-                let _connection_permit = permit;
-                let service = service_fn(move |request| handle(request, state.clone()));
-                // Also bounds a client that stops reading a response forever.
-                let _ = timeout(
-                    TOTAL_TIMEOUT + Duration::from_secs(5),
-                    serve_forward_connection(TokioIo::new(socket), service),
-                )
-                .await;
-            });
-        }
     }
 }
 
@@ -427,120 +388,6 @@ fn flush_before_stream_errors(
     Response::from_parts(parts, StreamBody::new(frames).boxed_unsync())
 }
 
-enum ForwardSource {
-    Legacy(ForwardConfig),
-    Providers(crate::provider_gateway::ProviderSource),
-}
-
-// Credentials remain per-admission values and never enter public diagnostics.
-struct ResolvedRoute {
-    provider_id: String,
-    model: String,
-    protocol: Protocol,
-    endpoint: String,
-    headers: header::HeaderMap,
-    revision: Option<u64>,
-    key_id: Option<String>,
-}
-
-impl ForwardSource {
-    fn typed_errors(&self) -> bool {
-        match self {
-            Self::Legacy(config) => config.upstream_protocol.is_some(),
-            Self::Providers(_) => true,
-        }
-    }
-
-    fn route(
-        &self,
-        public_model: &str,
-        client: Protocol,
-        stream: bool,
-        listener: SocketAddr,
-    ) -> Result<ResolvedRoute, (StatusCode, &'static str)> {
-        match self {
-            Self::Legacy(config) => {
-                let model = public_model
-                    .strip_prefix(&format!("{}/", config.provider_id))
-                    .filter(|model| config.models.iter().any(|known| known == model))
-                    .ok_or((StatusCode::NOT_FOUND, "model_not_found"))?;
-                let protocol = config.upstream_protocol.unwrap_or(client);
-                let headers = legacy_headers(config)
-                    .map_err(|code| (StatusCode::SERVICE_UNAVAILABLE, code))?;
-                Ok(ResolvedRoute {
-                    provider_id: config.provider_id.clone(),
-                    model: model.to_owned(),
-                    protocol,
-                    endpoint: upstream_url(config.upstream, protocol, model, stream),
-                    headers,
-                    revision: None,
-                    key_id: None,
-                })
-            }
-            Self::Providers(source) => {
-                let snapshot = source
-                    .snapshot()
-                    .map_err(|error| (error.status, error.code))?;
-                let route =
-                    crate::provider_gateway::route(&snapshot, public_model, stream, listener)
-                        .map_err(|error| (error.status, error.code))?;
-                Ok(ResolvedRoute {
-                    provider_id: route.provider_id,
-                    model: route.model,
-                    protocol: route.protocol,
-                    endpoint: route.endpoint,
-                    headers: route.headers,
-                    revision: Some(route.revision),
-                    key_id: route.key_id,
-                })
-            }
-        }
-    }
-
-    fn models(&self) -> Result<Value, (StatusCode, &'static str)> {
-        match self {
-            Self::Legacy(config) => Ok(config.models_json()),
-            Self::Providers(source) => source.models().map_err(|error| (error.status, error.code)),
-        }
-    }
-
-    fn metadata(&self) -> Result<Option<Value>, (StatusCode, &'static str)> {
-        match self {
-            Self::Legacy(_) => Ok(None),
-            Self::Providers(source) => source
-                .metadata()
-                .map(Some)
-                .map_err(|error| (error.status, error.code)),
-        }
-    }
-}
-
-fn legacy_headers(config: &ForwardConfig) -> Result<header::HeaderMap, &'static str> {
-    let mut headers = header::HeaderMap::new();
-    if let Some(name) = &config.api_key_env {
-        let secret = std::env::var(name).map_err(|_| "provider_credential_unavailable")?;
-        if secret.is_empty() || secret.len() > 4096 {
-            return Err("provider_credential_invalid");
-        }
-        let (name, secret) = match config.upstream_protocol {
-            Some(Protocol::AnthropicMessages) => ("x-api-key", secret),
-            Some(Protocol::Gemini) => ("x-goog-api-key", secret),
-            _ => ("authorization", format!("Bearer {secret}")),
-        };
-        let mut value =
-            header::HeaderValue::from_str(&secret).map_err(|_| "provider_credential_invalid")?;
-        value.set_sensitive(true);
-        headers.insert(header::HeaderName::from_static(name), value);
-    }
-    if config.upstream_protocol == Some(Protocol::AnthropicMessages) {
-        headers.insert(
-            "anthropic-version",
-            header::HeaderValue::from_static("2023-06-01"),
-        );
-    }
-    Ok(headers)
-}
-
 #[derive(Default)]
 struct Stats {
     active: AtomicU64,
@@ -552,8 +399,10 @@ struct Stats {
 struct State {
     source: ForwardSource,
     address: SocketAddr,
+    identity: GatewayIdentity,
     client: reqwest::Client,
     requests: Arc<Semaphore>,
+    catalogs: Arc<Semaphore>,
     stats: Arc<Stats>,
 }
 struct Attempt {
@@ -599,17 +448,6 @@ struct EntryRoute {
 
 impl EntryRoute {
     fn parse(path: &str) -> Option<Self> {
-        Self::parse_with_rule(path, valid_id)
-    }
-    fn parse_managed(path: &str) -> Option<Self> {
-        Self::parse_with_rule(path, |id| {
-            id.split_once('/').is_some_and(|(provider, model)| {
-                magpie_core::providers::is_valid_provider_id(provider)
-                    && magpie_core::providers::is_valid_model_id(model)
-            })
-        })
-    }
-    fn parse_with_rule(path: &str, valid_model: fn(&str) -> bool) -> Option<Self> {
         let protocol = match path {
             "/v1/chat/completions" => Protocol::OpenAiChat,
             "/v1/responses" => Protocol::OpenAiResponses,
@@ -633,7 +471,7 @@ impl EntryRoute {
                     });
                 }
                 let model = String::from_utf8(decoded).ok()?;
-                if !valid_model(&model) {
+                if !valid_public_model(&model) {
                     return None;
                 }
                 return Some(Self {
@@ -649,32 +487,9 @@ impl EntryRoute {
     }
 }
 
-fn upstream_url(upstream: SocketAddr, protocol: Protocol, model: &str, stream: bool) -> String {
-    match protocol {
-        Protocol::OpenAiChat => format!("http://{upstream}/v1/chat/completions"),
-        Protocol::OpenAiResponses => format!("http://{upstream}/v1/responses"),
-        Protocol::AnthropicMessages => format!("http://{upstream}/v1/messages"),
-        Protocol::Gemini => {
-            // Model IDs are bounded ASCII. Encode a single path parameter so a
-            // slash, colon or dot segment cannot select another HTTP endpoint.
-            let encoded: String = model
-                .bytes()
-                .map(|byte| {
-                    if byte.is_ascii_alphanumeric() || b"_-".contains(&byte) {
-                        (byte as char).to_string()
-                    } else {
-                        format!("%{byte:02X}")
-                    }
-                })
-                .collect();
-            let action = if stream {
-                "streamGenerateContent?alt=sse"
-            } else {
-                "generateContent"
-            };
-            format!("http://{upstream}/v1beta/models/{encoded}:{action}")
-        }
-    }
+fn valid_public_model(id: &str) -> bool {
+    id.split_once('/')
+        .is_some_and(|(provider, model)| valid_provider_id(provider) && valid_model_id(model))
 }
 
 fn response_context(state: &State, model: &str) -> ResponseContext {
@@ -738,11 +553,7 @@ async fn handle(
     Ok(handle_inner(request, state).await)
 }
 async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Response<Body> {
-    let route = if matches!(&state.source, ForwardSource::Providers(_)) {
-        EntryRoute::parse_managed(request.uri().path())
-    } else {
-        EntryRoute::parse(request.uri().path())
-    };
+    let route = EntryRoute::parse(request.uri().path());
     let client = route
         .as_ref()
         .map_or(Protocol::OpenAiChat, |route| route.protocol);
@@ -761,20 +572,6 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
                     | StatusCode::TOO_MANY_REQUESTS => error_category(status),
                     _ => ErrorCategory::UpstreamClient,
                 },
-                "provider_busy" => ErrorCategory::ProviderBusy,
-                "provider_recovery_required"
-                | "provider_recovery_guard_present"
-                | "provider_unknown_recovery_material" => ErrorCategory::ProviderRecoveryRequired,
-                "provider_recovery_conflict" | "provider_recovery_failed" => {
-                    ErrorCategory::ProviderRecoveryConflict
-                }
-                "provider_credential_unavailable"
-                | "provider_keys_paused"
-                | "provider_key_paused" => ErrorCategory::ProviderCredentialUnavailable,
-                "provider_credential_invalid" | "provider_invalid_credential_reference" => {
-                    ErrorCategory::ProviderCredentialInvalid
-                }
-                code if code.starts_with("provider_") => ErrorCategory::Internal,
                 _ => error_category(status),
             };
             protocol_error(client, status, category)
@@ -784,11 +581,9 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
     };
     // Real peer was checked at accept. Untrusted proxy/browser headers do not grant local privilege.
     let headers = request.headers();
-    if headers.contains_key(header::ORIGIN)
-        || headers.contains_key("forwarded")
-        || headers
-            .keys()
-            .any(|key| key.as_str().starts_with("x-forwarded-"))
+    if headers
+        .keys()
+        .any(|key| crate::local_access::untrusted_browser_or_proxy_header(key.as_str()))
     {
         return error(StatusCode::FORBIDDEN, "untrusted_origin_or_proxy");
     }
@@ -796,8 +591,7 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
         || headers
             .get(header::HOST)
             .and_then(|h| h.to_str().ok())
-            .and_then(|h| h.parse::<SocketAddr>().ok())
-            != Some(state.address)
+            .is_none_or(|host| !crate::local_access::valid_local_host(host, state.address))
         || request.uri().scheme().is_some()
         || request.uri().authority().is_some()
     {
@@ -823,29 +617,31 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
     }
     if request.method() == hyper::Method::GET {
         return match path.as_str() {
-            "/health" => {
-                let metadata = match state.source.metadata() {
-                    Ok(metadata) => metadata,
-                    Err((status, code)) => return error(status, code),
-                };
-                let mut health = json!({"status":"ok","mode":"forward_candidate",
-                    "provider_health":"not_probed","limits":{"active_requests":ACTIVE_LIMIT,"waiting_requests":0,"connections":CONNECTION_LIMIT,
-                        "request_bytes":REQUEST_LIMIT,"json_response_bytes":JSON_RESPONSE_LIMIT,"sse_event_bytes":EVENT_LIMIT,"forward_chunk_bytes":CHUNK_LIMIT},
-                    "counter_semantics":"upstream_protocol_completion_not_client_delivery_or_usage",
-                    "transport_counters":{"active":state.stats.active.load(Ordering::Relaxed),
-                        "completed":state.stats.completed.load(Ordering::Relaxed),"failed":state.stats.failed.load(Ordering::Relaxed),
-                        "cancelled":state.stats.cancelled.load(Ordering::Relaxed)},"usage_accounting":"not_implemented"});
-                if let Some(metadata) = metadata {
-                    for (key, value) in metadata.as_object().unwrap() {
-                        health[key] = value.clone();
+            "/health" => json_response(
+                StatusCode::OK,
+                json!({"status":"ok","mode":"forward_candidate",
+                "server_version":state.identity.server_version,"instance_id":state.identity.instance_id,
+                "config_source":state.identity.config_source,"address":state.identity.address.to_string(),
+                "provider_health":"not_probed","limits":{"active_requests":ACTIVE_LIMIT,"waiting_requests":0,"connections":CONNECTION_LIMIT,
+                    "request_bytes":REQUEST_LIMIT,"json_response_bytes":JSON_RESPONSE_LIMIT,"catalog_response_bytes":CATALOG_RESPONSE_LIMIT,
+                    "active_catalog_responses":CATALOG_ACTIVE_LIMIT,"sse_event_bytes":EVENT_LIMIT,"forward_chunk_bytes":CHUNK_LIMIT},
+                "counter_semantics":"upstream_protocol_completion_not_client_delivery_or_usage",
+                "transport_counters":{"active":state.stats.active.load(Ordering::Relaxed),
+                    "completed":state.stats.completed.load(Ordering::Relaxed),"failed":state.stats.failed.load(Ordering::Relaxed),
+                    "cancelled":state.stats.cancelled.load(Ordering::Relaxed)},"usage_accounting":"not_implemented"}),
+            ),
+            "/v1/models" => {
+                let permit = match state.catalogs.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        return error(StatusCode::SERVICE_UNAVAILABLE, "gateway_catalog_limit");
                     }
+                };
+                match state.source.models().await {
+                    Ok(models) => catalog_response(models, permit),
+                    Err(failure) => error(failure.status, failure.code),
                 }
-                json_response(StatusCode::OK, health)
             }
-            "/v1/models" => match state.source.models() {
-                Ok(catalog) => json_response(StatusCode::OK, catalog),
-                Err((status, code)) => error(status, code),
-            },
             _ => error(StatusCode::NOT_IMPLEMENTED, "endpoint_not_implemented"),
         };
     }
@@ -855,9 +651,7 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
     let Some(route) = route else {
         return error(StatusCode::NOT_IMPLEMENTED, "endpoint_not_implemented");
     };
-    if matches!(&state.source, ForwardSource::Legacy(config) if config.upstream_protocol.is_none())
-        && matches!(client, Protocol::AnthropicMessages | Protocol::Gemini)
-    {
+    if !typed_errors && matches!(client, Protocol::AnthropicMessages | Protocol::Gemini) {
         return error(StatusCode::NOT_IMPLEMENTED, "endpoint_not_implemented");
     }
     if headers.contains_key(header::CONTENT_ENCODING)
@@ -911,38 +705,29 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
             None => return error(StatusCode::BAD_REQUEST, "model_required"),
         },
     };
-    let stream_result = match (route.gemini.as_ref(), object.get("stream")) {
-        (Some((_, stream)), _) => Ok(*stream),
-        (None, None) => Ok(false),
-        (None, Some(Value::Bool(value))) => Ok(*value),
-        (None, Some(_)) => Err(()),
+    let target = match state.source.target(&public_model, state.address).await {
+        Ok(target) => target,
+        Err(failure) => return error(failure.status, failure.code),
     };
-    let selected = match state.source.route(
-        &public_model,
-        client,
-        stream_result.unwrap_or(false),
-        state.address,
-    ) {
-        Ok(route) => route,
-        Err((status, code)) => return error(status, code),
-    };
-    let stream = match stream_result {
-        Ok(stream) => stream,
-        Err(()) => {
+    let model = target.model.clone();
+    let stream = match (route.gemini.as_ref(), object.get("stream")) {
+        (Some((_, stream)), _) => *stream,
+        (None, None) => false,
+        (None, Some(Value::Bool(value))) => *value,
+        (None, Some(_)) => {
             return attributed(
                 error(StatusCode::BAD_REQUEST, "stream_must_be_boolean"),
-                &selected,
+                &target.provider_id,
                 &public_model,
             );
         }
     };
-    let model = selected.model.clone();
-    let provider = selected.protocol;
+    let provider = target.protocol.unwrap_or(client);
     let translated = provider != client;
     if provider == Protocol::Gemini && matches!(model.as_str(), "." | "..") {
         return attributed(
             error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_gemini_model"),
-            &selected,
+            &target.provider_id,
             &public_model,
         );
     }
@@ -959,7 +744,7 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
                 };
                 return attributed(
                     protocol_error(client, status, ErrorCategory::Compatibility),
-                    &selected,
+                    &target.provider_id,
                     &public_model,
                 );
             }
@@ -973,6 +758,7 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
     } else if client != Protocol::Gemini {
         value["model"] = Value::String(model.clone());
     }
+    let field = token_field::Field::in_request(provider, &value);
     let payload = match serde_json::to_vec(&value) {
         Ok(payload) => payload,
         Err(_) => return error(StatusCode::BAD_REQUEST, "invalid_json"),
@@ -983,60 +769,67 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "converted_request_body_too_large",
             ),
-            &selected,
+            &target.provider_id,
             &public_model,
         );
     }
     // Both request bytes and parsed values are bounded and released before response streaming.
     drop(bytes);
     drop(value);
+    let url = match target.url(provider, stream) {
+        Ok(url) => url,
+        Err(_) => {
+            return attributed(
+                error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "provider_configuration_unavailable",
+                ),
+                &target.provider_id,
+                &public_model,
+            );
+        }
+    };
+    let payload = token_field::Payload::new(payload, field, &url);
+    if payload.len() > REQUEST_LIMIT {
+        return attributed(
+            error(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "converted_request_body_too_large",
+            ),
+            &target.provider_id,
+            &public_model,
+        );
+    }
     let mut attempt = Attempt::new(state.stats.clone(), permit);
     let deadline = Instant::now() + TOTAL_TIMEOUT;
-    let upstream = timeout(
-        IDLE_TIMEOUT,
-        state
-            .client
-            .post(&selected.endpoint)
-            .headers(selected.headers.clone())
-            .header(header::CONTENT_TYPE, "application/json")
-            .header(
-                header::ACCEPT,
-                if stream {
-                    "text/event-stream"
-                } else {
-                    "application/json"
-                },
-            )
-            .body(payload)
-            .send(),
+    let upstream = token_field::send(
+        &state.client,
+        &url,
+        &target.headers,
+        payload,
+        stream,
+        deadline,
     )
     .await;
     let upstream = match upstream {
-        Ok(Ok(response)) => response,
-        Ok(Err(failure)) => {
+        Ok(response) => response,
+        Err(failure) => {
             attempt.finish(false);
+            let timed_out = failure == token_field::SendFailure::Timeout;
             return attributed(
                 error(
-                    if typed_errors && failure.is_timeout() {
+                    if timed_out {
                         StatusCode::GATEWAY_TIMEOUT
                     } else {
                         StatusCode::BAD_GATEWAY
                     },
-                    if typed_errors && failure.is_timeout() {
+                    if timed_out {
                         "upstream_header_timeout"
                     } else {
                         "upstream_transport_error"
                     },
                 ),
-                &selected,
-                &public_model,
-            );
-        }
-        Err(_) => {
-            attempt.finish(false);
-            return attributed(
-                error(StatusCode::GATEWAY_TIMEOUT, "upstream_header_timeout"),
-                &selected,
+                &target.provider_id,
                 &public_model,
             );
         }
@@ -1059,7 +852,7 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
                     "upstream_http_error"
                 },
             ),
-            &selected,
+            &target.provider_id,
             &public_model,
         );
     }
@@ -1080,7 +873,7 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
         attempt.finish(false);
         return attributed(
             error(StatusCode::BAD_GATEWAY, "upstream_content_type_mismatch"),
-            &selected,
+            &target.provider_id,
             &public_model,
         );
     }
@@ -1103,7 +896,7 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
                     };
                     return attributed(
                         protocol_error(client, status, category),
-                        &selected,
+                        &target.provider_id,
                         &public_model,
                     );
                 }
@@ -1145,7 +938,7 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
                     )
                 }
             };
-            return attributed(response, &selected, &public_model);
+            return attributed(response, &target.provider_id, &public_model);
         }
         let collected = timeout_at(deadline, read_json_response(upstream)).await;
         let validated = collected.ok().and_then(Result::ok).and_then(|bytes| {
@@ -1157,7 +950,7 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
                 attempt.finish(success);
                 attributed(
                     bytes_response(StatusCode::OK, "application/json", bytes),
-                    &selected,
+                    &target.provider_id,
                     &public_model,
                 )
             }
@@ -1168,7 +961,7 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
                         StatusCode::BAD_GATEWAY,
                         "upstream_json_incomplete_or_too_large",
                     ),
-                    &selected,
+                    &target.provider_id,
                     &public_model,
                 )
             }
@@ -1196,7 +989,7 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
                         StatusCode::BAD_GATEWAY,
                         ErrorCategory::Compatibility,
                     ),
-                    &selected,
+                    &target.provider_id,
                     &public_model,
                 );
             }
@@ -1264,13 +1057,12 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
                 }
             }
         });
-        return stream_response(stream, &selected, &public_model);
+        return stream_response(stream, &target.provider_id, &public_model);
     }
     let context = StreamContext {
         upstream: Some(Box::pin(upstream.bytes_stream())),
         pending: Bytes::new(),
         output: Bytes::new(),
-        native_terminal: BytesMut::new(),
         attempt,
         parser: SseCompletion::for_protocol(client),
         deadline,
@@ -1315,13 +1107,7 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
                     }
                     Ok(None) if context.parser.finish_native() => {
                         context.attempt.finish(context.parser.successful);
-                        context.output = std::mem::take(&mut context.native_terminal).freeze();
-                        if context.output.is_empty() {
-                            return None;
-                        }
-                        let length = context.output.len().min(CHUNK_LIMIT);
-                        let bytes = context.output.split_to(length);
-                        return Some((Ok(bytes), context));
+                        return None;
                     }
                     _ => {
                         context.attempt.finish(false);
@@ -1334,20 +1120,6 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
                 let byte = context.pending.split_to(1)[0];
                 match context.parser.push(byte) {
                     Ok(Some(event)) => {
-                        if context.parser.protocol == Protocol::Gemini
-                            && (context.parser.native_finished
-                                || !context.native_terminal.is_empty())
-                        {
-                            if context.native_terminal.len().saturating_add(event.len())
-                                > NATIVE_TERMINAL_BUFFER_LIMIT
-                            {
-                                context.attempt.finish(false);
-                                context.stopped = true;
-                                return Some((Err(transport_error()), context));
-                            }
-                            context.native_terminal.extend_from_slice(&event);
-                            continue;
-                        }
                         context.output = event;
                         if context.parser.completed {
                             // Protocol completion is known now, not only when HTTP closes.
@@ -1370,12 +1142,12 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
             }
         }
     });
-    stream_response(stream, &selected, &public_model)
+    stream_response(stream, &target.provider_id, &public_model)
 }
 
 fn stream_response(
     stream: impl Stream<Item = Result<Bytes, io::Error>> + Send + 'static,
-    route: &ResolvedRoute,
+    provider: &str,
     model: &str,
 ) -> Response<Body> {
     let body = StreamBody::new(stream.map_ok(Frame::data)).boxed_unsync();
@@ -1388,7 +1160,7 @@ fn stream_response(
         header::CACHE_CONTROL,
         header::HeaderValue::from_static("no-store"),
     );
-    attributed(response, route, model)
+    attributed(response, provider, model)
 }
 
 async fn read_request(body: &mut Incoming) -> Result<Vec<u8>, &'static str> {
@@ -1420,10 +1192,14 @@ enum ResponseReadError {
 }
 
 async fn read_json_bytes(response: reqwest::Response) -> Result<Bytes, ResponseReadError> {
-    if response
-        .content_length()
-        .is_some_and(|n| n > JSON_RESPONSE_LIMIT as u64)
-    {
+    read_json_bytes_limited(response, JSON_RESPONSE_LIMIT).await
+}
+
+async fn read_json_bytes_limited(
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<Bytes, ResponseReadError> {
+    if response.content_length().is_some_and(|n| n > limit as u64) {
         return Err(ResponseReadError::Limit);
     }
     let mut stream = response.bytes_stream();
@@ -1436,7 +1212,7 @@ async fn read_json_bytes(response: reqwest::Response) -> Result<Bytes, ResponseR
                 ResponseReadError::Network
             }
         })?;
-        if bytes.len().saturating_add(data.len()) > JSON_RESPONSE_LIMIT {
+        if bytes.len().saturating_add(data.len()) > limit {
             return Err(ResponseReadError::Limit);
         }
         bytes.extend_from_slice(&data);
@@ -1444,7 +1220,7 @@ async fn read_json_bytes(response: reqwest::Response) -> Result<Bytes, ResponseR
     Ok(bytes.freeze())
 }
 
-pub(crate) fn protocol_response_outcome(bytes: &[u8], responses: bool) -> Option<bool> {
+fn protocol_response_outcome(bytes: &[u8], responses: bool) -> Option<bool> {
     let value = serde_json::from_slice::<Value>(bytes).ok()?;
     if responses {
         responses_outcome(&value)
@@ -1554,7 +1330,6 @@ struct StreamContext {
     upstream: Option<ByteStream>,
     pending: Bytes,
     output: Bytes,
-    native_terminal: BytesMut,
     attempt: Attempt,
     parser: SseCompletion,
     deadline: Instant,
@@ -1618,66 +1393,30 @@ impl SseCompletion {
             return Err(());
         }
         if self.protocol == Protocol::Gemini {
-            let object = value.as_object().ok_or(())?;
-            // Reject unrecognized envelope fields rather than forwarding an
-            // opaque error payload as a successful native response. The Google
-            // and Vertex response schemas also include modelStatus/createTime.
-            let allowed_fields = [
-                "candidates",
-                "modelVersion",
-                "modelStatus",
-                "createTime",
-                "promptFeedback",
-                "responseId",
-                "usageMetadata",
-            ];
-            if object.is_empty()
-                || object
-                    .keys()
-                    .any(|key| !allowed_fields.contains(&key.as_str()))
-            {
-                return Err(());
-            }
-            if let Some(usage) = value.get("usageMetadata") {
-                let usage = usage.as_object().ok_or(())?;
-                if usage.keys().any(|key| {
-                    matches!(
-                        key.as_str(),
-                        "error" | "message" | "status" | "code" | "failure"
-                    )
-                }) {
-                    return Err(());
-                }
-            }
-            let Some(candidates) = value.get("candidates") else {
-                return Ok(());
-            };
-            let candidates = candidates.as_array().ok_or(())?;
-            for candidate in candidates {
-                if !candidate.is_object() {
-                    return Err(());
-                }
-                let index = candidate.get("index").and_then(Value::as_u64).unwrap_or(0);
-                if index >= 128 {
-                    return Err(());
-                }
-                self.started_choices[index as usize] = true;
-                if let Some(reason) = candidate.get("finishReason").filter(|v| !v.is_null()) {
-                    if !matches!(
-                        reason.as_str(),
-                        Some("STOP" | "MAX_TOKENS" | "SAFETY" | "RECITATION")
-                    ) {
+            if let Some(candidates) = value.get("candidates").and_then(Value::as_array) {
+                for candidate in candidates {
+                    let index = candidate.get("index").and_then(Value::as_u64).unwrap_or(0);
+                    if index >= 128 {
                         return Err(());
                     }
-                    self.finished_choices[index as usize] = true;
+                    self.started_choices[index as usize] = true;
+                    if let Some(reason) = candidate.get("finishReason").filter(|v| !v.is_null()) {
+                        if !matches!(
+                            reason.as_str(),
+                            Some("STOP" | "MAX_TOKENS" | "SAFETY" | "RECITATION")
+                        ) {
+                            return Err(());
+                        }
+                        self.finished_choices[index as usize] = true;
+                    }
                 }
+                self.native_finished = self.started_choices.iter().any(|started| *started)
+                    && self
+                        .started_choices
+                        .iter()
+                        .zip(self.finished_choices)
+                        .all(|(started, finished)| !*started || finished);
             }
-            self.native_finished = self.started_choices.iter().any(|started| *started)
-                && self
-                    .started_choices
-                    .iter()
-                    .zip(self.finished_choices)
-                    .all(|(started, finished)| !*started || finished);
             return Ok(());
         }
         let kind = value.get("type").and_then(Value::as_str).ok_or(())?;
@@ -1909,6 +1648,29 @@ fn bytes_response(status: StatusCode, media: &'static str, bytes: Bytes) -> Resp
     let body = Full::new(bytes)
         .map_err(|never| match never {})
         .boxed_unsync();
+    body_response(status, media, body)
+}
+
+fn catalog_response(bytes: Vec<u8>, permit: OwnedSemaphorePermit) -> Response<Body> {
+    let frames =
+        futures_util::stream::unfold((bytes, 0, permit), |(bytes, offset, permit)| async move {
+            if offset == bytes.len() {
+                return None;
+            }
+            let end = (offset + CHUNK_LIMIT).min(bytes.len());
+            // Copy a bounded chunk: a slow reader's final frame must not retain
+            // the complete catalog allocation after the admission is released.
+            let chunk = Bytes::copy_from_slice(&bytes[offset..end]);
+            Some((Ok::<_, io::Error>(Frame::data(chunk)), (bytes, end, permit)))
+        });
+    body_response(
+        StatusCode::OK,
+        "application/json",
+        StreamBody::new(frames).boxed_unsync(),
+    )
+}
+
+fn body_response(status: StatusCode, media: &'static str, body: Body) -> Response<Body> {
     let mut response = Response::new(body);
     *response.status_mut() = status;
     response.headers_mut().insert(
@@ -1921,8 +1683,7 @@ fn bytes_response(status: StatusCode, media: &'static str, bytes: Bytes) -> Resp
     );
     response
 }
-fn attributed(mut response: Response<Body>, route: &ResolvedRoute, model: &str) -> Response<Body> {
-    let provider = &route.provider_id;
+fn attributed(mut response: Response<Body>, provider: &str, model: &str) -> Response<Body> {
     // Both values came from bounded ASCII config IDs, never raw caller headers.
     if let Ok(value) = header::HeaderValue::from_str(provider) {
         response.headers_mut().insert("x-magpie-provider", value);
@@ -1930,27 +1691,17 @@ fn attributed(mut response: Response<Body>, route: &ResolvedRoute, model: &str) 
     if let Ok(value) = header::HeaderValue::from_str(model) {
         response.headers_mut().insert("x-magpie-model", value);
     }
-    if let Some(revision) = route.revision {
-        if let Ok(value) = header::HeaderValue::from_str(&revision.to_string()) {
-            response
-                .headers_mut()
-                .insert("x-magpie-state-revision", value);
-        }
-    }
-    if let Some(key) = &route.key_id {
-        if let Ok(value) = header::HeaderValue::from_str(key) {
-            response
-                .headers_mut()
-                .insert("x-magpie-provider-key", value);
-        }
-    }
     response
 }
 
 /// Validate local listener/catalog before an explicit Agent config commit.
 /// This does not claim the provider is reachable or supports a given protocol.
 pub fn probe_model(address: SocketAddr, model: &str) -> io::Result<()> {
-    if inspected_models(address)?.iter().any(|id| id == model) {
+    if inspected_gateway(address)?
+        .models
+        .iter()
+        .any(|id| id == model)
+    {
         Ok(())
     } else {
         Err(invalid("gateway_model_not_configured"))
@@ -1962,14 +1713,17 @@ pub fn probe_model(address: SocketAddr, model: &str) -> io::Result<()> {
 /// # Errors
 /// Returns a static diagnostic for invalid addresses, transport or catalog data.
 pub fn inspect_gateway(address: SocketAddr) -> io::Result<String> {
-    let models = inspected_models(address)?;
+    let report = inspected_gateway(address)?;
     Ok(json!({
         "version": magpie_core::VERSION,
         "gateway": {
             "address": address.to_string(),
             "mode": "forward_candidate",
             "provider_health": "not_probed",
-            "models": models.into_iter().map(|id| json!({
+            "server_version": report.server_version,
+            "instance_id": report.instance_id,
+            "config_source": report.config_source,
+            "models": report.models.into_iter().map(|id| json!({
                 "id": id, "source": "configured"
             })).collect::<Vec<_>>()
         }
@@ -1977,7 +1731,14 @@ pub fn inspect_gateway(address: SocketAddr) -> io::Result<String> {
     .to_string())
 }
 
-fn inspected_models(address: SocketAddr) -> io::Result<Vec<String>> {
+struct GatewayReport {
+    models: Vec<String>,
+    server_version: Option<String>,
+    instance_id: Option<String>,
+    config_source: Option<String>,
+}
+
+fn inspected_gateway(address: SocketAddr) -> io::Result<GatewayReport> {
     if !address.ip().is_loopback() || address.port() == 0 {
         return Err(invalid("candidate_requires_loopback_listener"));
     }
@@ -2009,8 +1770,36 @@ fn inspected_models(address: SocketAddr) -> io::Result<Vec<String>> {
             if value.get("mode").and_then(Value::as_str) != Some("forward_candidate") {
                 return Err(invalid("gateway_forwarder_not_ready"));
             }
-            let managed =
-                value.get("state_source").and_then(Value::as_str) == Some("provider_store");
+            let metadata = |name: &str| -> io::Result<Option<String>> {
+                match value.get(name) {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::String(text))
+                        if !text.is_empty()
+                            && text.len() <= 64
+                            && text.bytes().all(|byte| {
+                                byte.is_ascii_alphanumeric() || b"._+-".contains(&byte)
+                            }) =>
+                    {
+                        Ok(Some(text.clone()))
+                    }
+                    _ => Err(invalid("gateway_probe_invalid")),
+                }
+            };
+            let server_version = metadata("server_version")?;
+            let instance_id = metadata("instance_id")?;
+            let config_source = metadata("config_source")?;
+            if config_source
+                .as_deref()
+                .is_some_and(|source| !matches!(source, "provider_store" | "legacy_forward"))
+                || value.get("address").is_some_and(|reported| {
+                    reported
+                        .as_str()
+                        .and_then(|text| text.parse::<SocketAddr>().ok())
+                        != Some(address)
+                })
+            {
+                return Err(invalid("gateway_probe_invalid"));
+            }
             let response = client
                 .get(format!("http://{address}/v1/models"))
                 .send()
@@ -2019,7 +1808,7 @@ fn inspected_models(address: SocketAddr) -> io::Result<Vec<String>> {
             if !response.status().is_success() {
                 return Err(invalid("gateway_not_ready"));
             }
-            let bytes = read_json_response(response)
+            let bytes = read_json_bytes_limited(response, CATALOG_RESPONSE_LIMIT)
                 .await
                 .map_err(|_| invalid("gateway_probe_invalid"))?;
             let value: Value =
@@ -2027,41 +1816,56 @@ fn inspected_models(address: SocketAddr) -> io::Result<Vec<String>> {
             let items = value
                 .get("data")
                 .and_then(Value::as_array)
-                .filter(|items| {
-                    if managed {
-                        items.len() <= 512
-                    } else {
-                        !items.is_empty() && items.len() <= 128
-                    }
-                })
+                .filter(|items| items.len() <= CATALOG_MODELS_LIMIT)
                 .ok_or_else(|| invalid("gateway_probe_invalid"))?;
             let mut models = Vec::with_capacity(items.len());
+            let mut seen = BTreeSet::new();
             for item in items {
                 let id = item
                     .get("id")
                     .and_then(Value::as_str)
                     .ok_or_else(|| invalid("gateway_probe_invalid"))?;
-                let (provider, model) = id
-                    .split_once('/')
-                    .ok_or_else(|| invalid("gateway_probe_invalid"))?;
-                let valid = if managed {
-                    magpie_core::providers::is_valid_provider_id(provider)
-                        && magpie_core::providers::is_valid_model_id(model)
-                } else {
-                    valid_id(provider) && provider.len() <= 64 && valid_id(model)
-                };
-                if !valid || models.iter().any(|known| known == id) {
+                if !valid_public_model(id) || !seen.insert(id) {
                     return Err(invalid("gateway_probe_invalid"));
                 }
                 models.push(id.to_owned());
             }
-            Ok(models)
+            Ok(GatewayReport {
+                models,
+                server_version,
+                instance_id,
+                config_source,
+            })
         })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn catalog_admission_survives_chunks_and_releases_on_completion_or_disconnect() {
+        let admission = Arc::new(Semaphore::new(1));
+        let permit = admission.clone().try_acquire_owned().unwrap();
+        let mut body = catalog_response(vec![b'x'; CHUNK_LIMIT * 2 + 1], permit).into_body();
+        let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        assert_eq!(first.len(), CHUNK_LIMIT);
+        assert_eq!(admission.available_permits(), 0);
+        drop(body); // A reader disconnects before requesting the second frame.
+        assert_eq!(admission.available_permits(), 1);
+
+        let permit = admission.clone().try_acquire_owned().unwrap();
+        let mut body = catalog_response(vec![b'y'; CHUNK_LIMIT * 2 + 1], permit).into_body();
+        let mut received = 0;
+        while let Some(frame) = body.frame().await {
+            let chunk = frame.unwrap().into_data().unwrap();
+            assert!(chunk.len() <= CHUNK_LIMIT);
+            assert_eq!(admission.available_permits(), 0);
+            received += chunk.len();
+        }
+        assert_eq!(received, CHUNK_LIMIT * 2 + 1);
+        assert_eq!(admission.available_permits(), 1);
+    }
 
     struct ScheduledIo {
         request: Bytes,
@@ -2154,18 +1958,9 @@ mod tests {
                             Err(io::Error::other("synthetic-private-error")),
                         ]
                     };
-                    let route = ResolvedRoute {
-                        provider_id: "local".to_owned(),
-                        model: "synthetic".to_owned(),
-                        protocol: Protocol::OpenAiChat,
-                        endpoint: "http://127.0.0.1:1".to_owned(),
-                        headers: header::HeaderMap::new(),
-                        revision: None,
-                        key_id: None,
-                    };
                     Ok::<_, Infallible>(stream_response(
                         futures_util::stream::iter(frames),
-                        &route,
+                        "local",
                         "local/synthetic",
                     ))
                 });
@@ -2252,84 +2047,6 @@ mod tests {
                 .iter()
                 .try_for_each(|byte| parser.push(*byte).map(|_| ()))
                 .is_err()
-        );
-    }
-
-    #[test]
-    fn native_gemini_rejects_typed_unknown_and_error_events_after_finished_candidates() {
-        let candidate = b"data: {\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"safe\"}]},\"finishReason\":\"STOP\"}]}\n\n";
-        let errors: [&[u8]; 6] = [
-            b"data: {\"type\":\"error\",\"message\":\"fixture-secret\"}\n\n",
-            b"data: {\"type\":\"response.failed\",\"message\":\"fixture-secret\"}\n\n",
-            b"event: error\ndata: {\"message\":\"fixture-secret\"}\n\n",
-            b"data: {\"error\":{\"message\":\"fixture-secret\"}}\n\n",
-            b"data: {\"message\":\"fixture-secret\"}\n\n",
-            b"data: {\"type\":\"error\",\"candidates\":[],\"message\":\"fixture-secret\"}\n\n",
-        ];
-
-        for prefix in [&[][..], candidate] {
-            for error in errors {
-                let raw = [prefix, error].concat();
-                let mut parser = SseCompletion::for_protocol(Protocol::Gemini);
-                let mut forwarded = Vec::new();
-                let mut rejected = false;
-                for byte in &raw {
-                    match parser.push(*byte) {
-                        Ok(Some(event)) => forwarded.extend_from_slice(&event),
-                        Ok(None) => {}
-                        Err(()) => {
-                            rejected = true;
-                            break;
-                        }
-                    }
-                }
-                assert!(rejected, "Gemini error frame must fail closed: {error:?}");
-                assert!(
-                    !parser.completed,
-                    "error frame must not complete the request"
-                );
-                assert!(!parser.successful, "error frame must not count as success");
-                assert!(
-                    !forwarded
-                        .windows(b"fixture-secret".len())
-                        .any(|window| window == b"fixture-secret"),
-                    "error payload escaped before rejection: {forwarded:?}"
-                );
-                if !prefix.is_empty() {
-                    assert_eq!(
-                        forwarded, prefix,
-                        "preserve only the prior valid native event"
-                    );
-                } else {
-                    assert!(
-                        forwarded.is_empty(),
-                        "do not forward an initial error event"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn native_gemini_success_preserves_fragmented_candidate_and_usage_tail() {
-        let raw = b"data: {\"responseId\":\"fixture\",\"modelVersion\":\"fixture-model\",\"candidates\":[{\"index\":0,\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"safe\"}]},\"finishReason\":\"STOP\"}]}\r\n\r\ndata: {\"usageMetadata\":{\"promptTokenCount\":2,\"candidatesTokenCount\":1,\"totalTokenCount\":3}}\r\n\r\n";
-        let mut parser = SseCompletion::for_protocol(Protocol::Gemini);
-        let mut forwarded = Vec::new();
-        for byte in raw {
-            if let Some(event) = parser.push(*byte).expect("valid Gemini event") {
-                forwarded.extend_from_slice(&event);
-            }
-        }
-
-        assert!(
-            parser.finish_native(),
-            "valid candidate stream succeeds at EOF"
-        );
-        assert!(parser.completed);
-        assert!(parser.successful);
-        assert_eq!(
-            forwarded, raw,
-            "native event bytes and CRLF framing stay intact"
         );
     }
 
