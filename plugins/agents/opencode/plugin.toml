@@ -1,0 +1,14 @@
+format = "magpie-plugin/1"
+id = "agent.opencode"
+name = "OpenCode"
+version = "0.1.0"
+api_version = 1
+kind = "agent-adapter"
+enabled_by_default = true
+requires = []
+provides = ["agent.opencode"]
+
+[[contributions.agents]]
+id = "opencode"
+engine = "declarative-config/1"
+definition = "definition.json"

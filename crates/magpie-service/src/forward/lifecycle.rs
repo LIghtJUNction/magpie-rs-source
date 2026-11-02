@@ -88,6 +88,7 @@ impl ForwardServer {
         S: std::future::Future<Output = ()>,
         F: FnOnce(&GatewayIdentity) -> io::Result<()>,
     {
+        let subscriber = self.metadata_subscriber.clone();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
@@ -95,6 +96,9 @@ impl ForwardServer {
         // Native credential calls cannot be forcibly cancelled. Request tasks
         // and the listener are cancelled first; a child never hangs on exit.
         runtime.shutdown_timeout(Duration::from_millis(200));
+        if let Some(subscriber) = subscriber {
+            subscriber.flush()?;
+        }
         result
     }
 
@@ -116,6 +120,7 @@ impl ForwardServer {
             identity: self.identity,
             catalogs: Arc::new(Semaphore::new(CATALOG_ACTIVE_LIMIT)),
             stats: Arc::new(Stats::default()),
+            metadata_subscriber: self.metadata_subscriber,
         });
         let listener = tokio::net::TcpListener::from_std(self.listener)?;
         // All service initialization has succeeded; a bind-only event is not ready.

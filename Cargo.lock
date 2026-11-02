@@ -926,12 +926,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
-name = "magpie-cli"
+name = "magpie-app-plugins"
 version = "0.2.0"
 dependencies = [
  "magpie-core",
+ "rustix",
+ "serde",
+ "serde_json",
+ "toml_edit",
+]
+
+[[package]]
+name = "magpie-cli"
+version = "0.2.0"
+dependencies = [
+ "magpie-app-plugins",
+ "magpie-core",
+ "magpie-plugin-agent-codex",
+ "magpie-plugin-agent-discovery",
+ "magpie-plugin-usage",
  "magpie-service",
  "serde_json",
+ "toml_edit",
  "zeroize",
 ]
 
@@ -942,9 +958,38 @@ dependencies = [
  "getrandom 0.3.4",
  "keyring",
  "rustix",
+ "serde",
+ "serde_json",
  "sha2",
  "toml_edit",
  "zeroize",
+]
+
+[[package]]
+name = "magpie-plugin-agent-codex"
+version = "0.2.0"
+dependencies = [
+ "magpie-core",
+ "rustix",
+ "serde_json",
+ "sha2",
+ "toml_edit",
+]
+
+[[package]]
+name = "magpie-plugin-agent-discovery"
+version = "0.2.0"
+dependencies = [
+ "magpie-core",
+]
+
+[[package]]
+name = "magpie-plugin-usage"
+version = "0.2.0"
+dependencies = [
+ "magpie-core",
+ "rustix",
+ "serde_json",
 ]
 
 [[package]]
@@ -957,6 +1002,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "magpie-core",
+ "magpie-plugin-usage",
  "reqwest",
  "serde_json",
  "tokio",

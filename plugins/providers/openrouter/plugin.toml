@@ -1,0 +1,18 @@
+# Official API documentation checked 2026-11-02; no account verification.
+format = "magpie-plugin/1"
+id = "provider.openrouter"
+name = "OpenRouter"
+version = "0.1.0"
+api_version = 1
+kind = "provider-preset"
+enabled_by_default = true
+requires = []
+provides = ["provider-preset"]
+
+[[contributions.providers]]
+id = "openrouter"
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+protocol = "openai_chat"
+requires_key = true
+source = "https://openrouter.ai/docs/api_reference/overview"

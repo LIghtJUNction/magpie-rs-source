@@ -3992,12 +3992,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 
 [[package]]
+name = "magpie-app-plugins"
+version = "0.2.0"
+dependencies = [
+ "magpie-core",
+ "rustix",
+ "serde",
+ "serde_json",
+ "toml_edit 0.25.17+spec-1.1.0",
+]
+
+[[package]]
 name = "magpie-core"
 version = "0.2.0"
 dependencies = [
  "getrandom 0.3.4",
  "keyring",
  "rustix",
+ "serde",
+ "serde_json",
  "sha2 0.10.9",
  "toml_edit 0.25.17+spec-1.1.0",
  "zeroize",
@@ -4010,13 +4023,59 @@ dependencies = [
  "accesskit",
  "async-io",
  "async-process",
+ "chrono",
  "futures-lite",
  "gpui-kit",
  "gpui-kit-material",
+ "magpie-app-plugins",
  "magpie-core",
+ "magpie-plugin-agent-codex",
+ "magpie-plugin-agent-discovery",
+ "magpie-plugin-usage-ui",
+ "magpie-ui-widgets",
  "rustix",
  "serde",
  "serde_json",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "magpie-plugin-agent-codex"
+version = "0.2.0"
+dependencies = [
+ "magpie-core",
+ "rustix",
+ "serde_json",
+ "sha2 0.10.9",
+ "toml_edit 0.25.17+spec-1.1.0",
+]
+
+[[package]]
+name = "magpie-plugin-agent-discovery"
+version = "0.2.0"
+dependencies = [
+ "magpie-core",
+]
+
+[[package]]
+name = "magpie-plugin-usage-ui"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "gpui-kit",
+ "gpui-kit-material",
+ "magpie-core",
+ "magpie-ui-widgets",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "magpie-ui-widgets"
+version = "0.2.0"
+dependencies = [
+ "accesskit",
+ "gpui-kit",
  "unicode-segmentation",
 ]
 

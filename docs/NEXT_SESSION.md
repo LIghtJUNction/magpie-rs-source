@@ -1,21 +1,32 @@
 # 当前接续进度 · 2026-11-02
 
-已将远端 main 的共享 Provider、系统凭据、偏好持久化、监督网关、Codex 连续换模与 Material 实现整合。旧环境变量 Provider 原型和旧网关进程实现已由共享实现取代；原草稿仍可从 500c441/36086d0 及 wip/usage-recording-20261102 恢复，不把未接入 Usage 文件算成实现。
+此文件记录插件化 checkpoint，完整产品尚未完成。用户再次要求 Agent 功能按原版 1:1、好好设计界面和 Logo；全宽按钮/简陋表单与插件列表未获认可。宽屏 Gateway 侧栏方向曾获有条件认可，窄窗三排顶部导航被否决。底部常驻偏好提示与版本栏已删除，窄窗同侧栏收为 68px 图标栏，宽窗保留 232px 侧栏。
 
-配方保留远端 1.4.0 的全部 99 REQ，并升级到 1.4.1。ISSUE_FEEDBACK.md 记录本项目/源码仓库/Material 无 issue 的查询与三条相关上游报告，区分已修复 #4343、待确认 #4851/#4855 和本地复现。下一阶段优先检查刷新时保留显式模型选择、流内错误归属及 Usage 账务，随后贯通路由和更多 Agent 配置；完整功能与平台目标没有缩小。
+## 已有实现
 
-## 本轮验证
+- 核心保留通用 JSON/JSONC/TOML 配置事务、插件 registry、Provider/凭据、四协议 Gateway 及请求元数据接口。Codex 专属事务/探测和 68 名称目录已移入独立插件；目录数量不代表可用适配器。
+- 3 个默认 Agent 配置适配器：Codex、Claude Code、OpenCode；2 个明确版本的旧适配器默认关闭：Kimi CLI 1.52(Python)、OpenManus 固定源码。已做隔离合成配置预览、应用、换模、漂移与恢复，未执行真实 Agent/账户。
+- 20 个供应商声明式包贡献 21 个预设，自定义四协议 API 保留。预设数量不是已登录账户、OAuth 支持或真实服务兼容数量。
+- Usage 后端/桌面各独立包，Host 注入 handler/page/subscriber；关闭后撤回页面与新订阅，重开保留数据。在途 HTTP 不被关闭 Usage 中断。元数据有界、未知 token 不填零，各字段汇总显示已报告覆盖范围。
+- 新 Material 薄壳使用通用插件 Agent 页、Providers/Gateway/Plugins/Settings 及动态页面；旧 Codex 专用大窗、Snapshot/ActionsState 等已删除。Bridge 只保留通用 typed plugin IPC、Provider 与 Gateway 管理，取消/关闭等待实际清理。
+- 原配置中的外部模型仍只读显示，不自动选作待接入 Gateway 模型；Codex provider/effort 作为有界、五语 public_fields 返回。秘密和原始配置不出现在这些公开字段。
 
-- workspace 329 passed、4 ignored；Material 桌面含交互特性 80 passed、3 ignored。真实监督网关 owner 崩溃测试通过，CLI 无 GUI 启动依赖。
-- 80 个中文真实 GPUI Scene（宽/中/440/360px、浅深主题、10 场景），渲染导出推进模拟时钟，避免把 Material 导航入场动画的透明初帧作为截图。
-- Linux Wayland 原生窗口：供应商新建/刷新后，从 CLI 和实际 Gateway 读到相同模型；真实合成 HTTP 请求返回 fixture-ok；Codex 预览不改文件，连接 a → 直接换 b → 断开恢复最初配置的原始字节，未知字段保留。主题/语言偏好实际保存到磁盘，网关原生停止释放端口、重启产生新实例。
-- 取消和窗口关闭的未保存草稿确认已接到共享 Provider 页面，继续编辑保留内容；明确放弃才擦除尚未保存的密钥。组件回归与原生窗口已检查。
-- 原生 AT-SPI 仅返回应用根，不能宣称读屏通过。自动注入 ASCII 时会被本机拼音组合拦截，结束组合并切直接输入后 Ctrl+A/Tab 正常；这不等同完整 IME 验收。用户对当前视觉尚未认可，全部其他页面、真实账户和多平台仍未完成。
+## 本轮实际验证
 
-日志/像素/合成状态位于 /home/lightjunction/.cache/magpie-rs-build/smoke-20261102/。使用 scripts/desktop-fixture.py --cli PATH --desktop PATH --output NEW_EXTERNAL_DIR 启动隔离窗口；--reuse 复用本脚本的合成目录进行重启检查。真实认证目录被 bubblewrap 隔离，所有 API 调用只到 loopback fixture。未发布软件包，提交均跳过 CI。
+- 后端 workspace all-features：416 passed、4 ignored、0 failed；严格 Clippy 与 rustdoc warnings-as-errors 通过。
+- Material 桌面 workspace all-features：74 passed、1 ignored、0 failed；严格 all-target/all-features Clippy 通过。删除了不再使用的旧桌面测试，不将旧 80 项结果套到新代码。
+- 生产壳通过独立 render_preview 导出合成场景，像素与实际目视复核分开；当前日志位于外部 TASK/plugin-visual-2 与 logs/plugin-checkpoint-*。
+- 本轮重新运行 Linux Wayland 隔离窗口，实物检查宽屏和约 440px 图标栏、单行顶栏、底栏删除。完整新版 Provider/Agent/插件启停的原生操作和其余尺寸仍须继续验证，组件或像素数量不能代替。
+- CLI/headless 不启动 GPU/显示；测试不读取真实账户或 Agent 会话。没有发布软件包、AUR 安装或新的跨平台执行证据。全部 source checkpoint 使用 [skip ci]。
 
-## 后续增量：窄窗键盘与流内错误
+## 当前重点
 
-原生 360px 德语窗口发现默认 Tab 绕过表单滚动，已改为 Provider 上下文专属的键盘 Action 与完整字段顺序；不可编辑的 ID 跳过，URL/协议/API key/env/model 通过 Tab 自动滚入可见区，Shift+Tab 可返回。实际 Kit Root 的焦点回归与原生滚动分别验证，源码机器证据见 tests/results/keyboard-stream-2026-11-02.json。
+1. Agent 页按原版完整逐项对照：紧凑行、版本/状态、行内模型及可见范围、新会话默认、子代理/上下文/压缩/辅助模型等专属设置；真实写入与版本门槛在插件实现，精确恢复和 revision 保持。供应商添加也重新设计。
+2. 设置支持常规、额度、网络与共享、模型、隐私、可观测性、同步与备份、关于；语言和主题按钮；组件可拖动排序、增减并保存布局。
+3. 插件中心内置/发现/已安装，搜索/npm/GitHub/本地安装与 schema 配置，真实运行/依赖/登录状态。当前声明式/已链接 Rust 插件不等于 Node/Bun 社区宿主、OAuth 或 MCP。
+4. 路由可视化、脱敏、统计、资源库、会话各自独立可启停。脱敏要真实出站替换/流式回复还原，关闭后在途上下文仍有效；会话读取按 Agent 许可且录制默认关闭。
+5. 应用品牌重新设计，Agent/供应商使用有来源和适当许可的对应官方标识，适配浅深背景与小尺寸；不以通用图标冒充品牌。
 
-对原版 #4855，32 个协议配对/前缀以及 12 个无终态/断流/取消 fixture 未复现 HTTP200 被误计成功或重播，当前 transport counters 区分失败与取消。实际修正是将 upstream_timeout 从通用 502 映射为 Timeout/504；原生 passthrough 的 code/status/阶段诊断、Usage/插件账本仍未实现，不能登记为原版 issue 全部修复。
+配方升级到 1.5.0，保留全部 99 REQ；最新细化见 PLUGINS.md、SETTINGS_AND_PLUGIN_UI.md、ISSUE_FEEDBACK.md(F03–05)。此前 1.4.1、329 tests 和旧像素/原生结果都是历史证据，不代表当前所有路径重验。
+
+任务目录 /home/lightjunction/.cache/magpie-rs-build/smoke-20261102/；构建不在 checkout。脚本 scripts/desktop-fixture.py --cli PATH --desktop PATH --output NEW_DIR 启动合成 loopback 窗口，--reuse 复用自身 fixture；真实认证目录被 bubblewrap 隔离。桌面编译使用已安装 Rust 1.99.1（默认 1.99.0 不满足 Material MSRV）。先提交推送源仓库，再更新父仓库 gitlink；继续保留无关改动，不重置/清理工作区。

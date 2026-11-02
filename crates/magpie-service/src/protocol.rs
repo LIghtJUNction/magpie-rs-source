@@ -5,6 +5,8 @@
 //! `protocol/README.md`; an unrepresentable field is an error, never a deletion.
 //! HTTP, cancellation of sockets, routing, and accounting belong to the caller.
 
+#[path = "protocol/metadata.rs"]
+pub(crate) mod metadata;
 #[path = "protocol/model.rs"]
 mod model;
 #[path = "protocol/request.rs"]

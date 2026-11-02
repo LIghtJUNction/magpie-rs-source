@@ -1,7 +1,7 @@
 //! Explicit updates to the model of an already owned Codex connection.
 //! CLI output contains no configuration values or recovery file contents.
 
-use magpie_core::codex_transaction::{self, ConnectionStatus};
+use magpie_plugin_agent_codex::codex_transaction::{self, ConnectionStatus};
 use std::path::PathBuf;
 
 pub(crate) fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {

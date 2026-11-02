@@ -245,3 +245,17 @@ pub(crate) fn apply_material_theme(appearance: Appearance, window: &mut Window, 
 
 struct AppliedMaterialMode(bool);
 impl gpui::Global for AppliedMaterialMode {}
+
+impl From<Palette> for magpie_ui_widgets::InputTheme {
+    fn from(palette: Palette) -> Self {
+        Self {
+            surface: palette.surface,
+            inset: palette.inset,
+            border: palette.border,
+            text: palette.text,
+            muted: palette.muted,
+            accent: palette.accent,
+            selected: palette.selected,
+        }
+    }
+}

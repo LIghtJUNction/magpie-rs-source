@@ -1,0 +1,18 @@
+[package]
+name = "magpie-ui-widgets"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT"
+
+[features]
+default = []
+visual-test = ["gpui/test-support"]
+
+[dependencies]
+gpui.workspace = true
+accesskit.workspace = true
+unicode-segmentation.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

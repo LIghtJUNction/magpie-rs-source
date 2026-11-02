@@ -41,6 +41,9 @@ def main():
         (root / "codex/config.toml").write_text(
             '# Isolated desktop fixture\nmodel = "fixture-original"\nkeep_me = true\n'
         )
+        (root / "claude/settings.json").write_text('{"keep_me":true}\n')
+        (root / "xdg/opencode").mkdir(mode=0o700)
+        (root / "xdg/opencode/opencode.jsonc").write_text('// Isolated fixture\n{"keep_me":true}\n')
         stub = root / "bin/codex"
         stub.write_text("#!/bin/sh\nexit 0\n")
         stub.chmod(0o700)
@@ -71,6 +74,18 @@ def main():
             self.end_headers()
             self.wfile.write(body)
 
+        def events(self, events):
+            body = b"".join((
+                (("event: " + event + "\n") if event else "") + "data: "
+                + (payload if isinstance(payload, str) else json.dumps(payload)) + "\n\n"
+            ).encode() for event, payload in events)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            self.wfile.flush()
+
         def do_GET(self):
             if self.path != "/v1/models":
                 return self.reply({"error": "unknown fixture path"}, 404)
@@ -88,6 +103,31 @@ def main():
                                 "model": request.get("model"), "stream": request.get("stream", False)})
                 del records[:-256]
                 (root / "upstream-observations.json").write_text(json.dumps(records, indent=2) + "\n")
+            if self.path == "/v1/chat/completions" and request.get("stream"):
+                chunk = {"id": "fixture-chat", "object": "chat.completion.chunk", "created": 0,
+                         "model": request["model"]}
+                return self.events([
+                    (None, chunk | {"choices": [{"index": 0, "delta": {"role": "assistant", "content": "fixture-ok"}, "finish_reason": None}]}),
+                    (None, chunk | {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                                    "usage": {"prompt_tokens": 7, "completion_tokens": 2, "total_tokens": 9}}),
+                    (None, "[DONE]"),
+                ])
+            if self.path == "/v1/responses" and request.get("stream"):
+                response = {"id": "fixture-response", "object": "response", "created_at": 0,
+                            "status": "completed", "model": request["model"],
+                            "output": [{"id": "fixture-message", "type": "message", "role": "assistant",
+                                        "status": "completed", "content": [{"type": "output_text", "text": "fixture-ok", "annotations": []}]}],
+                            "usage": {"input_tokens": 7, "output_tokens": 2, "total_tokens": 9}}
+                events = [
+                    {"type": "response.created", "response": response | {"status": "in_progress", "output": []}},
+                    {"type": "response.output_item.added", "output_index": 0, "item": response["output"][0] | {"content": [], "status": "in_progress"}},
+                    {"type": "response.content_part.added", "output_index": 0, "content_index": 0, "item_id": "fixture-message", "part": {"type": "output_text", "text": "", "annotations": []}},
+                    {"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "item_id": "fixture-message", "delta": "fixture-ok"},
+                    {"type": "response.output_text.done", "output_index": 0, "content_index": 0, "item_id": "fixture-message", "text": "fixture-ok"},
+                    {"type": "response.output_item.done", "output_index": 0, "item": response["output"][0]},
+                    {"type": "response.completed", "response": response},
+                ]
+                return self.events([(event["type"], event) for event in events])
             if self.path == "/v1/chat/completions" and not request.get("stream"):
                 return self.reply({"id": "fixture-chat", "object": "chat.completion",
                     "model": request["model"], "choices": [{"index": 0,

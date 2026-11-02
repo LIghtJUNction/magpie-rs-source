@@ -197,14 +197,22 @@ impl GatewayPage {
         }
     }
 
-    pub(crate) fn resume_after_close_cancelled(&mut self, cx: &mut Context<Self>) {
-        self.closing = false;
-        cx.notify();
-    }
-
     pub(crate) fn begin_closing(&mut self, cx: &mut Context<Self>) {
         self.closing = true;
         self.stop();
+        cx.notify();
+    }
+
+    #[cfg(all(test, feature = "visual-test"))]
+    pub(crate) fn closing_for_preview(&self) -> bool {
+        self.closing
+    }
+
+    #[cfg(all(test, feature = "visual-test"))]
+    pub(crate) fn preview_controller(&mut self, owner: OwnedGateway, cx: &mut Context<Self>) {
+        self.state = owner.state();
+        self.controller = Some(owner);
+        self.initialized = true;
         cx.notify();
     }
 
@@ -550,10 +558,6 @@ impl Render for GatewayPage {
             .w_full()
             .flex()
             .flex_col()
-            .rounded(px(7.0))
-            .border_1()
-            .border_color(rgb(palette.border))
-            .bg(rgb(palette.surface))
             .child(
                 div()
                     .p(px(16.0))
@@ -640,7 +644,6 @@ impl Render for GatewayPage {
                 div()
                     .px(px(16.0))
                     .py(px(12.0))
-                    .border_t_1()
                     .border_color(rgb(palette.border))
                     .flex()
                     .flex_wrap()
@@ -671,7 +674,6 @@ impl Render for GatewayPage {
             .child(
                 div()
                     .p(px(16.0))
-                    .border_t_1()
                     .border_color(rgb(palette.border))
                     .flex()
                     .gap(px(16.0))

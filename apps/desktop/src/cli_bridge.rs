@@ -1,7 +1,7 @@
 //! Bounded, versioned adapter to the Magpie CLI shipped beside the desktop app.
 //!
-//! The GUI never parses or writes Codex TOML. Success replies contain ownership
-//! and field names only; arbitrary CLI diagnostics never cross this boundary.
+//! Configuration changes use plugin-owned CLI commands. Arbitrary CLI diagnostics
+//! never cross this boundary. Agent-specific protocols belong to their plugins.
 //! Keep this module independent of GPUI so its process protocol can be tested
 //! without a window server or any real user configuration.
 
@@ -33,15 +33,6 @@ const VERSION_LINE: &[u8] = b"magpie 0.2.0";
 const STDOUT_LIMIT: usize = 32 * 1024 * 1024;
 const STDERR_LIMIT: usize = 8 * 1024;
 const MAX_MODELS: usize = magpie_core::provider_store::MAX_TOTAL_MODELS;
-const OWNED_FIELDS: [&str; 7] = [
-    "model",
-    "model_provider",
-    "model_providers.magpie.name",
-    "model_providers.magpie.base_url",
-    "model_providers.magpie.wire_api",
-    "model_providers.magpie.requires_openai_auth",
-    "model_providers.magpie.supports_websockets",
-];
 
 // 0: idle; 1: admitted request; 2: cleanup could not be proved complete.
 // A dropped request never admits an unbounded succession of orphaned children.
@@ -51,6 +42,17 @@ pub(crate) static PROCESS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::ne
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
+    PluginToggle {
+        owner: String,
+        enabled: bool,
+        revision: u64,
+    },
+    PluginCall {
+        owner: String,
+        operation: String,
+        arguments: Vec<String>,
+        mutation: bool,
+    },
     RefreshProvider {
         store: PathBuf,
         id: String,
@@ -59,49 +61,43 @@ pub enum Request {
     Inspect {
         address: SocketAddr,
     },
-    Preview {
-        config: PathBuf,
-        model: String,
-        address: SocketAddr,
-    },
-    Apply {
-        config: PathBuf,
-        model: String,
-        address: SocketAddr,
-    },
-    ModelPreview {
-        config: PathBuf,
-        model: String,
-        /// False is a read-only ownership/address observation usable offline.
-        check_catalog: bool,
-    },
-    ModelApply {
-        config: PathBuf,
-        model: String,
-        address: SocketAddr,
-        revision: String,
-    },
-    Status {
-        config: PathBuf,
-    },
-    Disconnect {
-        config: PathBuf,
-    },
 }
 
 impl Request {
     pub const fn is_mutation(&self) -> bool {
-        matches!(
-            self,
-            Self::Apply { .. }
-                | Self::ModelApply { .. }
-                | Self::Disconnect { .. }
-                | Self::RefreshProvider { .. }
-        )
+        match self {
+            Self::RefreshProvider { .. } | Self::PluginToggle { .. } => true,
+            Self::PluginCall { mutation, .. } => *mutation,
+            Self::Inspect { .. } => false,
+        }
     }
 
     fn validate(&self) -> Result<(), BridgeError> {
         match self {
+            Self::PluginToggle {
+                owner, revision, ..
+            } => {
+                if !valid_plugin_id(owner) || *revision == u64::MAX {
+                    return Err(BridgeError::new(ErrorKind::ConfigInvalid));
+                }
+            }
+            Self::PluginCall {
+                owner,
+                operation,
+                arguments,
+                ..
+            } => {
+                if !valid_plugin_id(owner)
+                    || !valid_plugin_id(operation)
+                    || arguments.len() > 64
+                    || arguments.iter().any(|argument| {
+                        argument.len() > 4096 || argument.chars().any(char::is_control)
+                    })
+                    || arguments.iter().map(String::len).sum::<usize>() > 64 * 1024
+                {
+                    return Err(BridgeError::new(ErrorKind::ConfigInvalid));
+                }
+            }
             Self::RefreshProvider {
                 store,
                 id,
@@ -113,44 +109,6 @@ impl Request {
                 }
             }
             Self::Inspect { address } => validate_address(*address)?,
-            Self::ModelPreview { config, model, .. } | Self::ModelApply { config, model, .. } => {
-                validate_config(config)?;
-                if !writable_model(model) {
-                    return Err(BridgeError::new(ErrorKind::InvalidModel));
-                }
-                if !transactions_supported() {
-                    return Err(BridgeError::new(ErrorKind::PlatformUnsupported));
-                }
-                if let Self::ModelApply {
-                    address, revision, ..
-                } = self
-                {
-                    validate_address(*address)?;
-                    if !valid_revision(revision) {
-                        return Err(BridgeError::new(ErrorKind::ConfigConflict));
-                    }
-                }
-            }
-            Self::Preview {
-                config,
-                model,
-                address,
-            }
-            | Self::Apply {
-                config,
-                model,
-                address,
-            } => {
-                validate_config(config)?;
-                validate_address(*address)?;
-                if !writable_model(model) {
-                    return Err(BridgeError::new(ErrorKind::InvalidModel));
-                }
-                if !transactions_supported() {
-                    return Err(BridgeError::new(ErrorKind::PlatformUnsupported));
-                }
-            }
-            Self::Status { config } | Self::Disconnect { config } => validate_config(config)?,
         }
         if self.is_mutation() && !transactions_supported() {
             return Err(BridgeError::new(ErrorKind::PlatformUnsupported));
@@ -163,6 +121,28 @@ impl Request {
             values.iter().map(OsString::from).collect()
         }
         match self {
+            Self::PluginToggle {
+                owner,
+                enabled,
+                revision,
+            } => words(&[
+                "plugins",
+                if *enabled { "enable" } else { "disable" },
+                owner,
+                "--if-revision",
+                &revision.to_string(),
+                "--json",
+            ]),
+            Self::PluginCall {
+                owner,
+                operation,
+                arguments,
+                ..
+            } => {
+                let mut args = words(&["plugins", "call", owner, operation, "--json"]);
+                args.extend(arguments.iter().map(OsString::from));
+                args
+            }
             Self::RefreshProvider {
                 store,
                 id,
@@ -173,57 +153,9 @@ impl Request {
                 args.extend(words(&["--if-revision", &revision.to_string(), "--json"]));
                 args
             }
-            Self::ModelPreview { config, model, .. } | Self::ModelApply { config, model, .. } => {
-                let mut args = words(&["agents", "set-model", "codex", "--config"]);
-                args.push(config.as_os_str().to_owned());
-                args.extend(words(&["--model", model]));
-                if let Self::ModelApply { revision, .. } = self {
-                    args.extend(words(&["--apply", "--if-revision", revision]));
-                } else {
-                    args.push("--dry-run".into());
-                }
-                args.push("--json".into());
-                args
-            }
             Self::Inspect { address } => {
                 let mut args = words(&["gateway", "inspect", "--listen"]);
                 args.extend([address.to_string().into(), "--json".into()]);
-                args
-            }
-            Self::Preview {
-                config,
-                model,
-                address,
-            }
-            | Self::Apply {
-                config,
-                model,
-                address,
-            } => {
-                let mut args = words(&["agents", "connect", "codex", "--config"]);
-                args.push(config.as_os_str().to_owned());
-                args.extend(words(&["--model", model, "--gateway"]));
-                args.push(address.to_string().into());
-                args.push(
-                    if self.is_mutation() {
-                        "--apply"
-                    } else {
-                        "--dry-run"
-                    }
-                    .into(),
-                );
-                args.push("--json".into());
-                args
-            }
-            Self::Status { config } | Self::Disconnect { config } => {
-                let command = if self.is_mutation() {
-                    "disconnect"
-                } else {
-                    "connection-status"
-                };
-                let mut args = words(&["agents", command, "codex", "--config"]);
-                args.push(config.as_os_str().to_owned());
-                args.push("--json".into());
                 args
             }
         }
@@ -245,20 +177,6 @@ pub struct GatewayInfo {
     pub config_source: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PreviewInfo {
-    pub config_existed: bool,
-    pub changed_fields: Vec<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ModelUpdateInfo {
-    pub revision: String,
-    pub address: SocketAddr,
-    pub ownership: Ownership,
-    pub changed_fields: Vec<String>,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ownership {
     Unmanaged,
@@ -267,34 +185,12 @@ pub enum Ownership {
     RecoveryRequired,
 }
 
-impl Ownership {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Unmanaged => "unmanaged",
-            Self::Connected => "connected",
-            Self::Drifted => "drifted",
-            Self::RecoveryRequired => "recovery-required",
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DisconnectInfo {
-    pub restored_fields: usize,
-    pub preserved_fields: usize,
-    pub config_removed: bool,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reply {
+    Plugins(serde_json::Value),
+    PluginResult(serde_json::Value),
     ProviderRefreshed { provider_id: String, revision: u64 },
     Inspected(GatewayInfo),
-    Previewed(PreviewInfo),
-    Applied(PreviewInfo),
-    ModelPreviewed(ModelUpdateInfo),
-    ModelUpdated(ModelUpdateInfo),
-    Status(Ownership),
-    Disconnected(DisconnectInfo),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -407,6 +303,10 @@ impl Cancellation {
         Self::default()
     }
 
+    pub(crate) fn from_flag(flag: Arc<AtomicBool>) -> Self {
+        Self(flag)
+    }
+
     pub fn cancel(&self) {
         self.0.store(true, Ordering::Release);
     }
@@ -424,35 +324,24 @@ pub const fn transactions_supported() -> bool {
     ))
 }
 
-/// Frozen core transaction validation. Searching/displaying Unicode catalog
-/// entries remains allowed; writing a non-ASCII model ID is not yet supported.
-pub fn writable_model(model: &str) -> bool {
-    if model.is_empty()
-        || model.len() > 512
-        || !model.is_ascii()
-        || model
-            .bytes()
-            .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
-    {
-        return false;
-    }
-    let Some((provider, name)) = model.split_once('/') else {
-        return false;
-    };
-    !provider.is_empty()
-        && !name.is_empty()
-        && provider.len() <= 128
-        && provider
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
-        && !name.bytes().any(|byte| b"\\\"'?#".contains(&byte))
-}
-
-fn valid_revision(value: &str) -> bool {
-    value.len() == 64
+fn valid_plugin_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
         && value
             .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+}
+
+fn plugin_json(bytes: &[u8]) -> Result<serde_json::Value, BridgeError> {
+    if bytes.len() > 4 * 1024 * 1024 {
+        return Err(BridgeError::new(ErrorKind::OutputTooLarge));
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| BridgeError::new(ErrorKind::InvalidReply))?;
+    if value.get("version").and_then(serde_json::Value::as_str) != Some(PROTOCOL_VERSION) {
+        return Err(BridgeError::new(ErrorKind::CliVersionMismatch));
+    }
+    Ok(value)
 }
 
 pub fn parse_address(value: &str) -> Result<SocketAddr, BridgeError> {
@@ -707,31 +596,6 @@ async fn run_resolved(
         return Err(BridgeError::new(ErrorKind::CliVersionMismatch));
     }
 
-    // The frozen status/disconnect contract must remain usable offline. Query
-    // and writes involving a model additionally prove inspect capability and
-    // re-check the chosen catalog entry on this same executable each time.
-    if let Request::Preview { model, address, .. }
-    | Request::Apply { model, address, .. }
-    | Request::ModelApply { model, address, .. } = &request
-    {
-        let inspect = Request::Inspect { address: *address };
-        let output = capture(
-            &executable,
-            &inspect.arguments(),
-            false,
-            &cancellation,
-            deadline,
-            limits,
-            &mut admission,
-        )
-        .await?;
-        let Reply::Inspected(gateway) = decode(&inspect, output)? else {
-            return Err(BridgeError::new(ErrorKind::InvalidReply));
-        };
-        if !gateway.models.iter().any(|item| item.id == *model) {
-            return Err(BridgeError::new(ErrorKind::ModelUnavailable));
-        }
-    }
     let output = capture(
         &executable,
         &request.arguments(),
@@ -742,37 +606,7 @@ async fn run_resolved(
         &mut admission,
     )
     .await?;
-    let reply = decode(&request, output)?;
-    if let (
-        Request::ModelPreview {
-            model,
-            check_catalog: true,
-            ..
-        },
-        Reply::ModelPreviewed(info),
-    ) = (&request, &reply)
-    {
-        let inspect = Request::Inspect {
-            address: info.address,
-        };
-        let output = capture(
-            &executable,
-            &inspect.arguments(),
-            false,
-            &cancellation,
-            deadline,
-            limits,
-            &mut admission,
-        )
-        .await?;
-        let Reply::Inspected(gateway) = decode(&inspect, output)? else {
-            return Err(BridgeError::new(ErrorKind::InvalidReply));
-        };
-        if !gateway.models.iter().any(|item| item.id == *model) {
-            return Err(BridgeError::new(ErrorKind::ModelUnavailable));
-        }
-    }
-    Ok(reply)
+    decode(&request, output)
 }
 
 // Not Debug: captured bytes can contain malicious output or private values.
@@ -941,53 +775,6 @@ struct ModelWire {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ConnectWire {
-    operation: String,
-    candidate: bool,
-    dry_run: bool,
-    writes_performed: bool,
-    config_existed: bool,
-    state: String,
-    gateway_readiness: String,
-    provider_readiness: String,
-    agent_execution: String,
-    changed_fields: Vec<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ModelUpdateWire {
-    operation: String,
-    dry_run: bool,
-    writes_performed: bool,
-    state: String,
-    revision: String,
-    gateway_address: String,
-    gateway_readiness: String,
-    provider_readiness: String,
-    agent_execution: String,
-    changed_fields: Vec<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StatusWire {
-    operation: String,
-    state: String,
-    gateway_readiness: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DisconnectWire {
-    operation: String,
-    restored_fields: usize,
-    preserved_fields: usize,
-    config_removed: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
 struct ErrorWire {
     version: String,
     error: ErrorDetailWire,
@@ -1044,6 +831,34 @@ fn decode(request: &Request, captured: Captured) -> Result<Reply, BridgeError> {
         return Err(error(ErrorKind::InvalidReply));
     }
     match request {
+        Request::PluginToggle { .. } => {
+            let value = plugin_json(&captured.stdout).map_err(|e| error(e.kind))?;
+            Ok(Reply::Plugins(value))
+        }
+        Request::PluginCall {
+            owner, operation, ..
+        } => {
+            if captured.stdout.len() > 4 * 1024 * 1024 {
+                return Err(error(ErrorKind::OutputTooLarge));
+            }
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct PluginCallWire {
+                version: String,
+                plugin_id: String,
+                operation: String,
+                result: serde_json::Value,
+            }
+            let wire: PluginCallWire = serde_json::from_slice(&captured.stdout)
+                .map_err(|_| error(ErrorKind::InvalidReply))?;
+            if wire.version != PROTOCOL_VERSION {
+                return Err(error(ErrorKind::CliVersionMismatch));
+            }
+            if wire.plugin_id != *owner || wire.operation != *operation {
+                return Err(error(ErrorKind::InvalidReply));
+            }
+            Ok(Reply::PluginResult(wire.result))
+        }
         Request::RefreshProvider { id, revision, .. } => {
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
@@ -1105,121 +920,6 @@ fn decode(request: &Request, captured: Captured) -> Result<Reply, BridgeError> {
                     .into_iter()
                     .map(|model| ModelInfo { id: model.id })
                     .collect(),
-            }))
-        }
-        Request::ModelPreview { .. } | Request::ModelApply { .. } => {
-            let wire: ModelUpdateWire = serde_json::from_slice(&captured.stdout)
-                .map_err(|_| error(ErrorKind::InvalidReply))?;
-            let apply = request.is_mutation();
-            let address =
-                parse_address(&wire.gateway_address).map_err(|_| error(ErrorKind::InvalidReply))?;
-            if wire.operation != "agents.set-model"
-                || wire.dry_run == apply
-                || wire.writes_performed != apply
-                || !valid_revision(&wire.revision)
-                || (wire.state != "connected" && !(apply && wire.state == "drifted"))
-                || wire.gateway_readiness
-                    != if apply {
-                        "listener_and_configured_model_checked"
-                    } else {
-                        "not_checked"
-                    }
-                || wire.provider_readiness != "not_probed"
-                || wire.agent_execution != "not_checked"
-                || (!wire.changed_fields.is_empty() && wire.changed_fields != ["model"])
-                || matches!(request, Request::ModelApply { address: expected, .. } if *expected != address)
-            {
-                return Err(error(ErrorKind::InvalidReply));
-            }
-            let info = ModelUpdateInfo {
-                revision: wire.revision,
-                address,
-                ownership: if wire.state == "connected" {
-                    Ownership::Connected
-                } else {
-                    Ownership::Drifted
-                },
-                changed_fields: wire.changed_fields,
-            };
-            Ok(if apply {
-                Reply::ModelUpdated(info)
-            } else {
-                Reply::ModelPreviewed(info)
-            })
-        }
-        Request::Preview { .. } | Request::Apply { .. } => {
-            let wire: ConnectWire = serde_json::from_slice(&captured.stdout)
-                .map_err(|_| error(ErrorKind::InvalidReply))?;
-            let apply = request.is_mutation();
-            if wire.operation != "agents.connect"
-                || !wire.candidate
-                || wire.dry_run == apply
-                || wire.writes_performed != apply
-                || wire.state != if apply { "connected" } else { "prepared" }
-                || wire.gateway_readiness
-                    != if apply {
-                        "listener_and_configured_model_checked"
-                    } else {
-                        "not_checked"
-                    }
-                || wire.provider_readiness != "not_probed"
-                || wire.agent_execution != "not_checked"
-                || wire.changed_fields.len() > OWNED_FIELDS.len()
-            {
-                return Err(error(ErrorKind::InvalidReply));
-            }
-            let mut seen = HashSet::new();
-            if wire
-                .changed_fields
-                .iter()
-                .any(|field| !OWNED_FIELDS.contains(&field.as_str()) || !seen.insert(field))
-            {
-                return Err(error(ErrorKind::InvalidReply));
-            }
-            let preview = PreviewInfo {
-                config_existed: wire.config_existed,
-                changed_fields: wire.changed_fields,
-            };
-            Ok(if apply {
-                Reply::Applied(preview)
-            } else {
-                Reply::Previewed(preview)
-            })
-        }
-        Request::Status { .. } => {
-            let wire: StatusWire = serde_json::from_slice(&captured.stdout)
-                .map_err(|_| error(ErrorKind::InvalidReply))?;
-            if wire.operation != "agents.connection-status"
-                || wire.gateway_readiness != "not_checked"
-            {
-                return Err(error(ErrorKind::InvalidReply));
-            }
-            let ownership = match wire.state.as_str() {
-                "unmanaged" => Ownership::Unmanaged,
-                "connected" => Ownership::Connected,
-                "drifted" => Ownership::Drifted,
-                "recovery-required" => Ownership::RecoveryRequired,
-                _ => return Err(error(ErrorKind::InvalidReply)),
-            };
-            Ok(Reply::Status(ownership))
-        }
-        Request::Disconnect { .. } => {
-            let wire: DisconnectWire = serde_json::from_slice(&captured.stdout)
-                .map_err(|_| error(ErrorKind::InvalidReply))?;
-            if wire.operation != "agents.disconnect"
-                || wire.restored_fields > OWNED_FIELDS.len()
-                || wire.preserved_fields > OWNED_FIELDS.len()
-                || ![0, OWNED_FIELDS.len()]
-                    .contains(&(wire.restored_fields + wire.preserved_fields))
-                || (wire.config_removed
-                    && (wire.preserved_fields != 0 || wire.restored_fields != OWNED_FIELDS.len()))
-            {
-                return Err(error(ErrorKind::InvalidReply));
-            }
-            Ok(Reply::Disconnected(DisconnectInfo {
-                restored_fields: wire.restored_fields,
-                preserved_fields: wire.preserved_fields,
-                config_removed: wire.config_removed,
             }))
         }
     }
@@ -1295,28 +995,18 @@ mod tests {
         }
     }
 
-    fn preview() -> Request {
-        Request::Preview {
-            config: config(),
-            model: "local/model".into(),
-            address: address(),
+    fn plugin_call(mutation: bool, operation: &str) -> Request {
+        Request::PluginCall {
+            owner: "agent.fixture".into(),
+            operation: operation.into(),
+            arguments: vec!["--model".into(), "local/model".into()],
+            mutation,
         }
     }
 
-    fn apply() -> Request {
-        Request::Apply {
-            config: config(),
-            model: "local/model".into(),
-            address: address(),
-        }
-    }
-
-    fn status() -> Request {
-        Request::Status { config: config() }
-    }
-
-    fn disconnect() -> Request {
-        Request::Disconnect { config: config() }
+    fn plugin_envelope(operation: &str) -> Value {
+        json!({"version":"0.2.0", "plugin_id":"agent.fixture", "operation":operation,
+            "result":{"selection":{"model":"local/model"},"metadataInput":true}})
     }
 
     fn gateway_json() -> Value {
@@ -1326,17 +1016,6 @@ mod tests {
                 "address":"127.0.0.1:3425", "mode":"forward_candidate",
                 "provider_health":"not_probed", "models":[{"id":"local/model","source":"configured"}]
             }
-        })
-    }
-
-    fn connect_json(apply: bool) -> Value {
-        json!({
-            "operation":"agents.connect", "candidate":true, "dry_run":!apply,
-            "writes_performed":apply, "config_existed":true,
-            "state":if apply { "connected" } else { "prepared" },
-            "gateway_readiness":if apply { "listener_and_configured_model_checked" } else { "not_checked" },
-            "provider_readiness":"not_probed", "agent_execution":"not_checked",
-            "changed_fields":["model","model_provider"]
         })
     }
 
@@ -1415,38 +1094,6 @@ mod tests {
     }
 
     #[test]
-    fn matches_frozen_ascii_write_validation() {
-        for valid in [
-            "local/model",
-            "a_b.c-d/model/submodel:latest",
-            "a/model;$(literal)",
-        ] {
-            assert!(writable_model(valid), "{valid}");
-        }
-        for invalid in [
-            "",
-            "model",
-            "/model",
-            "local/",
-            "local/model name",
-            "local/模型",
-            "local/line\nbreak",
-            "local/m?key",
-            "local/m#secret",
-            "local/m\\path",
-            "local/\"secret\"",
-            "local/'secret'",
-            "bad provider/model",
-        ] {
-            assert!(!writable_model(invalid), "{invalid}");
-        }
-        assert!(writable_model(&format!("p/{}", "x".repeat(510))));
-        assert!(!writable_model(&format!("p/{}", "x".repeat(511))));
-        assert!(writable_model(&format!("{}/model", "p".repeat(128))));
-        assert!(!writable_model(&format!("{}/model", "p".repeat(129))));
-    }
-
-    #[test]
     fn config_arguments_must_be_explicit_absolute_utf8_paths() {
         assert!(validate_config(&config()).is_ok());
         assert!(validate_config(Path::new("config.toml")).is_err());
@@ -1465,34 +1112,39 @@ mod tests {
     #[test]
     fn argv_preserves_literal_paths_and_model_values_without_shell() {
         let path = if cfg!(windows) {
-            PathBuf::from(r"C:\isolated path\$(literal).toml")
+            r"C:\isolated path\$(literal).toml"
         } else {
-            PathBuf::from("/isolated path/$(literal).toml")
+            "/isolated path/$(literal).toml"
         };
-        let request = Request::Preview {
-            config: path.clone(),
-            model: "a/model;$(literal)".into(),
-            address: address(),
+        let request = Request::PluginCall {
+            owner: "agent.fixture".into(),
+            operation: "preview".into(),
+            arguments: vec![
+                "--config".into(),
+                path.into(),
+                "--model".into(),
+                "a/model;$(literal)".into(),
+            ],
+            mutation: false,
         };
         assert_eq!(
             request.arguments(),
-            vec![
-                OsString::from("agents"),
-                "connect".into(),
-                "codex".into(),
-                "--config".into(),
-                path.into_os_string(),
-                "--model".into(),
-                "a/model;$(literal)".into(),
-                "--gateway".into(),
-                "127.0.0.1:3425".into(),
-                "--dry-run".into(),
-                "--json".into(),
+            [
+                "plugins",
+                "call",
+                "agent.fixture",
+                "preview",
+                "--json",
+                "--config",
+                path,
+                "--model",
+                "a/model;$(literal)"
             ]
+            .map(OsString::from)
         );
         assert!(!request.is_mutation());
-        assert!(apply().is_mutation());
-        assert!(disconnect().is_mutation());
+        assert!(plugin_call(true, "connect").is_mutation());
+        assert!(plugin_call(true, "disconnect").is_mutation());
     }
 
     #[test]
@@ -1538,7 +1190,6 @@ mod tests {
             panic!("wrong reply")
         };
         assert_eq!(gateway.models[0].id, "local/中文模型");
-        assert!(!writable_model(&gateway.models[0].id));
         assert_eq!(gateway.address, address());
         let mut empty = gateway_json();
         empty["gateway"]["models"] = json!([]);
@@ -1612,185 +1263,113 @@ mod tests {
     }
 
     #[test]
-    fn refuses_duplicate_json_keys_unknown_fields_and_multiple_objects() {
-        for bytes in [
-            br#"{"operation":"agents.connection-status","state":"connected","state":"unmanaged","gateway_readiness":"not_checked"}"#.as_slice(),
-            br#"{"operation":"agents.connection-status","state":"connected","gateway_readiness":"not_checked","extra":"secret"}"#.as_slice(),
-            br#"{"operation":"agents.connection-status","state":"connected","gateway_readiness":"not_checked"}{}"#.as_slice(),
-            br#"{"operation":"agents.connection-status","state":"connected"}"#.as_slice(),
-            br#"{"operation":"agents.connection-status","state":true,"gateway_readiness":"not_checked"}"#.as_slice(),
-            b"\xff".as_slice(),
-        ] {
-            assert_eq!(decode(&status(), Captured { success:true, stdout:bytes.to_vec(), stderr:vec![] }).expect_err("strict schema").kind, ErrorKind::InvalidReply);
-        }
-    }
-
-    #[test]
-    fn parses_preview_and_apply_without_inventing_transaction_version_field() {
-        assert_eq!(
-            parse_ok(&preview(), connect_json(false)).expect("preview"),
-            Reply::Previewed(PreviewInfo {
-                config_existed: true,
-                changed_fields: vec!["model".into(), "model_provider".into()]
-            })
-        );
-        assert!(matches!(
-            parse_ok(&apply(), connect_json(true)),
-            Ok(Reply::Applied(_))
-        ));
-        let mut wire = connect_json(false);
-        wire["version"] = "0.2.0".into();
-        assert_eq!(
-            parse_ok(&preview(), wire)
-                .expect_err("not frozen schema")
-                .kind,
-            ErrorKind::InvalidReply
-        );
-    }
-
-    #[test]
-    fn preview_can_only_return_known_field_names_without_values() {
-        for fields in [
-            json!(["model", "model"]),
-            json!(["api_key"]),
-            json!([{"field":"model","old":"secret"}]),
-            json!(["model=secret"]),
-        ] {
-            let mut wire = connect_json(false);
-            wire["changed_fields"] = fields;
+    fn generic_plugin_envelope_is_bound_to_owner_operation_and_version() {
+        for mutation in [false, true] {
+            let request = plugin_call(mutation, "metadataInput");
+            let good = plugin_envelope("metadataInput");
             assert_eq!(
-                parse_ok(&preview(), wire)
-                    .expect_err("field allowlist")
-                    .kind,
-                ErrorKind::InvalidReply
+                parse_ok(&request, good.clone()).unwrap(),
+                Reply::PluginResult(good["result"].clone())
             );
+            for (field, value, kind) in [
+                ("plugin_id", "agent.other", ErrorKind::InvalidReply),
+                ("operation", "other", ErrorKind::InvalidReply),
+                ("version", "0.1.9", ErrorKind::CliVersionMismatch),
+            ] {
+                let mut wrong = good.clone();
+                wrong[field] = json!(value);
+                let error = parse_ok(&request, wrong).unwrap_err();
+                assert_eq!(error.kind, kind, "{field}");
+                assert_eq!(error.mutation_may_have_run, mutation);
+            }
         }
     }
 
     #[test]
-    fn refuses_inconsistent_transaction_success_claims() {
-        for (field, value) in [
-            ("candidate", json!(false)),
-            ("dry_run", json!(false)),
-            ("writes_performed", json!(true)),
-            ("state", json!("connected")),
-            ("provider_readiness", json!("online")),
-            ("agent_execution", json!("executed")),
-            ("gateway_readiness", json!("healthy")),
-        ] {
-            let mut wire = connect_json(false);
-            wire[field] = value;
-            let error = parse_ok(&preview(), wire).expect_err(field);
-            assert_eq!(error.kind, ErrorKind::InvalidReply);
-            assert!(!error.mutation_may_have_run);
-        }
-        let error = parse_ok(&apply(), connect_json(false)).expect_err("apply is never dry run");
-        assert_eq!(error.kind, ErrorKind::InvalidReply);
-        assert!(error.mutation_may_have_run);
-    }
-
-    #[test]
-    fn model_update_receipts_require_exact_revision_fields_and_managed_address() {
-        let preview = Request::ModelPreview {
-            config: config(),
-            model: "local/next".into(),
-            check_catalog: true,
-        };
-        let apply = Request::ModelApply {
-            config: config(),
-            model: "local/next".into(),
-            address: address(),
-            revision: "a".repeat(64),
-        };
-        let wire = |apply: bool| {
-            json!({"operation":"agents.set-model","dry_run":!apply,"writes_performed":apply,
-            "state":"connected","revision":"b".repeat(64),"gateway_address":"127.0.0.1:3425",
-            "gateway_readiness": if apply {"listener_and_configured_model_checked"} else {"not_checked"},
-            "provider_readiness":"not_probed","agent_execution":"not_checked","changed_fields":["model"]})
-        };
-        assert!(matches!(
-            parse_ok(&preview, wire(false)).unwrap(),
-            Reply::ModelPreviewed(_)
-        ));
-        assert!(matches!(
-            parse_ok(&apply, wire(true)).unwrap(),
-            Reply::ModelUpdated(_)
-        ));
-        let args = apply.arguments();
-        assert!(args.iter().any(|arg| arg == "--if-revision"));
-        assert!(!args.iter().any(|arg| arg == "--gateway"));
-        for (field, value) in [
-            ("revision", json!("x".repeat(64))),
-            ("revision", json!("A".repeat(64))),
-            ("revision", json!("a".repeat(63))),
-            ("writes_performed", json!(true)),
-            ("changed_fields", json!(["model", "model_provider"])),
-            ("state", json!("drifted")),
-            ("gateway_address", json!("0.0.0.0:3425")),
-        ] {
-            let mut invalid = wire(false);
-            invalid[field] = value;
-            assert_eq!(
-                parse_ok(&preview, invalid).unwrap_err().kind,
-                ErrorKind::InvalidReply,
-                "{field}"
+    fn generic_plugin_envelopes_bound_bytes_and_reject_ambiguous_metadata_without_raw_diagnostics()
+    {
+        let secret = "PRIVATE_METADATA_INPUT_CANARY";
+        for mutation in [false, true] {
+            let request = plugin_call(mutation, "metadataInput");
+            let mut duplicate_owner = plugin_envelope("metadataInput").to_string();
+            duplicate_owner.insert_str(1, "\"plugin_id\":\"agent.other\",");
+            let mut duplicate_operation = plugin_envelope("metadataInput").to_string();
+            duplicate_operation.insert_str(1, "\"operation\":\"other\",");
+            let mut duplicate_version = plugin_envelope("metadataInput").to_string();
+            duplicate_version.insert_str(1, "\"version\":\"0.1.9\",");
+            let mut raw_input = plugin_envelope("metadataInput");
+            raw_input["raw_config"] = json!(secret);
+            let mut missing_result = plugin_envelope("metadataInput");
+            missing_result.as_object_mut().unwrap().remove("result");
+            let mut wrong_owner_type = plugin_envelope("metadataInput");
+            wrong_owner_type["plugin_id"] = json!({"raw":secret});
+            let mut deep = plugin_envelope("metadataInput");
+            let mut nested = json!(secret);
+            for _ in 0..130 {
+                nested = json!([nested]);
+            }
+            deep["result"] = nested;
+            for bytes in [
+                duplicate_owner.into_bytes(),
+                duplicate_operation.into_bytes(),
+                duplicate_version.into_bytes(),
+                raw_input.to_string().into_bytes(),
+                missing_result.to_string().into_bytes(),
+                wrong_owner_type.to_string().into_bytes(),
+                deep.to_string().into_bytes(),
+                b"{} {}".to_vec(),
+                vec![0xff],
+            ] {
+                let error = decode(
+                    &request,
+                    Captured {
+                        success: true,
+                        stdout: bytes,
+                        stderr: vec![],
+                    },
+                )
+                .unwrap_err();
+                assert_eq!(error.kind, ErrorKind::InvalidReply);
+                assert_eq!(error.mutation_may_have_run, mutation);
+                assert!(!format!("{error:?} {error}").contains(secret));
+            }
+            let good = serde_json::to_vec(&plugin_envelope("metadataInput")).unwrap();
+            let mut exact = vec![b' '; 4 * 1024 * 1024 - good.len()];
+            exact.extend(good);
+            assert!(
+                decode(
+                    &request,
+                    Captured {
+                        success: true,
+                        stdout: exact.clone(),
+                        stderr: vec![]
+                    }
+                )
+                .is_ok()
             );
-        }
-        let mut mismatch = wire(true);
-        mismatch["gateway_address"] = json!("127.0.0.1:4321");
-        assert!(
-            parse_ok(&apply, mismatch)
-                .unwrap_err()
-                .mutation_may_have_run
-        );
-        let mut drifted = wire(true);
-        drifted["state"] = json!("drifted");
-        assert!(
-            matches!(parse_ok(&apply, drifted).unwrap(), Reply::ModelUpdated(info) if info.ownership == Ownership::Drifted)
-        );
-    }
-
-    #[test]
-    fn status_is_exact_ownership_and_never_network_health() {
-        for state in [
-            Ownership::Unmanaged,
-            Ownership::Connected,
-            Ownership::Drifted,
-            Ownership::RecoveryRequired,
-        ] {
-            assert_eq!(parse_ok(&status(), json!({"operation":"agents.connection-status","state":state.as_str(),"gateway_readiness":"not_checked"})).expect("ownership"), Reply::Status(state));
-        }
-        for state in [
-            "online",
-            "healthy",
-            "prepared",
-            "unknown",
-            "recovery_required",
-        ] {
-            assert_eq!(parse_ok(&status(), json!({"operation":"agents.connection-status","state":state,"gateway_readiness":"not_checked"})).expect_err("unknown state").kind, ErrorKind::InvalidReply);
-        }
-    }
-
-    #[test]
-    fn disconnect_validates_counts_and_supports_aborted_prepared_transaction() {
-        for (restored, preserved, removed) in [(7, 0, true), (2, 5, false), (0, 0, false)] {
-            assert_eq!(parse_ok(&disconnect(), json!({"operation":"agents.disconnect","restored_fields":restored,"preserved_fields":preserved,"config_removed":removed})).expect("disconnect"), Reply::Disconnected(DisconnectInfo { restored_fields:restored, preserved_fields:preserved, config_removed:removed }));
-        }
-        for (restored, preserved, removed) in [
-            (8, 0, false),
-            (7, 1, false),
-            (1, 1, true),
-            (1, 1, false),
-            (0, 0, true),
-        ] {
-            assert_eq!(parse_ok(&disconnect(), json!({"operation":"agents.disconnect","restored_fields":restored,"preserved_fields":preserved,"config_removed":removed})).expect_err("counts").kind, ErrorKind::InvalidReply);
+            exact.push(b' ');
+            let error = decode(
+                &request,
+                Captured {
+                    success: true,
+                    stdout: exact,
+                    stderr: vec![],
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.kind, ErrorKind::OutputTooLarge);
+            assert_eq!(error.mutation_may_have_run, mutation);
         }
     }
 
     #[test]
     fn redacts_untrusted_diagnostics_and_preserves_mutation_uncertainty() {
         let secret = "secret-fixture-canary-api-key-123";
-        for request in [status(), apply(), disconnect()] {
+        for request in [
+            plugin_call(false, "selection"),
+            plugin_call(true, "connect"),
+            plugin_call(true, "disconnect"),
+        ] {
             let stderr = serde_json::to_vec(
                 &json!({"version":"0.2.0","error":{"code":"untrusted_code","message":secret}}),
             )
@@ -1810,7 +1389,7 @@ mod tests {
             assert!(!error.code().contains("untrusted"));
         }
         let error = decode(
-            &status(),
+            &plugin_call(false, "selection"),
             Captured {
                 success: false,
                 stdout: vec![],
@@ -1864,9 +1443,25 @@ mod tests {
     fn never_accepts_error_exit_with_success_stdout_or_success_with_stderr() {
         for (success, stdout, stderr) in [
             (false, b"{}".to_vec(), b"{}".to_vec()),
-            (true, serde_json::to_vec(&json!({"operation":"agents.connection-status","state":"connected","gateway_readiness":"not_checked"})).expect("fixture"),b"warning: private value".to_vec()),
+            (
+                true,
+                serde_json::to_vec(&plugin_envelope("selection")).expect("fixture"),
+                b"warning: private value".to_vec(),
+            ),
         ] {
-            assert_eq!(decode(&status(), Captured {success,stdout,stderr}).expect_err("channels").kind, ErrorKind::InvalidReply);
+            assert_eq!(
+                decode(
+                    &plugin_call(false, "selection"),
+                    Captured {
+                        success,
+                        stdout,
+                        stderr
+                    }
+                )
+                .expect_err("channels")
+                .kind,
+                ErrorKind::InvalidReply
+            );
         }
     }
 
@@ -2000,10 +1595,10 @@ mod tests {
                 );
                 for request in [
                     Request::Inspect { address: address() },
-                    preview(),
-                    apply(),
-                    status(),
-                    disconnect(),
+                    plugin_call(false, "preview"),
+                    plugin_call(true, "connect"),
+                    plugin_call(false, "selection"),
+                    plugin_call(true, "disconnect"),
                 ] {
                     let reply = fixture
                         .request(request.clone(), Cancellation::new(), limits())
@@ -2012,25 +1607,33 @@ mod tests {
                     fixture.assert_direct_child_reaped();
                 }
                 let operations = fixture.operations();
-                assert!(operations.contains("--dry-run"));
-                assert!(operations.contains("--apply"));
-                assert!(operations.contains("connection-status"));
+                assert!(operations.contains("preview"));
+                assert!(operations.contains("connect"));
+                assert!(operations.contains("selection"));
                 assert!(operations.contains("disconnect"));
 
                 fixture.mode("ok");
                 fixture
-                    .request(status(), Cancellation::new(), limits())
+                    .request(
+                        plugin_call(false, "selection"),
+                        Cancellation::new(),
+                        limits(),
+                    )
                     .await
                     .expect("offline status");
                 fixture
-                    .request(disconnect(), Cancellation::new(), limits())
+                    .request(
+                        plugin_call(true, "disconnect"),
+                        Cancellation::new(),
+                        limits(),
+                    )
                     .await
                     .expect("offline disconnect");
                 assert!(!fixture.operations().contains("inspect"));
 
                 fixture.mode("wrong-version");
                 let error = fixture
-                    .request(apply(), Cancellation::new(), limits())
+                    .request(plugin_call(true, "connect"), Cancellation::new(), limits())
                     .await
                     .expect_err("wrong version");
                 assert_eq!(error.kind, ErrorKind::CliVersionMismatch);
@@ -2040,7 +1643,11 @@ mod tests {
                 fixture.mode("changed-executable");
                 assert_eq!(
                     fixture
-                        .request(status(), Cancellation::new(), limits())
+                        .request(
+                            plugin_call(false, "selection"),
+                            Cancellation::new(),
+                            limits()
+                        )
                         .await
                         .expect_err("identity changed")
                         .kind,
@@ -2049,19 +1656,34 @@ mod tests {
                 assert!(fixture.operations().is_empty());
 
                 fixture.mode("missing-model");
-                let error = fixture
-                    .request(apply(), Cancellation::new(), limits())
+                let Reply::Inspected(gateway) = fixture
+                    .request(
+                        Request::Inspect { address: address() },
+                        Cancellation::new(),
+                        limits(),
+                    )
                     .await
-                    .expect_err("removed catalog entry");
-                assert_eq!(error.kind, ErrorKind::ModelUnavailable);
-                assert!(!error.mutation_may_have_run);
-                assert!(!fixture.operations().contains("--apply"));
+                    .expect("reported catalog")
+                else {
+                    panic!("inspect reply")
+                };
+                assert_eq!(
+                    gateway.models,
+                    vec![ModelInfo {
+                        id: "local/removed".into()
+                    }]
+                );
+                assert!(!fixture.operations().contains("plugins"));
 
                 for mode in ["oversized-stdout", "oversized-stderr"] {
                     fixture.mode(mode);
                     let start = Instant::now();
                     let error = fixture
-                        .request(status(), Cancellation::new(), limits())
+                        .request(
+                            plugin_call(false, "selection"),
+                            Cancellation::new(),
+                            limits(),
+                        )
                         .await
                         .expect_err(mode);
                     assert_eq!(error.kind, ErrorKind::OutputTooLarge);
@@ -2073,7 +1695,11 @@ mod tests {
                     fixture.mode(mode);
                     let start = Instant::now();
                     let error = fixture
-                        .request(status(), Cancellation::new(), limits())
+                        .request(
+                            plugin_call(false, "selection"),
+                            Cancellation::new(),
+                            limits(),
+                        )
                         .await
                         .expect_err(mode);
                     assert_eq!(error.kind, ErrorKind::TimedOut);
@@ -2095,7 +1721,7 @@ mod tests {
                 let start = Instant::now();
                 let (result, ()) = future::zip(
                     fixture.request(
-                        status(),
+                        plugin_call(false, "selection"),
                         cancellation,
                         Limits {
                             request: Duration::from_secs(3),
@@ -2119,7 +1745,10 @@ mod tests {
                     start.elapsed().as_millis()
                 );
 
-                for request in [apply(), disconnect()] {
+                for request in [
+                    plugin_call(true, "connect"),
+                    plugin_call(true, "disconnect"),
+                ] {
                     fixture.mode("mutation-sleep");
                     let error = fixture
                         .request(request, Cancellation::new(), limits())
@@ -2138,7 +1767,7 @@ mod tests {
                 let cancel = cancellation.clone();
                 let (result, ()) = future::zip(
                     fixture.request(
-                        apply(),
+                        plugin_call(true, "connect"),
                         cancellation,
                         Limits {
                             request: Duration::from_secs(3),
@@ -2156,7 +1785,7 @@ mod tests {
 
                 fixture.mode("slow-version");
                 let error = fixture
-                    .request(apply(), Cancellation::new(), limits())
+                    .request(plugin_call(true, "connect"), Cancellation::new(), limits())
                     .await
                     .expect_err("version deadline");
                 assert_eq!(error.kind, ErrorKind::TimedOut);
@@ -2166,7 +1795,11 @@ mod tests {
                 fixture.mode("invalid-json");
                 assert_eq!(
                     fixture
-                        .request(status(), Cancellation::new(), limits())
+                        .request(
+                            plugin_call(false, "selection"),
+                            Cancellation::new(),
+                            limits()
+                        )
                         .await
                         .expect_err("invalid JSON")
                         .kind,
@@ -2174,7 +1807,11 @@ mod tests {
                 );
                 fixture.mode("secret-error");
                 let error = fixture
-                    .request(status(), Cancellation::new(), limits())
+                    .request(
+                        plugin_call(false, "selection"),
+                        Cancellation::new(),
+                        limits(),
+                    )
                     .await
                     .expect_err("secret diagnostic");
                 assert_eq!(error.kind, ErrorKind::CliRejected);
@@ -2185,7 +1822,7 @@ mod tests {
                 let cancel = cancellation.clone();
                 let (result, second) = future::zip(
                     fixture.request(
-                        status(),
+                        plugin_call(false, "selection"),
                         cancellation,
                         Limits {
                             request: Duration::from_secs(3),
@@ -2195,7 +1832,11 @@ mod tests {
                     async {
                         Timer::after(Duration::from_millis(40)).await;
                         let second = fixture
-                            .request(status(), Cancellation::new(), limits())
+                            .request(
+                                plugin_call(false, "selection"),
+                                Cancellation::new(),
+                                limits(),
+                            )
                             .await;
                         cancel.cancel();
                         second
@@ -2211,7 +1852,11 @@ mod tests {
 
                 fixture.mode("ok");
                 fixture
-                    .request(status(), Cancellation::new(), limits())
+                    .request(
+                        plugin_call(false, "selection"),
+                        Cancellation::new(),
+                        limits(),
+                    )
                     .await
                     .expect("retry after reaping");
                 let cancelled = Cancellation::new();
@@ -2219,7 +1864,7 @@ mod tests {
                 fixture.mode("ok");
                 assert_eq!(
                     fixture
-                        .request(apply(), cancelled, limits())
+                        .request(plugin_call(true, "connect"), cancelled, limits())
                         .await
                         .expect_err("pre-cancel")
                         .kind,
@@ -2250,9 +1895,9 @@ fn main() {
  let mut log=fs::OpenOptions::new().create(true).append(true).open(root.join("operations")).unwrap();
  writeln!(log,"{args:?}").unwrap();
  let inspect=args.first().map(String::as_str)==Some("gateway");
- let apply=args.iter().any(|a|a=="--apply");
- let disconnect=args.get(1).map(String::as_str)==Some("disconnect");
- if mode=="sleep" || (mode=="mutation-sleep"&&(apply||disconnect)) {thread::sleep(Duration::from_secs(3));}
+ let operation=args.get(3).map(String::as_str).unwrap_or("");
+ let mutation=matches!(operation,"connect"|"disconnect");
+ if mode=="sleep" || (mode=="mutation-sleep"&&mutation) {thread::sleep(Duration::from_secs(3));}
  if mode=="oversized-stdout" {std::io::stdout().write_all(&vec![b'x';1024*1024]).unwrap();thread::sleep(Duration::from_secs(3));}
  if mode=="oversized-stderr" {std::io::stderr().write_all(&vec![b'x';1024*1024]).unwrap();thread::sleep(Duration::from_secs(3));}
  if mode=="inherited-pipe"||mode=="escaped-inherited-pipe" {
@@ -2265,10 +1910,9 @@ fn main() {
  if inspect {
    let model=if mode=="missing-model" {"local/removed"} else {"local/model"};
    println!("{{\"version\":\"0.2.0\",\"gateway\":{{\"address\":\"127.0.0.1:3425\",\"mode\":\"forward_candidate\",\"provider_health\":\"not_probed\",\"models\":[{{\"id\":\"{model}\",\"source\":\"configured\"}}]}}}}");
- } else if args.get(1).map(String::as_str)==Some("connect") {
-   println!("{{\"operation\":\"agents.connect\",\"candidate\":true,\"dry_run\":{},\"writes_performed\":{},\"config_existed\":true,\"state\":\"{}\",\"gateway_readiness\":\"{}\",\"provider_readiness\":\"not_probed\",\"agent_execution\":\"not_checked\",\"changed_fields\":[\"model\"]}}",!apply,apply,if apply {"connected"} else {"prepared"},if apply {"listener_and_configured_model_checked"} else {"not_checked"});
- } else if disconnect {println!("{{\"operation\":\"agents.disconnect\",\"restored_fields\":7,\"preserved_fields\":0,\"config_removed\":false}}");}
- else {println!("{{\"operation\":\"agents.connection-status\",\"state\":\"connected\",\"gateway_readiness\":\"not_checked\"}}");}
+ } else {
+   println!("{{\"version\":\"0.2.0\",\"plugin_id\":\"agent.fixture\",\"operation\":\"{operation}\",\"result\":{{\"selection\":{{\"model\":\"local/model\"}}}}}}");
+ }
 }
 "###;
     }

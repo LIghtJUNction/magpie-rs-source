@@ -6,14 +6,41 @@ desktop application. Version 0.2.0 remains a development preview of the complete
 99-requirement Magpie contract, including the six additions identified in the
 original Magpie 0.1.2185 changelog.
 
-Shared Provider management, system-keyring API keys, live multi-Provider
-forwarding, model discovery and the native Providers page remain the foundation.
-The latest iteration adds desktop-owned Gateway lifecycle management, model
-updates for an already connected Codex, and bounded Chat token-parameter
-compatibility. See [the latest verification and full feature audit](docs/changelog-parity-2026-10-30.md)
-and [the previous Provider/UI record](docs/provider-ui-parity-2026-10-30.md)
-for exact scope. These are incremental implementations; complete original
-feature parity, all-platform validation and user visual acceptance remain open.
+The core provides protocol forwarding, shared configuration and credentials,
+basic routing, configuration transactions and the plugin host. Optional packages
+provide Agent adapters, supplier presets, request history and discovery. The
+desktop shell uses Material components and reads its available actions and pages
+from registered contributions.
+
+The current adapters configure Codex, Claude Code and OpenCode. Two explicitly
+versioned legacy adapters are available but disabled by default. The provider
+picker offers 21 presets from 20 supplier packages, plus custom compatible APIs.
+These counts describe implemented configuration templates, not installed Agents,
+verified accounts or complete support for the original 68-Agent requirement.
+
+Usage records recent forwarded-request metadata in a separate plugin. Disable
+withdraws its page, command and recording subscription while preserving history;
+an in-flight model response can still finish normally. Token fields remain
+unknown when the upstream does not report them. Pricing, account quotas and the
+complete original Usage/session features are still pending.
+
+See [plugin contracts](plugins/README.md), [application composition](crates/magpie-app-plugins/README.md)
+and [provider sources and limits](docs/provider-presets.md). Node/npm execution,
+OAuth/community subscription migration, all-platform validation and complete
+original feature parity remain unfinished. The user rejected the previous visual
+direction; local rendering and native tests do not constitute visual acceptance.
+
+```sh
+magpie plugins list --json
+magpie plugins disable feature.usage --json
+magpie plugins enable feature.usage --json
+magpie plugins call feature.usage report --json --limit 100
+```
+
+Agent configuration changes require a read-only preview and its revision before
+apply. Connected adapters retain private recovery data and cannot be normally
+disabled until disconnected. Removing a package does not erase its retained
+definition or prevent explicit restoration of its recorded targets.
 
 ## Install
 

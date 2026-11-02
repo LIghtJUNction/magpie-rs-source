@@ -1,0 +1,14 @@
+format = "magpie-plugin/1"
+id = "agent.openmanus"
+name = "OpenManus source 3309bf4"
+version = "0.1.0"
+api_version = 1
+kind = "agent-adapter"
+enabled_by_default = false
+requires = []
+provides = ["agent.openmanus"]
+
+[[contributions.agents]]
+id = "openmanus"
+engine = "declarative-config/1"
+definition = "definition.json"

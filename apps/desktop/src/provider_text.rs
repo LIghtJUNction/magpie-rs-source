@@ -2,6 +2,11 @@ use crate::localization::Locale;
 
 #[derive(Clone, Copy)]
 pub(crate) enum ProviderText {
+    Choose,
+    Custom,
+    ChooseAction,
+    PresetHint,
+    SearchPresets,
     DiscardTitle,
     DiscardBody,
     KeepEditing,
@@ -14,7 +19,6 @@ pub(crate) enum ProviderText {
     DisabledProviders,
     EnvironmentTag,
     ModelsCount,
-    Intro,
     Add,
     Edit,
     Delete,
@@ -55,8 +59,6 @@ pub(crate) enum ProviderText {
     NoKey,
     KeyringWarning,
     NameRequired,
-    Work,
-    ModelsGroup,
     AutoSavePreferences,
     SavedPreferences,
     PreferenceError,
@@ -67,6 +69,35 @@ impl Locale {
     pub(crate) fn provider_text(self, key: ProviderText) -> &'static str {
         use ProviderText::*;
         let values = match key {
+            Choose => [
+                "Choose a provider",
+                "选择供应商",
+                "選擇供應商",
+                "プロバイダーを選択",
+                "Anbieter auswählen",
+            ],
+            Custom => [
+                "Custom provider",
+                "自定义供应商",
+                "自訂供應商",
+                "カスタムプロバイダー",
+                "Benutzerdefinierter Anbieter",
+            ],
+            ChooseAction => ["Choose", "选择", "選擇", "選択", "Auswählen"],
+            PresetHint => [
+                "Presets come from enabled plugins. Configure credentials and models in the next step; saving applies the provider.",
+                "预设由已启用的插件提供。密钥和模型在下一步配置，保存后才生效。",
+                "預設由已啟用的外掛程式提供。請在下一步設定金鑰與模型，儲存後供應商設定才會生效。",
+                "プリセットは有効なプラグインから提供されます。次のステップで認証情報とモデルを設定し、保存すると適用されます。",
+                "Voreinstellungen stammen aus aktivierten Plugins. Zugangsdaten und Modelle im nächsten Schritt konfigurieren. Die Anbieter-Konfiguration wird erst beim Speichern angewendet.",
+            ],
+            SearchPresets => [
+                "Search provider presets…",
+                "搜索供应商预设…",
+                "搜尋供應商預設…",
+                "プロバイダーのプリセットを検索…",
+                "Anbieter-Voreinstellungen suchen…",
+            ],
             DiscardTitle => [
                 "Discard unsaved changes?",
                 "放弃未保存的修改？",
@@ -139,13 +170,7 @@ impl Locale {
                 "モデル一覧の確認が必要です",
                 "Modellkatalog prüfen",
             ],
-            Intro => [
-                "Manage the providers and models available to your agents.",
-                "管理 Agent 可以使用的供应商与模型。",
-                "管理 Agent 可以使用的供應商與模型。",
-                "エージェントで使うプロバイダーとモデルを管理します。",
-                "Anbieter und Modelle für deine Agents verwalten.",
-            ],
+
             Add => [
                 "Add provider",
                 "添加供应商",
@@ -366,8 +391,7 @@ impl Locale {
                 "プロバイダー名と ID を入力してください。",
                 "Anbieternamen und ID eingeben.",
             ],
-            Work => ["Work", "工作", "工作", "ワーク", "Arbeit"],
-            ModelsGroup => ["Models", "模型", "模型", "モデル", "Modelle"],
+
             AutoSavePreferences => [
                 "Changes are saved automatically.",
                 "修改后自动保存。",

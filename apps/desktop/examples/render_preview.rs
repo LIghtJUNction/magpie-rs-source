@@ -1,185 +1,5 @@
-//! Render the production MagpieWindow into textures using isolated synthetic data.
-//!
-//! Build with --features visual-test --example render_preview, then run with
-//! --output /absolute/new/directory [--locale en|zh-CN|zh-TW|ja|de] [--all] [--size WIDTHxHEIGHT].
-//! The default baseline is the real Agents scene, light theme, at 900x560.
-//! --all includes Agents, Codex details, Providers, the Provider form and its
-//! credentials section, Gateway states, and Settings at four viewport sizes in both themes.
-//! Each scene saves a 1x PNG, the native texture and a manifest. No OS window opens.
-
-mod actions_state {
-    include!("../src/actions_state.rs");
-    impl ActionsState {
-        pub(super) fn model_update_fixture(&mut self, config: PathBuf) {
-            self.set_config_path(Some(config.clone()));
-            self.acknowledge_snapshot_refresh(true);
-            self.current_model = Some("fixture/preview-model".into());
-            self.ownership = Some(Ownership::Connected);
-            self.managed = Some(ManagedConnection {
-                address: "127.0.0.1:3425".parse().unwrap(),
-                model: "fixture/preview-model".into(),
-            });
-            self.catalog = Some(GatewayInfo {
-                address: "127.0.0.1:3425".parse().unwrap(),
-                models: vec![
-                    ModelInfo {
-                        id: "fixture/preview-model".into(),
-                    },
-                    ModelInfo {
-                        id: "fixture/next-model".into(),
-                    },
-                ],
-                server_version: Some("0.2.0".into()),
-                instance_id: Some("preview-scene".into()),
-                config_source: Some("provider_store".into()),
-            });
-            self.catalog_valid = true;
-            self.catalog_generation = 1;
-            self.selected = Some("fixture/next-model".into());
-            self.preview = Some(PreviewTicket {
-                binding: self.binding().unwrap(),
-                info: PreviewInfo {
-                    config_existed: true,
-                    changed_fields: vec!["model".into()],
-                },
-                stamp: ConfigStamp::capture(&config).unwrap(),
-                revision: Some("a".repeat(64)),
-            });
-            self.notice = Some(Notice::PreviewReady);
-        }
-    }
-}
-#[path = "../src/actions_text.rs"]
-mod actions_text;
-#[path = "../src/assets.rs"]
-mod assets;
-#[path = "../src/cli_bridge.rs"]
-mod cli_bridge;
-#[path = "../src/config_stamp.rs"]
-mod config_stamp;
-#[path = "../src/gateway_page.rs"]
-mod gateway_page;
-#[path = "../src/gateway_text.rs"]
-mod gateway_text;
-#[path = "../src/input_model.rs"]
-mod input_model;
-#[path = "../src/localization.rs"]
-mod localization;
-#[path = "../src/preferences.rs"]
-mod preferences;
-#[path = "../src/provider_text.rs"]
-mod provider_text;
-#[path = "../src/providers.rs"]
-mod providers;
-#[path = "../src/snapshot.rs"]
-mod snapshot;
-#[path = "../src/text_input.rs"]
-mod text_input;
-#[path = "../src/theme.rs"]
-mod theme;
-
-mod ui {
-    include!("../src/ui.rs");
-
-    impl MagpieWindow {
-        pub(super) fn preview_fixture(
-            &mut self,
-            root: &std::path::Path,
-            scene: super::Scene,
-            locale: Locale,
-            appearance: Appearance,
-            cx: &mut Context<Self>,
-        ) {
-            // The initial isolated discovery is drained before this is called.
-            self.refresh_task = None;
-            self.check_after_refresh = false;
-            self.locale = locale;
-            self.appearance = appearance;
-            self.page = match scene {
-                super::Scene::Settings => Page::Settings,
-                super::Scene::Gateway
-                | super::Scene::GatewayExternal
-                | super::Scene::GatewayError => Page::Gateway,
-                super::Scene::Providers
-                | super::Scene::ProviderEditor
-                | super::Scene::ProviderCredentials => Page::Providers,
-                _ => Page::Agents,
-            };
-            self.providers.update(cx, |page, cx| {
-                page.set_presentation(locale, appearance, cx);
-                page.preview_fixture(
-                    matches!(
-                        scene,
-                        super::Scene::ProviderEditor | super::Scene::ProviderCredentials
-                    ),
-                    matches!(scene, super::Scene::ProviderCredentials),
-                    self.compact,
-                    cx,
-                );
-            });
-            self.gateway.update(cx, |page, cx| {
-                page.preview_fixture(
-                    matches!(scene, super::Scene::GatewayExternal),
-                    matches!(scene, super::Scene::GatewayError),
-                    cx,
-                )
-            });
-            self.details =
-                matches!(scene, super::Scene::Codex | super::Scene::CodexUpdate).then_some("codex");
-            self.gateway_settings = matches!(scene, super::Scene::Codex);
-            self.copied = None;
-            self.pending_action = None;
-            self.pending_focus = None;
-            self.restore_root_focus = false;
-            self.roster_scroll.set_offset(point(px(0.0), px(0.0)));
-            self.detail_scroll.set_offset(point(px(0.0), px(0.0)));
-            self.settings_scroll.set_offset(point(px(0.0), px(0.0)));
-            self.actions = ActionsState::default();
-            self.actions
-                .set_config_path(Some(root.join("codex/config.toml")));
-            self.actions.acknowledge_snapshot_refresh(true);
-            self.actions.ownership = Some(Ownership::Unmanaged);
-            if matches!(scene, super::Scene::CodexUpdate) {
-                self.actions
-                    .model_update_fixture(root.join("codex/config.toml"));
-            }
-            let agents = [
-                ("codex", "Codex", Some("icons/codex-color.svg")),
-                ("claude", "Claude Code", Some("icons/claudecode-color.svg")),
-                ("gemini", "Gemini CLI", Some("icons/geminicli-color.svg")),
-                ("opencode", "OpenCode", Some("icons/opencode.svg")),
-                ("zed", "Zed", None),
-            ]
-            .into_iter()
-            .map(|(id, name, icon)| {
-                self.agent_focus
-                    .entry(id)
-                    .or_insert_with(|| cx.focus_handle().tab_index(0).tab_stop(true));
-                Agent {
-                    id,
-                    name,
-                    icon,
-                    executable: root.join("bin").join(id),
-                    config: (id == "codex").then(|| crate::snapshot::Config {
-                        path: Some(root.join("codex/config.toml")),
-                        state: ConfigFileState::ValidToml,
-                        error_line: None,
-                        fields_readable: true,
-                    }),
-                    settings: (id == "codex").then(|| crate::snapshot::ModelSettings {
-                        model: Some("fixture/preview-model".to_owned()),
-                        provider: Some("fixture".to_owned()),
-                        effort: Some("high".to_owned()),
-                    }),
-                    last_known: false,
-                }
-            })
-            .collect();
-            self.snapshot = Some(Snapshot { agents });
-            cx.notify();
-        }
-    }
-}
+//! Render the production plugin-composed shell against isolated synthetic data.
+//! No live accounts, keyring writes or supervised services are started.
 
 use std::{
     env, fs, io,
@@ -190,11 +10,12 @@ use std::{
 };
 
 use gpui::{AppContext, HeadlessAppContext, Result, px, size};
-use localization::Locale;
+use magpie_desktop::{
+    Appearance, Assets, Locale, MagpieWindow, font_for_families, init_material_theme,
+};
 use serde_json::json;
-use theme::Appearance;
 
-const GPUI_REVISION: &str = "37faef81f74fc1bb08be9939c4cffc8ede6ced2f";
+const GPUI_REVISION: &str = "47895b92558883d24e19d54fdeb876ed551d9394";
 const FIXTURE_CONFIG: &str = "model = \"fixture/preview-model\"\n\
     model_provider = \"fixture\"\nmodel_reasoning_effort = \"high\"\n";
 const VIEWPORTS: [(u32, u32); 4] = [(900, 560), (360, 560), (440, 560), (1280, 720)];
@@ -211,6 +32,9 @@ enum Scene {
     Gateway,
     GatewayExternal,
     GatewayError,
+    Usage,
+    Plugins,
+    ProviderPresets,
 }
 
 impl Scene {
@@ -226,6 +50,9 @@ impl Scene {
             Self::Gateway => "gateway",
             Self::GatewayExternal => "gateway-external",
             Self::GatewayError => "gateway-error",
+            Self::Usage => "usage",
+            Self::Plugins => "plugins",
+            Self::ProviderPresets => "provider-presets",
         }
     }
 }
@@ -427,9 +254,7 @@ fn isolated(options: &Options) -> Result<ExitCode> {
         .args(["--locale", &options.locale_name])
         .env_clear()
         .env("MAGPIE_RENDER_FIXTURE_ROOT", &fixture.0)
-        .env("HOME", fixture.0.join("home"))
         .env("USERPROFILE", fixture.0.join("home"))
-        .env("CODEX_HOME", fixture.0.join("codex"))
         .env("MAGPIE_CONFIG_DIR", fixture.0.join("config"))
         .env("XDG_CONFIG_HOME", fixture.0.join("config"))
         .env("XDG_CACHE_HOME", fixture.0.join("cache"))
@@ -484,8 +309,6 @@ fn fixture_root() -> Result<PathBuf> {
         .ok_or_else(|| invalid("worker requires the isolated launcher"))?
         .canonicalize()?;
     for (name, relative) in [
-        ("HOME", "home"),
-        ("CODEX_HOME", "codex"),
         ("PATH", "bin"),
         ("MAGPIE_CONFIG_DIR", "config"),
         ("XDG_CONFIG_HOME", "config"),
@@ -510,16 +333,16 @@ fn render(options: &Options) -> Result<()> {
     let platform = gpui::platform::current_platform(true);
     let backend = platform.text_system();
     let families = backend.all_font_names();
-    let selected_font = theme::font_for_families(&families, options.locale);
+    let selected_font = font_for_families(&families, options.locale);
     let mut cx = HeadlessAppContext::with_platform(
         backend,
-        Arc::new(assets::Assets),
+        Arc::new(Assets),
         gpui::platform::current_headless_renderer,
     );
     cx.update(|cx| {
         gpui::init(cx);
         gpui_kit_material::init(cx);
-        theme::init_material_theme(None, cx);
+        init_material_theme(None, cx);
     });
     let viewports: &[(u32, u32)] = match &options.viewport {
         Some(viewport) => std::slice::from_ref(viewport),
@@ -543,6 +366,9 @@ fn render(options: &Options) -> Result<()> {
             Scene::Gateway,
             Scene::GatewayExternal,
             Scene::GatewayError,
+            Scene::Usage,
+            Scene::Plugins,
+            Scene::ProviderPresets,
         ]
     } else {
         &[Scene::Agents]
@@ -553,7 +379,7 @@ fn render(options: &Options) -> Result<()> {
             let handle =
                 cx.open_window(size(px(width as f32), px(height as f32)), |window, cx| {
                     cx.new(|cx| {
-                        gpui::base::Root::new(cx.new(ui::MagpieWindow::new_for_preview), window, cx)
+                        gpui::base::Root::new(cx.new(MagpieWindow::new_for_preview), window, cx)
                     })
                 })?;
             // Production discovery sees only the empty synthetic PATH and HOME.
@@ -562,10 +388,16 @@ fn render(options: &Options) -> Result<()> {
                 handle.update(&mut cx, |view, window, cx| {
                     view.view()
                         .clone()
-                        .downcast::<ui::MagpieWindow>()
+                        .downcast::<MagpieWindow>()
                         .expect("preview root contains MagpieWindow")
                         .update(cx, |view, cx| {
-                            view.preview_fixture(&fixture, scene, options.locale, appearance, cx);
+                            view.preview_fixture(
+                                &fixture,
+                                scene.name(),
+                                options.locale.id(),
+                                appearance == Appearance::Dark,
+                                cx,
+                            );
                             view.focus(window, cx);
                         });
                     window.refresh();
@@ -644,11 +476,11 @@ fn render(options: &Options) -> Result<()> {
             "schema_version": 1, "gpui_revision": GPUI_REVISION,
             "mode": if options.all { "all" } else { "baseline" },
             "render_path": "HeadlessAppContext + native platform text system + current_headless_renderer",
-            "ui_source": "include!(../src/ui.rs); production MagpieWindow Render implementation",
-            "data": "five synthetic agents; one credential-free Codex configuration; three providers in an isolated real ProviderStore; synthetic password-input fixture, Gateway owned/external/error snapshots and model-update preview; no keyring writes, live accounts or supervised services launched by this renderer",
+            "ui_source": "magpie_desktop::shell; production plugin-composed MagpieWindow Render implementation",
+            "data": "registered Agent adapter fixtures; three synthetic Providers in an isolated real ProviderStore; runtime plugin catalog and provider presets; synthetic password input, Gateway states and request metadata; no keyring writes, accounts, Agent execution or supervised services launched by this renderer",
             "fonts": families, "primary_font": selected_font.family.as_ref(),
             "fallback_fonts": selected_font.fallbacks.as_ref().map(|fonts| fonts.fallback_list()),
-            "ui_source_bytes": include_bytes!("../src/ui.rs").len(),
+            "ui_source_bytes": include_bytes!("../src/shell.rs").len(),
             "records": records,
             "limitations": [
                 "Offscreen scene/text/SVG raster evidence; no OS screen capture or desktop input.",

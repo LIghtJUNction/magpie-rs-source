@@ -1,25 +1,27 @@
 //! Native Magpie desktop presentation shared with the offscreen review tool.
 
-mod actions_state;
 mod actions_text;
+mod agent_connections;
 mod assets;
 mod cli_bridge;
-mod config_stamp;
+mod extension_pages;
 mod gateway_page;
 mod gateway_text;
-mod input_model;
 mod localization;
+mod plugin_bundle;
+mod plugin_catalog;
+mod plugins_page;
 mod preferences;
 mod provider_text;
 mod providers;
-mod snapshot;
+mod shell;
 mod text_input;
 mod theme;
-mod ui;
 
 pub use assets::Assets;
-pub use theme::init_material_theme;
-pub use ui::MagpieWindow;
+pub use localization::Locale;
+pub use shell::MagpieWindow;
+pub use theme::{Appearance, font_for_families, init_material_theme};
 
 #[cfg(feature = "visual-test")]
 pub use gateway_page::GatewayPage;

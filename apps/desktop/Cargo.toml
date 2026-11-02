@@ -1,4 +1,5 @@
 [workspace]
+members = [".", "crates/ui-widgets", "crates/plugin-usage"]
 resolver = "3"
 
 [package]
@@ -10,7 +11,7 @@ rust-version = "1.99.1"
 
 [features]
 default = []
-visual-test = ["gpui/test-support"]
+visual-test = ["gpui/test-support", "magpie-ui-widgets/visual-test", "magpie-plugin-usage-ui/visual-test"]
 
 [[example]]
 name = "render_preview"
@@ -18,6 +19,11 @@ path = "examples/render_preview.rs"
 required-features = ["visual-test"]
 
 [dependencies]
+magpie-app-plugins = { path = "../../crates/magpie-app-plugins" }
+magpie-plugin-agent-discovery = { path = "../../crates/magpie-plugin-agent-discovery" }
+magpie-plugin-agent-codex = { path = "../../crates/magpie-plugin-agent-codex" }
+magpie-ui-widgets = { path = "crates/ui-widgets" }
+magpie-plugin-usage-ui = { path = "crates/plugin-usage" }
 magpie-core = { path = "../../crates/magpie-core" }
 accesskit = "=0.24.1"
 async-io = "=2.6.0"
@@ -25,6 +31,7 @@ async-process = "=2.5.0"
 futures-lite = "=2.6.1"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
+chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
 unicode-segmentation = "=1.13.3"
 gpui = { package = "gpui-kit", git = "https://github.com/longbridge/gpui-kit", rev = "bb85882e1faab845d9e7be33b69a152879a90f69" }
 gpui-kit-material = { git = "https://github.com/mizorewww/gpui-kit-material", rev = "47895b92558883d24e19d54fdeb876ed551d9394", default-features = false, features = ["buttons", "selection", "navigation", "inputs", "feedback", "containment", "embedded-symbols"] }
@@ -57,3 +64,12 @@ gpui-fast-web = { git = "https://github.com/mizorewww/gpui-kit-material", rev = 
 [patch."https://github.com/longbridge/gpui-kit"]
 gpui-kit = { git = "https://github.com/mizorewww/gpui-kit-material", rev = "47895b92558883d24e19d54fdeb876ed551d9394" }
 gpui-base = { git = "https://github.com/mizorewww/gpui-kit-material", rev = "47895b92558883d24e19d54fdeb876ed551d9394" }
+
+[workspace.dependencies]
+gpui = { package = "gpui-kit", git = "https://github.com/longbridge/gpui-kit", rev = "bb85882e1faab845d9e7be33b69a152879a90f69" }
+gpui-kit-material = { git = "https://github.com/mizorewww/gpui-kit-material", rev = "47895b92558883d24e19d54fdeb876ed551d9394", default-features = false, features = ["buttons", "selection", "navigation", "inputs", "feedback", "containment", "embedded-symbols"] }
+accesskit = "=0.24.1"
+unicode-segmentation = "=1.13.3"
+chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"

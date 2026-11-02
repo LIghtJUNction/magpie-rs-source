@@ -1,0 +1,15 @@
+format = "magpie-plugin/1"
+id = "feature.agent-discovery"
+name = "Agent discovery catalog"
+version = "0.2.0"
+api_version = 1
+kind = "feature"
+enabled_by_default = true
+requires = []
+provides = ["agent.discovery-candidates"]
+
+[[contributions.discovery]]
+id = "agent-catalog"
+engine = "agent-discovery/1"
+entries = 68
+claim = "filename_candidates_only"

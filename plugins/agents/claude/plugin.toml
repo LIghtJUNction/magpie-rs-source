@@ -1,0 +1,14 @@
+format = "magpie-plugin/1"
+id = "agent.claude"
+name = "Claude Code"
+version = "0.1.0"
+api_version = 1
+kind = "agent-adapter"
+enabled_by_default = true
+requires = []
+provides = ["agent.claude"]
+
+[[contributions.agents]]
+id = "claude"
+engine = "declarative-config/1"
+definition = "definition.json"

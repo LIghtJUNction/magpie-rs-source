@@ -32,6 +32,7 @@ use tokio::{
 
 const CHILD_CONFIG: &str = "MAGPIE_FORWARD_HTTP_TEST_CONFIG";
 const CHILD_STORE: &str = "MAGPIE_FORWARD_HTTP_TEST_STORE";
+const CHILD_METADATA: &str = "MAGPIE_FORWARD_HTTP_TEST_METADATA";
 const ADDRESS_MARKER: &str = "MAGPIE_FORWARD_HTTP_ADDRESS=";
 const KEY_ENV: &str = "MAGPIE_FORWARD_HTTP_TEST_KEY";
 const NEXT_KEY_ENV: &str = "MAGPIE_FORWARD_HTTP_TEST_NEXT_KEY";
@@ -61,8 +62,16 @@ impl ServerProcess {
 
     #[cfg(unix)]
     fn start_store(path: &std::path::Path) -> (Self, SocketAddr) {
+        Self::start_store_with_metadata(path, "enabled")
+    }
+
+    #[cfg(unix)]
+    fn start_store_with_metadata(path: &std::path::Path, metadata: &str) -> (Self, SocketAddr) {
         let mut command = Command::new(std::env::current_exe().expect("test executable"));
-        command.env(CHILD_STORE, path).env_remove(CHILD_CONFIG);
+        command
+            .env(CHILD_STORE, path)
+            .env(CHILD_METADATA, metadata)
+            .env_remove(CHILD_CONFIG);
         Self::start_command(command)
     }
 
@@ -103,11 +112,25 @@ impl Drop for ServerProcess {
     }
 }
 
+struct PanickingSubscriber;
+impl magpie_core::request_metadata::MetadataSubscriber for PanickingSubscriber {
+    fn on_request_finished(&self, _: &magpie_core::request_metadata::RequestMetadata) {
+        panic!("synthetic metadata callback failure");
+    }
+}
+
 #[test]
 fn forward_server_process() -> io::Result<()> {
     let address = "127.0.0.1:0".parse().expect("literal loopback");
     let server = if let Some(path) = std::env::var_os(CHILD_STORE) {
-        ForwardServer::bind_store(address, path.into())?
+        let path = std::path::PathBuf::from(path);
+        let server = ForwardServer::bind_store(address, path.clone())?;
+        match std::env::var(CHILD_METADATA).as_deref() {
+            Ok("enabled") => server
+                .with_metadata_subscriber(Arc::new(magpie_plugin_usage::UsagePlugin::new(&path))),
+            Ok("panic") => server.with_metadata_subscriber(Arc::new(PanickingSubscriber)),
+            _ => server,
+        }
     } else if let Ok(config) = std::env::var(CHILD_CONFIG) {
         ForwardServer::bind(address, ForwardConfig::from_json(config.as_bytes())?)?
     } else {
@@ -451,6 +474,415 @@ mod provider_store_cases {
         assert!(!response.text().await.unwrap().contains(PRIVATE));
         let _ = redirect.recorded().await;
         assert_eq!(redirect.requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn metadata_subscription_can_be_removed_without_deleting_prior_plugin_records() {
+        let http = client();
+        let fixture = Fixture::start(Reply::json(response_body(Protocol::OpenAiChat))).await;
+        let store = StoreFixture::new();
+        store.add(provider(
+            "fixture",
+            fixture.address,
+            ProviderProtocol::OpenAiChat,
+        ));
+        let (server, address) = ServerProcess::start_store(&store.path);
+        let response = send(
+            &http,
+            address,
+            Protocol::OpenAiChat,
+            false,
+            request_body(Protocol::OpenAiChat, false),
+        )
+        .await;
+        assert_eq!(response.status(), 200);
+        response.bytes().await.unwrap();
+        let original = recorded_usage(&http, address, &store, 1).await;
+        drop(server);
+        let (disabled, address) = ServerProcess::start_store_with_metadata(&store.path, "disabled");
+        let response = send(
+            &http,
+            address,
+            Protocol::OpenAiChat,
+            false,
+            request_body(Protocol::OpenAiChat, false),
+        )
+        .await;
+        assert_eq!(response.status(), 200);
+        response.bytes().await.unwrap();
+        counters_settle(&http, address, 1, 0, 0).await;
+        assert_eq!(
+            health(&http, address).await["metadata_observer"]["mode"],
+            "disabled"
+        );
+        assert_eq!(
+            magpie_plugin_usage::report(&store.path, 100).unwrap(),
+            original,
+            "no plugin means no new records; old data remains"
+        );
+        drop(disabled);
+        let (_enabled, address) = ServerProcess::start_store(&store.path);
+        let response = send(
+            &http,
+            address,
+            Protocol::OpenAiChat,
+            false,
+            request_body(Protocol::OpenAiChat, false),
+        )
+        .await;
+        response.bytes().await.unwrap();
+        let resumed = recorded_usage(&http, address, &store, 1).await;
+        assert_eq!(resumed["totals"]["requests"], 2);
+        assert_eq!(resumed["totals"]["total_tokens"], 20);
+        assert_ne!(resumed["records"][0]["id"], resumed["records"][1]["id"]);
+        assert_eq!(fixture.requests.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_panicking_metadata_subscriber_does_not_break_forwarding() {
+        let http = client();
+        let fixture = Fixture::start(Reply::json(response_body(Protocol::OpenAiChat))).await;
+        let store = StoreFixture::new();
+        store.add(provider(
+            "fixture",
+            fixture.address,
+            ProviderProtocol::OpenAiChat,
+        ));
+        let (_server, address) = ServerProcess::start_store_with_metadata(&store.path, "panic");
+        let response = send(
+            &http,
+            address,
+            Protocol::OpenAiChat,
+            false,
+            request_body(Protocol::OpenAiChat, false),
+        )
+        .await;
+        assert_eq!(response.status(), 200);
+        response.bytes().await.unwrap();
+        counters_settle(&http, address, 1, 0, 0).await;
+        assert_eq!(
+            health(&http, address).await["metadata_callback_failures"],
+            1
+        );
+        assert!(!magpie_plugin_usage::path_for_store(&store.path).exists());
+    }
+
+    async fn recorded_usage(
+        http: &reqwest::Client,
+        address: SocketAddr,
+        store: &StoreFixture,
+        written: u64,
+    ) -> Value {
+        timeout(Duration::from_secs(4), async {
+            loop {
+                let value = health(http, address).await;
+                let recording = &value["metadata_observer"];
+                assert_eq!(recording["failed"], 0, "{value}");
+                assert_eq!(recording["dropped"], 0, "{value}");
+                if recording["pending"] == 0 && recording["written"] == written {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("metadata sync completes");
+        magpie_plugin_usage::report(&store.path, 100).unwrap()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn store_usage_json_and_sse_records_all_protocol_pairs_once_without_bodies() {
+        let http = client();
+        let mut ids = std::collections::BTreeSet::new();
+        for (upstream, name) in PROTOCOLS {
+            for (entry, entry_name) in PROTOCOLS {
+                for stream in [false, true] {
+                    let reply = if stream {
+                        Reply::sse(stream_body(upstream))
+                    } else {
+                        Reply::json(response_body(upstream))
+                    };
+                    let fixture = Fixture::start(reply).await;
+                    let store = StoreFixture::new();
+                    store.add(provider(
+                        "fixture",
+                        fixture.address,
+                        ProviderProtocol::parse(name).unwrap(),
+                    ));
+                    let (server, address) = ServerProcess::start_store(&store.path);
+                    let response =
+                        send(&http, address, entry, stream, request_body(entry, stream)).await;
+                    assert_eq!(
+                        response.status(),
+                        200,
+                        "{entry_name}->{name}, stream={stream}"
+                    );
+                    response.bytes().await.expect("complete HTTP body");
+                    counters_settle(&http, address, 1, 0, 0).await;
+                    let report = recorded_usage(&http, address, &store, 1).await;
+                    assert_eq!(report["totals"]["requests"], 1);
+                    assert_eq!(report["totals"]["completed"], 1);
+                    assert_eq!(
+                        report["totals"]["reported_requests"], 1,
+                        "{entry_name}->{name}, stream={stream}: {report}"
+                    );
+                    assert_eq!(report["totals"]["input_tokens"], 7);
+                    assert_eq!(report["totals"]["output_tokens"], 3);
+                    assert_eq!(report["totals"]["total_tokens"], 10);
+                    let record = &report["records"][0];
+                    assert_eq!(record["schema"], 1);
+                    assert_eq!(record["provider_id"], "fixture");
+                    assert_eq!(record["model"], PUBLIC_MODEL);
+                    assert_eq!(record["upstream_model"], MODEL);
+                    assert_eq!(record["protocol"], entry_name);
+                    assert_eq!(record["upstream_protocol"], name);
+                    assert_eq!(record["stream"], stream);
+                    assert!(record["started_at_ms"].as_u64().unwrap() > 0);
+                    assert!(record["duration_ms"].is_u64());
+                    assert_eq!(
+                        record.as_object().unwrap().len(),
+                        12,
+                        "only metadata fields"
+                    );
+                    assert!(ids.insert(record["id"].as_str().unwrap().to_owned()));
+                    let encoded = report.to_string();
+                    for private in [TEXT, KEY, PRIVATE, "synthetic-client-key"] {
+                        assert!(!encoded.contains(private));
+                    }
+                    assert_eq!(fixture.requests.load(Ordering::SeqCst), 1);
+                    drop(server);
+                    let offline = magpie_plugin_usage::report(&store.path, 100).unwrap();
+                    assert_eq!(
+                        offline, report,
+                        "completed records survive server termination"
+                    );
+                }
+            }
+        }
+    }
+
+    fn partial_usage_stream(protocol: Protocol) -> Vec<u8> {
+        let raw = unfinished_text_stream(protocol);
+        let text = String::from_utf8(raw).unwrap();
+        let mut frames = text
+            .split("\n\n")
+            .filter(|s| !s.is_empty())
+            .map(|frame| {
+                let value: Value = serde_json::from_str(
+                    frame
+                        .lines()
+                        .find_map(|line| line.strip_prefix("data: "))
+                        .unwrap(),
+                )
+                .unwrap();
+                let name = frame
+                    .lines()
+                    .find_map(|line| line.strip_prefix("event: "))
+                    .unwrap_or("")
+                    .to_owned();
+                (name, value)
+            })
+            .collect::<Vec<_>>();
+        match protocol {
+            Protocol::OpenAiChat => {
+                frames[0].1["usage"] =
+                    json!({"prompt_tokens":7,"completion_tokens":2,"total_tokens":9})
+            }
+            Protocol::OpenAiResponses => {
+                frames[0].1["response"]["usage"] =
+                    json!({"input_tokens":7,"output_tokens":2,"total_tokens":9})
+            }
+            Protocol::Gemini => {
+                frames[0].1["usageMetadata"] =
+                    json!({"promptTokenCount":7,"candidatesTokenCount":2,"totalTokenCount":9})
+            }
+            Protocol::AnthropicMessages => {} // message_start already carries input=7, output=0.
+        }
+        frames
+            .into_iter()
+            .flat_map(|(name, value)| event(&name, value))
+            .collect()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn store_usage_sse_failed_and_cancelled_keep_known_partial_counts_once() {
+        let http = client();
+        for (index, (upstream, name)) in PROTOCOLS.into_iter().enumerate() {
+            for entry in [upstream, PROTOCOLS[(index + 1) % 4].0] {
+                for cancel in [false, true] {
+                    let gate = Arc::new(Semaphore::new(0));
+                    let mut reply = Reply::sse(partial_usage_stream(upstream));
+                    reply.gate = Some(gate.clone());
+                    reply.tail = Bytes::from(event(
+                        "error",
+                        json!({"type":"error","sequence_number":4,
+                        "error":{"code":"upstream_timeout","status":504,"message":PRIVATE}}),
+                    ));
+                    let fixture = Fixture::start(reply).await;
+                    let store = StoreFixture::new();
+                    store.add(provider(
+                        "fixture",
+                        fixture.address,
+                        ProviderProtocol::parse(name).unwrap(),
+                    ));
+                    let (_server, address) = ServerProcess::start_store(&store.path);
+                    let response =
+                        send(&http, address, entry, true, request_body(entry, true)).await;
+                    assert_eq!(response.status(), 200);
+                    let mut body = response.bytes_stream();
+                    let mut received = Vec::new();
+                    timeout(Duration::from_secs(3), async {
+                        while !String::from_utf8_lossy(&received).contains(TEXT) {
+                            received.extend_from_slice(
+                                &body.next().await.expect("delta").expect("delta bytes"),
+                            );
+                        }
+                    })
+                    .await
+                    .expect("delta before terminal");
+                    if !cancel {
+                        gate.add_permits(1);
+                        while let Some(chunk) = body.next().await {
+                            match chunk {
+                                Ok(bytes) => received.extend_from_slice(&bytes),
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                    drop(body);
+                    counters_settle(&http, address, 0, u64::from(!cancel), u64::from(cancel)).await;
+                    let report = recorded_usage(&http, address, &store, 1).await;
+                    let record = &report["records"][0];
+                    assert_eq!(
+                        record["outcome"],
+                        if cancel { "cancelled" } else { "failed" }
+                    );
+                    assert_eq!(
+                        record["usage"]["input_tokens"], 7,
+                        "{entry:?}->{upstream:?}: {report}"
+                    );
+                    let output = if upstream == Protocol::AnthropicMessages {
+                        0
+                    } else {
+                        2
+                    };
+                    assert_eq!(record["usage"]["output_tokens"], output);
+                    assert_eq!(report["totals"]["total_tokens"], 7 + output);
+                    assert_eq!(report["totals"]["requests"], 1);
+                    assert_eq!(report["totals"]["completed"], 0);
+                    assert_eq!(fixture.requests.load(Ordering::SeqCst), 1);
+                    assert!(!report.to_string().contains(PRIVATE));
+                }
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn store_usage_zero_content_errors_and_internal_retry_record_one_final_result() {
+        let http = client();
+        for (_, name) in PROTOCOLS {
+            for (entry, _) in PROTOCOLS {
+                let reply = Reply::sse(event(
+                    "error",
+                    json!({"type":"error","sequence_number":0,
+                    "error":{"code":"upstream_timeout","status":504,"message":PRIVATE}}),
+                ));
+                let fixture = Fixture::start(reply).await;
+                let store = StoreFixture::new();
+                store.add(provider(
+                    "fixture",
+                    fixture.address,
+                    ProviderProtocol::parse(name).unwrap(),
+                ));
+                let (_server, address) = ServerProcess::start_store(&store.path);
+                let response = send(&http, address, entry, true, request_body(entry, true)).await;
+                assert_eq!(response.status(), 200);
+                let _ = response.bytes().await; // Native errors deliberately truncate HTTP.
+                counters_settle(&http, address, 0, 1, 0).await;
+                let report = recorded_usage(&http, address, &store, 1).await;
+                assert_eq!(report["totals"]["requests"], 1);
+                assert_eq!(report["totals"]["failed"], 1);
+                assert_eq!(report["totals"]["reported_requests"], 0);
+                assert!(report["records"][0]["usage"].is_null());
+                for field in ["input_tokens", "output_tokens", "total_tokens"] {
+                    assert!(report["totals"][field].is_null());
+                }
+                assert_eq!(fixture.requests.load(Ordering::SeqCst), 1);
+            }
+        }
+        let fixture = Fixture::sequence(vec![
+            token_refusal("max_completion_tokens", "max_tokens"),
+            Reply::json(response_body(Protocol::OpenAiChat)),
+        ])
+        .await;
+        let store = StoreFixture::new();
+        store.add(provider(
+            "fixture",
+            fixture.address,
+            ProviderProtocol::OpenAiChat,
+        ));
+        let (_server, address) = ServerProcess::start_store(&store.path);
+        let response = send(
+            &http,
+            address,
+            Protocol::OpenAiChat,
+            false,
+            request_body(Protocol::OpenAiChat, false),
+        )
+        .await;
+        assert_eq!(response.status(), 200);
+        response.bytes().await.unwrap();
+        let report = recorded_usage(&http, address, &store, 1).await;
+        assert_eq!(report["totals"]["requests"], 1);
+        assert_eq!(report["totals"]["completed"], 1);
+        assert_eq!(report["totals"]["total_tokens"], 10);
+        assert_eq!(
+            fixture.requests.load(Ordering::SeqCst),
+            2,
+            "one safe parameter fallback, one final metadata record"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn store_usage_recording_failure_is_visible_without_blocking_inference() {
+        use std::os::unix::fs::PermissionsExt;
+        let http = client();
+        let fixture = Fixture::start(Reply::json(response_body(Protocol::OpenAiChat))).await;
+        let store = StoreFixture::new();
+        store.add(provider(
+            "fixture",
+            fixture.address,
+            ProviderProtocol::OpenAiChat,
+        ));
+        let directory = magpie_plugin_usage::path_for_store(&store.path);
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+        let (_server, address) = ServerProcess::start_store(&store.path);
+        let response = send(
+            &http,
+            address,
+            Protocol::OpenAiChat,
+            false,
+            request_body(Protocol::OpenAiChat, false),
+        )
+        .await;
+        assert_eq!(response.status(), 200);
+        response.bytes().await.unwrap();
+        counters_settle(&http, address, 1, 0, 0).await;
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let value = health(&http, address).await;
+                if value["metadata_observer"]["failed"] == 1 {
+                    assert_eq!(value["metadata_observer"]["written"], 0);
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("recording failure is observable");
+        assert!(magpie_plugin_usage::report(&store.path, 100).is_err());
+        assert_eq!(fixture.requests.load(Ordering::SeqCst), 1);
     }
 }
 

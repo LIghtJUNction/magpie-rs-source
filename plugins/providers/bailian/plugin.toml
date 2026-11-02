@@ -1,0 +1,26 @@
+# Official API documentation checked 2026-11-02; no account verification.
+format = "magpie-plugin/1"
+id = "provider.bailian"
+name = "Alibaba Bailian / Qwen"
+version = "0.1.0"
+api_version = 1
+kind = "provider-preset"
+enabled_by_default = true
+requires = []
+provides = ["provider-preset"]
+
+[[contributions.providers]]
+id = "bailian-cn"
+name = "Alibaba Bailian / Qwen (Beijing, legacy host)"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+protocol = "openai_chat"
+requires_key = true
+source = "https://help.aliyun.com/zh/model-studio/compatibility-of-openai-with-dashscope"
+
+[[contributions.providers]]
+id = "bailian-sg"
+name = "Alibaba Model Studio / Qwen (Singapore, legacy host)"
+base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+protocol = "openai_chat"
+requires_key = true
+source = "https://help.aliyun.com/zh/model-studio/compatibility-of-openai-with-dashscope"

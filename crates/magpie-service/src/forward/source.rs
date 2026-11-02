@@ -61,6 +61,11 @@ impl ForwardSource {
     }
 
     pub fn store(path: PathBuf) -> io::Result<Self> {
+        let path = if path.is_absolute() {
+            path
+        } else {
+            std::env::current_dir()?.join(path)
+        };
         ProviderStore::load(&path).map_err(|_| invalid("provider_store_unavailable"))?;
         Ok(Self::Store {
             path,

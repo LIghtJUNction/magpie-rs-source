@@ -22,7 +22,7 @@ use legacy_agent_display::{
     inspect_empty_candidate_state, render, render_unconfigured_candidates,
     render_unconfigured_default_home,
 };
-use magpie_core::agent_catalog::{
+use magpie_plugin_agent_discovery::agent_catalog::{
     Detection, DiscoveryInput, DiscoveryReport, ExecutableStyle, NotCheckedReason, ScanLimits,
     discover,
 };

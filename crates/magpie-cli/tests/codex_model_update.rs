@@ -1,10 +1,10 @@
 //! Model updates through isolated CLI children and a local synthetic Gateway.
 #![cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
 
-use magpie_core::codex_transaction::{
+use magpie_core::provider_store::{Provider, ProviderProtocol, ProviderStore};
+use magpie_plugin_agent_codex::codex_transaction::{
     commit_connect, commit_model_update, prepare_connect, prepare_model_update,
 };
-use magpie_core::provider_store::{Provider, ProviderProtocol, ProviderStore};
 use magpie_service::forward::ForwardServer;
 use serde_json::Value;
 use std::fs::{self, DirBuilder, OpenOptions};

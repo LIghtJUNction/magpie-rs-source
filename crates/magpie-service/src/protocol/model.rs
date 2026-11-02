@@ -206,7 +206,7 @@ fn checked_sum(a: Option<u64>, b: Option<u64>) -> Result<Option<u64>> {
 }
 
 impl Usage {
-    pub(super) fn decode(protocol: Protocol, v: &Value) -> Result<Self> {
+    pub(crate) fn decode(protocol: Protocol, v: &Value) -> Result<Self> {
         let mut usage = Self::default();
         match protocol {
             Protocol::OpenAiChat | Protocol::OpenAiResponses => {

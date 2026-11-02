@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "id": "opencode",
+  "name": "OpenCode",
+  "config_paths": [
+    "${OPENCODE_CONFIG}",
+    "${XDG_CONFIG_HOME}/opencode/opencode.jsonc",
+    "${XDG_CONFIG_HOME}/opencode/opencode.json",
+    "${home}/.config/opencode/opencode.jsonc",
+    "${home}/.config/opencode/opencode.json"
+  ],
+  "format": "jsonc",
+  "selection": {
+    "path": [
+      "model"
+    ],
+    "strip_prefix": "magpie/"
+  },
+  "reject_existing": [
+    [
+      "provider",
+      "magpie"
+    ]
+  ],
+  "fields": [
+    {
+      "path": [
+        "model"
+      ],
+      "value": "magpie/${model}"
+    },
+    {
+      "path": [
+        "small_model"
+      ],
+      "value": "magpie/${model}"
+    },
+    {
+      "path": [
+        "provider",
+        "magpie",
+        "npm"
+      ],
+      "value": "@ai-sdk/openai-compatible"
+    },
+    {
+      "path": [
+        "provider",
+        "magpie",
+        "name"
+      ],
+      "value": "Magpie"
+    },
+    {
+      "path": [
+        "provider",
+        "magpie",
+        "options",
+        "baseURL"
+      ],
+      "value": "${gateway}/v1"
+    },
+    {
+      "path": [
+        "provider",
+        "magpie",
+        "options",
+        "apiKey"
+      ],
+      "value": "magpie-local"
+    },
+    {
+      "path": [
+        "provider",
+        "magpie",
+        "models",
+        "${model}",
+        "name"
+      ],
+      "value": "${model}"
+    }
+  ]
+}

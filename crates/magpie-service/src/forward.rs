@@ -1,5 +1,5 @@
 //! Bounded provider forwarding with optional, explicitly selected translation.
-//! Not the full gateway contract: no account routing, prompt logging, or Usage accounting.
+//! Includes recent-request metadata, without account routing, body recording or billing.
 
 mod lifecycle;
 pub(crate) mod source;
@@ -7,6 +7,9 @@ mod token_field;
 
 pub use lifecycle::GatewayIdentity;
 
+use magpie_core::request_metadata::{
+    MetadataSubscriber, RequestMetadata, RequestOutcome, TokenUsage,
+};
 use source::ForwardSource;
 
 use crate::protocol::{
@@ -226,6 +229,7 @@ pub struct ForwardServer {
     listener: TcpListener,
     source: ForwardSource,
     identity: GatewayIdentity,
+    metadata_subscriber: Option<Arc<dyn MetadataSubscriber>>,
 }
 impl ForwardServer {
     pub fn bind(address: SocketAddr, config: ForwardConfig) -> io::Result<Self> {
@@ -256,7 +260,13 @@ impl ForwardServer {
             listener,
             source,
             identity,
+            metadata_subscriber: None,
         })
+    }
+    /// Attaches an application-owned dispatcher. The Gateway never loads feature plugins.
+    pub fn with_metadata_subscriber(mut self, subscriber: Arc<dyn MetadataSubscriber>) -> Self {
+        self.metadata_subscriber = Some(subscriber);
+        self
     }
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.listener.local_addr()
@@ -395,6 +405,7 @@ struct Stats {
     failed: AtomicU64,
     cancelled: AtomicU64,
     next_request: AtomicU64,
+    metadata_callback_failures: AtomicU64,
 }
 struct State {
     source: ForwardSource,
@@ -404,18 +415,29 @@ struct State {
     requests: Arc<Semaphore>,
     catalogs: Arc<Semaphore>,
     stats: Arc<Stats>,
+    metadata_subscriber: Option<Arc<dyn MetadataSubscriber>>,
 }
 struct Attempt {
     stats: Arc<Stats>,
     finished: bool,
+    recording: Option<(Arc<dyn MetadataSubscriber>, RequestMetadata)>,
+    observed_usage: Option<protocol::Usage>,
+    started: Instant,
     _permit: OwnedSemaphorePermit,
 }
 impl Attempt {
-    fn new(stats: Arc<Stats>, permit: OwnedSemaphorePermit) -> Self {
+    fn new(
+        stats: Arc<Stats>,
+        permit: OwnedSemaphorePermit,
+        recording: Option<(Arc<dyn MetadataSubscriber>, RequestMetadata)>,
+    ) -> Self {
         stats.active.fetch_add(1, Ordering::Relaxed);
         Self {
             stats,
             finished: false,
+            recording,
+            observed_usage: None,
+            started: Instant::now(),
             _permit: permit,
         }
     }
@@ -428,6 +450,52 @@ impl Attempt {
             };
             counter.fetch_add(1, Ordering::Relaxed);
             self.finished = true;
+            self.record(if success {
+                RequestOutcome::Completed
+            } else {
+                RequestOutcome::Failed
+            });
+        }
+    }
+    fn observe(&mut self, protocol: Protocol, value: &Value) {
+        if self.recording.is_some() {
+            protocol::metadata::observe(protocol, value, &mut self.observed_usage);
+        }
+    }
+    fn snapshot(&mut self, usage: Option<protocol::Usage>) {
+        if self.recording.is_some() {
+            if let Some(usage) = usage.filter(|u| *u != protocol::Usage::default()) {
+                self.observed_usage = Some(usage);
+            }
+        }
+    }
+    fn record(&mut self, outcome: RequestOutcome) {
+        if let Some((subscriber, mut event)) = self.recording.take() {
+            event.duration_ms = self
+                .started
+                .elapsed()
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX);
+            event.outcome = outcome;
+            event.usage = self.observed_usage.take().map(|usage| TokenUsage {
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                total_tokens: usage.total_tokens,
+                cached_input_tokens: usage.cached_input_tokens,
+                cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                reasoning_tokens: usage.reasoning_tokens,
+            });
+            // A plugin callback must not unwind through response completion or Drop.
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                subscriber.on_request_finished(&event)
+            }))
+            .is_err()
+            {
+                self.stats
+                    .metadata_callback_failures
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -436,6 +504,7 @@ impl Drop for Attempt {
         self.stats.active.fetch_sub(1, Ordering::Relaxed);
         if !self.finished {
             self.stats.cancelled.fetch_add(1, Ordering::Relaxed);
+            self.record(RequestOutcome::Cancelled);
         }
     }
 }
@@ -499,7 +568,7 @@ fn response_context(state: &State, model: &str) -> ResponseContext {
         .as_secs();
     let sequence = state.stats.next_request.fetch_add(1, Ordering::Relaxed);
     ResponseContext {
-        id: format!("magpie_{}_{created}_{sequence}", std::process::id()),
+        id: format!("magpie_{}_{sequence}", state.identity.instance_id),
         model: model.to_owned(),
         created,
     }
@@ -628,7 +697,9 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
                 "counter_semantics":"upstream_protocol_completion_not_client_delivery_or_usage",
                 "transport_counters":{"active":state.stats.active.load(Ordering::Relaxed),
                     "completed":state.stats.completed.load(Ordering::Relaxed),"failed":state.stats.failed.load(Ordering::Relaxed),
-                    "cancelled":state.stats.cancelled.load(Ordering::Relaxed)},"usage_accounting":"not_implemented"}),
+                    "cancelled":state.stats.cancelled.load(Ordering::Relaxed)},
+                "metadata_callback_failures":state.stats.metadata_callback_failures.load(Ordering::Relaxed),
+                "metadata_observer":state.metadata_subscriber.as_ref().map(|subscriber| subscriber.health()).unwrap_or_else(|| json!({"mode":"disabled"}))}),
             ),
             "/v1/models" => {
                 let permit = match state.catalogs.clone().try_acquire_owned() {
@@ -800,7 +871,32 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
             &public_model,
         );
     }
-    let mut attempt = Attempt::new(state.stats.clone(), permit);
+    let context = response_context(&state, &public_model);
+    let recording = state.metadata_subscriber.as_ref().map(|subscriber| {
+        (
+            subscriber.clone(),
+            RequestMetadata {
+                schema: 1,
+                id: context.id.clone(),
+                started_at_ms: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(u64::MAX),
+                duration_ms: 0,
+                provider_id: target.provider_id.clone(),
+                model: public_model.clone(),
+                upstream_model: model.clone(),
+                protocol: protocol::metadata::protocol_name(client).into(),
+                upstream_protocol: protocol::metadata::protocol_name(provider).into(),
+                stream,
+                outcome: RequestOutcome::Cancelled,
+                usage: None,
+            },
+        )
+    });
+    let mut attempt = Attempt::new(state.stats.clone(), permit, recording);
     let deadline = Instant::now() + TOTAL_TIMEOUT;
     let upstream = token_field::send(
         &state.client,
@@ -879,7 +975,6 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
     }
     if !stream {
         if translated || matches!(client, Protocol::AnthropicMessages | Protocol::Gemini) {
-            let context = response_context(&state, &public_model);
             let collected = timeout_at(deadline, read_json_bytes(upstream)).await;
             let bytes = match collected {
                 Ok(Ok(bytes)) => bytes,
@@ -904,6 +999,7 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
             let converted = serde_json::from_slice::<Value>(&bytes)
                 .ok()
                 .and_then(|value| {
+                    attempt.observe(provider, &value);
                     protocol::convert_response(provider, client, &value, &context).ok()
                 });
             let response = match converted {
@@ -942,7 +1038,9 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
         }
         let collected = timeout_at(deadline, read_json_response(upstream)).await;
         let validated = collected.ok().and_then(Result::ok).and_then(|bytes| {
-            protocol_response_outcome(&bytes, path == "/v1/responses")
+            let value = serde_json::from_slice::<Value>(&bytes).ok()?;
+            attempt.observe(provider, &value);
+            protocol_response_outcome(&value, path == "/v1/responses")
                 .map(|success| (bytes, success))
         });
         return match validated {
@@ -974,12 +1072,7 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
             max_output_bytes: JSON_RESPONSE_LIMIT,
             ..Limits::default()
         };
-        let converter = match SseConverter::new(
-            provider,
-            client,
-            response_context(&state, &public_model),
-            limits,
-        ) {
+        let converter = match SseConverter::new(provider, client, context, limits) {
             Ok(converter) => converter,
             Err(_) => {
                 attempt.finish(false);
@@ -1022,7 +1115,9 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
                 if !context.pending.is_empty() {
                     let length = context.pending.len().min(CHUNK_LIMIT);
                     let bytes = context.pending.split_to(length);
-                    match context.converter.push(&bytes) {
+                    let result = context.converter.push(&bytes);
+                    context.attempt.snapshot(context.converter.usage_snapshot());
+                    match result {
                         Ok(batch) => context.accept(batch),
                         Err(_) => {
                             if !context.fail(ErrorCategory::Compatibility) {
@@ -1118,7 +1213,11 @@ async fn handle_inner(mut request: Request<Incoming>, state: Arc<State>) -> Resp
             }
             while !context.pending.is_empty() {
                 let byte = context.pending.split_to(1)[0];
-                match context.parser.push(byte) {
+                let result = context.parser.push(byte);
+                if !matches!(&result, Ok(None)) {
+                    context.attempt.snapshot(context.parser.usage.clone());
+                }
+                match result {
                     Ok(Some(event)) => {
                         context.output = event;
                         if context.parser.completed {
@@ -1220,10 +1319,9 @@ async fn read_json_bytes_limited(
     Ok(bytes.freeze())
 }
 
-fn protocol_response_outcome(bytes: &[u8], responses: bool) -> Option<bool> {
-    let value = serde_json::from_slice::<Value>(bytes).ok()?;
+fn protocol_response_outcome(value: &Value, responses: bool) -> Option<bool> {
     if responses {
-        responses_outcome(&value)
+        responses_outcome(value)
     } else {
         (value.get("object").and_then(Value::as_str) == Some("chat.completion")
             && value
@@ -1286,6 +1384,7 @@ impl ConvertedStreamContext {
     fn accept(&mut self, batch: StreamBatch) {
         self.frames = batch.frames.into_iter();
         if let Some(end) = batch.end {
+            self.attempt.snapshot(end.usage);
             self.attempt
                 .finish(outcome_success(&end.outcome, self.client));
             self.stopped = true;
@@ -1343,6 +1442,7 @@ struct SseCompletion {
     cr_ends_event: bool,
     first_event: bool,
     responses: bool,
+    usage: Option<protocol::Usage>,
     protocol: Protocol,
     completed: bool,
     successful: bool,
@@ -1360,6 +1460,7 @@ impl SseCompletion {
             cr_ends_event: false,
             first_event: true,
             responses,
+            usage: None,
             protocol: if responses {
                 Protocol::OpenAiResponses
             } else {
@@ -1536,9 +1637,6 @@ impl SseCompletion {
                     (field == "event").then(|| value.strip_prefix(' ').unwrap_or(value))
                 })
                 .next_back();
-            if matches!(event_type, Some("error" | "response.failed")) {
-                return Err(());
-            }
             let data = text
                 .split(['\r', '\n'])
                 .filter_map(|line| {
@@ -1547,12 +1645,19 @@ impl SseCompletion {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
+            if matches!(event_type, Some("error" | "response.failed")) {
+                if let Ok(value) = serde_json::from_str::<Value>(&data) {
+                    protocol::metadata::observe(self.protocol, &value, &mut self.usage);
+                }
+                return Err(());
+            }
             if !data.is_empty() {
                 if matches!(
                     self.protocol,
                     Protocol::AnthropicMessages | Protocol::Gemini
                 ) {
                     let value: Value = serde_json::from_str(&data).map_err(|_| ())?;
+                    protocol::metadata::observe(self.protocol, &value, &mut self.usage);
                     let event_type = event_type.map(str::to_owned);
                     self.observe_native(&value, event_type.as_deref())?;
                 } else if !self.responses && data == "[DONE]" {
@@ -1569,6 +1674,7 @@ impl SseCompletion {
                     self.successful = true;
                 } else {
                     let value: Value = serde_json::from_str(&data).map_err(|_| ())?;
+                    protocol::metadata::observe(self.protocol, &value, &mut self.usage);
                     if value.get("error").is_some_and(|error| !error.is_null())
                         || value
                             .pointer("/response/error")

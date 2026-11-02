@@ -1,0 +1,22 @@
+format = "magpie-plugin/1"
+id = "feature.usage"
+name = "Recent Usage"
+version = "0.2.0"
+api_version = 1
+kind = "feature"
+enabled_by_default = true
+requires = []
+provides = ["usage.records", "cli.usage", "gui.usage"]
+
+[[contributions.commands]]
+name = "usage"
+handler = "usage.report"
+
+[[contributions.pages]]
+id = "usage"
+name = "Usage"
+command = "usage"
+
+[[contributions.metadata_subscribers]]
+id = "usage"
+event = "request_finished"
