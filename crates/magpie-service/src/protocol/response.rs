@@ -589,7 +589,7 @@ pub(super) fn upstream_error(body: &Value) -> GatewayError {
             (ErrorCategory::RateLimit, 429)
         }
         "invalid_request_error" | "INVALID_ARGUMENT" => (ErrorCategory::UpstreamClient, 400),
-        "timeout_error" | "DEADLINE_EXCEEDED" => (ErrorCategory::Timeout, 504),
+        "upstream_timeout" | "timeout_error" | "DEADLINE_EXCEEDED" => (ErrorCategory::Timeout, 504),
         _ => (ErrorCategory::UpstreamServer, 502),
     };
     GatewayError { category, status }

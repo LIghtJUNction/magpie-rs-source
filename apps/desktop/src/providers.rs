@@ -29,6 +29,20 @@ use crate::{
     theme::{Appearance, Palette},
 };
 
+gpui::actions!(magpie_provider, [NextControl, PreviousControl]);
+struct ProviderKeys;
+impl gpui::Global for ProviderKeys {}
+
+fn init_keys(cx: &mut App) {
+    if cx.try_global::<ProviderKeys>().is_none() {
+        cx.bind_keys([
+            gpui::KeyBinding::new("tab", NextControl, Some("MagpieProviders")),
+            gpui::KeyBinding::new("shift-tab", PreviousControl, Some("MagpieProviders")),
+        ]);
+        cx.set_global(ProviderKeys);
+    }
+}
+
 const FIELDS: [(&str, P, &str); 6] = [
     ("provider-name", P::Name, "My provider"),
     ("provider-id", P::Id, "my-provider"),
@@ -120,6 +134,7 @@ impl ProvidersPage {
     }
 
     fn at_path(path: Result<PathBuf, StoreError>, cx: &mut Context<Self>) -> Self {
+        init_keys(cx);
         let locale = Locale::system();
         let fields = FIELDS
             .into_iter()
@@ -806,6 +821,83 @@ impl ProvidersPage {
         cx.notify();
     }
 
+    fn traverse_editor(&self, backwards: bool, window: &mut Window, cx: &mut App) -> bool {
+        let Some(editor) = self
+            .editor
+            .as_ref()
+            .filter(|_| !self.busy() && self.discard.is_none())
+        else {
+            return false;
+        };
+        // GPUI's default traversal excludes clipped controls. The form must
+        // reach its offscreen fields before the fixed Save/Cancel footer.
+        let mut order = Vec::new();
+        for (id, _, _) in FIELDS {
+            if id == "provider-id" && editor.original.is_some() {
+                continue;
+            }
+            if id == "provider-key" {
+                for protocol in ProviderProtocol::ALL {
+                    order.push(
+                        self.buttons[&format!("provider-protocol:{}", protocol.as_str())].clone(),
+                    );
+                }
+            }
+            order.push(self.fields[id].read(cx).focus_handle());
+            if id == "provider-key"
+                && editor
+                    .original
+                    .as_ref()
+                    .is_some_and(|provider| provider.credential_ref.is_some())
+            {
+                order.push(self.buttons["provider-clear-key"].clone());
+            }
+        }
+        order.extend(
+            ["provider-enabled", "provider-save", "provider-cancel"]
+                .map(|id| self.buttons[id].clone()),
+        );
+        let Some(index) = order.iter().position(|handle| handle.is_focused(window)) else {
+            return false;
+        };
+        let Some(next) = (if backwards {
+            index.checked_sub(1)
+        } else {
+            Some(index + 1)
+        })
+        .and_then(|index| order.get(index)) else {
+            return false;
+        };
+        next.focus(window, cx);
+        true
+    }
+
+    fn move_focus(&mut self, backwards: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.traverse_editor(backwards, window, cx) {
+            if backwards {
+                window.focus_prev(cx);
+            } else {
+                window.focus_next(cx);
+            }
+        }
+        for (id, input) in &self.fields {
+            if input.read(cx).focus_handle().is_focused(window) {
+                if let Some(anchor) = self.anchors.get(*id) {
+                    anchor.scroll_to(window, cx);
+                }
+                break;
+            }
+        }
+        for (id, handle) in &self.buttons {
+            if handle.is_focused(window) {
+                if let Some(anchor) = self.anchors.get(id) {
+                    anchor.scroll_to(window, cx);
+                }
+                break;
+            }
+        }
+    }
+
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = &event.keystroke;
         match key.key.as_str() {
@@ -821,29 +913,7 @@ impl ProvidersPage {
             "s" if key.modifiers.control || key.modifiers.platform => self.act(Action::Save, cx),
             "r" if key.modifiers.control || key.modifiers.platform => self.refresh(cx),
             "f5" => self.refresh(cx),
-            "tab" => {
-                if key.modifiers.shift {
-                    window.focus_prev(cx);
-                } else {
-                    window.focus_next(cx);
-                }
-                for (id, input) in &self.fields {
-                    if input.read(cx).focus_handle().is_focused(window) {
-                        if let Some(anchor) = self.anchors.get(*id) {
-                            anchor.scroll_to(window, cx);
-                        }
-                        break;
-                    }
-                }
-                for (id, handle) in &self.buttons {
-                    if handle.is_focused(window) {
-                        if let Some(anchor) = self.anchors.get(id) {
-                            anchor.scroll_to(window, cx);
-                        }
-                        break;
-                    }
-                }
-            }
+            "tab" => self.move_focus(key.modifiers.shift, window, cx),
             _ => return,
         }
         cx.stop_propagation();
@@ -1476,6 +1546,13 @@ impl Render for ProvidersPage {
         div()
             .id("providers-page")
             .track_focus(&self.focus)
+            .key_context("MagpieProviders")
+            .on_action(
+                cx.listener(|view, _: &NextControl, window, cx| view.move_focus(false, window, cx)),
+            )
+            .on_action(cx.listener(|view, _: &PreviousControl, window, cx| {
+                view.move_focus(true, window, cx)
+            }))
             .on_key_down(cx.listener(Self::key_down))
             .size_full()
             .min_w_0()
@@ -1580,6 +1657,61 @@ mod tests {
         cx: &mut Context<ProvidersPage>,
     ) {
         assert!(view.fields[id].update(cx, |input, cx| input.set_text(value, cx)));
+    }
+
+    #[gpui::test]
+    fn keyboard_reaches_fields_below_the_editor_viewport(cx: &mut TestAppContext) {
+        struct Host(Entity<ProvidersPage>);
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().flex().flex_col().child(self.0.clone())
+            }
+        }
+        let fixture = Fixture::new();
+        cx.update(|cx| {
+            gpui::init(cx);
+            gpui_kit_material::init(cx);
+        });
+        let page = cx.new(|cx| ProvidersPage::at_path(Ok(fixture.path()), cx));
+        let window = cx.open_window(gpui::size(px(360.0), px(240.0)), |window, cx| {
+            gpui::base::Root::new(cx.new(|_| Host(page.clone())), window, cx)
+        });
+        cx.run_until_parked();
+        page.update(cx, |page, cx| page.act(Action::Add, cx));
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            page.read(cx).fields["provider-name"]
+                .read(cx)
+                .focus_handle()
+                .focus(window, cx);
+        });
+        // TestWindow does not deliver platform frame callbacks. This checks
+        // keyboard focus; the native fixture separately checks scrolling.
+        for id in ["provider-id", "provider-url"] {
+            cx.simulate_keystrokes("tab");
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                assert!(
+                    page.read(cx).fields[id]
+                        .read(cx)
+                        .focus_handle()
+                        .is_focused(window),
+                    "Tab must reach {id} even below the viewport"
+                );
+            });
+        }
+        cx.simulate_keystrokes("shift-tab");
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            assert!(
+                page.read(cx).fields["provider-id"]
+                    .read(cx)
+                    .focus_handle()
+                    .is_focused(window)
+            );
+        });
     }
 
     #[gpui::test]

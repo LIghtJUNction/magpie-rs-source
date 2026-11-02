@@ -1271,6 +1271,219 @@ async fn upstream_incomplete_or_error_sse_yields_safe_error_without_success() {
     counters_settle(&http, address, 0, 1, 0).await;
 }
 
+// Stop before the source protocol's success terminal, after one text delta.
+fn unfinished_text_stream(protocol: Protocol) -> Vec<u8> {
+    if protocol == Protocol::Gemini {
+        let mut value = response_body(protocol);
+        value["candidates"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("finishReason");
+        value.as_object_mut().unwrap().remove("usageMetadata");
+        return event("", value);
+    }
+    let wire = String::from_utf8(stream_body(protocol)).unwrap();
+    let mut prefix = Vec::new();
+    for frame in wire.split_inclusive("\n\n") {
+        prefix.extend_from_slice(frame.as_bytes());
+        if frame.contains(TEXT) {
+            return prefix;
+        }
+    }
+    panic!("synthetic stream must contain a text delta");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sse_timeout_after_http_200_fails_once_without_replay_for_every_protocol_pair() {
+    let http = client();
+    for (upstream, name) in PROTOCOLS {
+        for (entry, _) in PROTOCOLS {
+            for with_delta in [false, true] {
+                let error = event(
+                    "error",
+                    json!({
+                        "type":"error", "sequence_number":4,
+                        "error":{"code":"upstream_timeout","status":504,"message":PRIVATE}
+                    }),
+                );
+                let gate = Arc::new(Semaphore::new(0));
+                let mut reply = Reply::sse(error.clone());
+                if with_delta {
+                    reply.chunks = vec![Bytes::from(unfinished_text_stream(upstream))];
+                    reply.gate = Some(gate.clone());
+                    reply.tail = Bytes::from(error);
+                }
+                let mut fixture = Fixture::start(reply).await;
+                let native = upstream == entry;
+                let selected = if native
+                    && matches!(upstream, Protocol::OpenAiChat | Protocol::OpenAiResponses)
+                {
+                    None
+                } else {
+                    Some(name)
+                };
+                let (_server, address) = ServerProcess::start(config(fixture.address, selected));
+                let response = send(&http, address, entry, true, request_body(entry, true)).await;
+                assert_eq!(
+                    response.status(),
+                    200,
+                    "{entry:?}->{upstream:?}, delta={with_delta}"
+                );
+                assert_eq!(response.headers()["content-type"], "text/event-stream");
+                let mut body = response.bytes_stream();
+                let mut received = Vec::new();
+                if with_delta {
+                    timeout(Duration::from_secs(3), async {
+                        while !String::from_utf8_lossy(&received).contains(TEXT) {
+                            received.extend_from_slice(
+                                &body
+                                    .next()
+                                    .await
+                                    .expect("delta before error")
+                                    .expect("delta bytes"),
+                            );
+                        }
+                    })
+                    .await
+                    .expect("delta reaches caller before upstream error is released");
+                    let value = health(&http, address).await;
+                    assert_eq!(value["transport_counters"]["active"], 1);
+                    for field in ["completed", "failed", "cancelled"] {
+                        assert_eq!(value["transport_counters"][field], 0);
+                    }
+                    gate.add_permits(1);
+                }
+                let mut transport_failed = false;
+                while let Some(chunk) = body.next().await {
+                    match chunk {
+                        Ok(bytes) => received.extend_from_slice(&bytes),
+                        Err(_) => {
+                            transport_failed = true;
+                            break;
+                        }
+                    }
+                }
+                drop(body);
+                let text = String::from_utf8(received).expect("UTF-8 downstream SSE");
+                assert!(!text.contains(PRIVATE), "upstream diagnostic leaked");
+                assert!(!text.contains(KEY));
+                assert_eq!(
+                    text.matches(TEXT).count(),
+                    usize::from(with_delta),
+                    "no replayed delta: {entry:?}->{upstream:?}"
+                );
+                for success in [
+                    "response.completed",
+                    "message_stop",
+                    "finishReason",
+                    "data: [DONE]",
+                ] {
+                    assert!(!text.contains(success), "false success terminal: {text}");
+                }
+                let recorded = fixture.recorded().await;
+                if !native {
+                    assert_request(&recorded, upstream, true);
+                } else {
+                    assert_eq!(
+                        recorded.path,
+                        entry_path(upstream, true).replace("fixture%2F", "")
+                    );
+                }
+                counters_settle(&http, address, 0, 1, 0).await;
+                assert_eq!(
+                    fixture.requests.load(Ordering::SeqCst),
+                    1,
+                    "no replay after HTTP 200"
+                );
+                if native {
+                    assert!(transport_failed, "native error must not become clean EOF");
+                } else {
+                    assert!(!transport_failed, "converted error has a protocol terminal");
+                    assert!(
+                        text.contains("timeout_error"),
+                        "timeout classification lost: {entry:?}->{upstream:?}: {text}"
+                    );
+                    let values = sse_values(&text);
+                    let errors: Vec<_> = values
+                        .iter()
+                        .filter(|value| {
+                            value["type"] == "response.failed" || value.get("error").is_some()
+                        })
+                        .collect();
+                    assert_eq!(errors.len(), 1, "exactly one failure terminal: {text}");
+                    if entry == Protocol::Gemini {
+                        assert_eq!(errors[0]["error"]["code"], 504);
+                        assert_eq!(errors[0]["error"]["status"], "DEADLINE_EXCEEDED");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_sse_distinguishes_unfinished_eof_transport_reset_and_caller_cancel() {
+    let http = client();
+    for (protocol, name) in PROTOCOLS {
+        for cancel in [false, true] {
+            for broken in [false, true] {
+                if cancel && broken {
+                    continue;
+                }
+                let mut reply = Reply::sse(unfinished_text_stream(protocol));
+                reply.broken = broken;
+                if cancel {
+                    reply.gate = Some(Arc::new(Semaphore::new(0)));
+                }
+                let mut fixture = Fixture::start(reply).await;
+                let (_server, address) = ServerProcess::start(config(fixture.address, Some(name)));
+                let response =
+                    send(&http, address, protocol, true, request_body(protocol, true)).await;
+                assert_eq!(response.status(), 200);
+                let mut body = response.bytes_stream();
+                let mut received = Vec::new();
+                timeout(Duration::from_secs(3), async {
+                    while !String::from_utf8_lossy(&received).contains(TEXT) {
+                        received.extend_from_slice(
+                            &body
+                                .next()
+                                .await
+                                .expect("unfinished text")
+                                .expect("delta bytes"),
+                        );
+                    }
+                })
+                .await
+                .expect("bounded first delta");
+                if !cancel {
+                    let mut failed = false;
+                    while let Some(chunk) = body.next().await {
+                        if chunk.is_err() {
+                            failed = true;
+                            break;
+                        }
+                    }
+                    assert!(
+                        failed,
+                        "unfinished stream must not become clean EOF: {protocol:?}, reset={broken}"
+                    );
+                }
+                drop(body);
+                counters_settle(&http, address, 0, u64::from(!cancel), u64::from(cancel)).await;
+                fixture.recorded().await;
+                assert_eq!(fixture.requests.load(Ordering::SeqCst), 1);
+                timeout(Duration::from_secs(3), async {
+                    while fixture.live_bodies.load(Ordering::SeqCst) != 0 {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("upstream stream released");
+            }
+        }
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn caller_disconnect_closes_upstream_and_releases_attempt() {
     let http = client();

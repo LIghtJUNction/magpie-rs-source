@@ -1,0 +1,40 @@
+{
+  "date": "2026-11-02",
+  "base_source": "0b9f02aed6f4c56ff95333fe4637b6e6ffb16192",
+  "desktop_sha256": "e9fbbbb719add83d58117a7cf8e17bacb3269b2366fcb49ba6b905f0e9406da3",
+  "cli_sha256": "a383e43d96c8f2be4c92970708b91fdb45483084d8db7edf9861d8a68558db6a",
+  "tests": {
+    "workspace_passed": 329,
+    "workspace_ignored": 4,
+    "desktop_passed": 80,
+    "desktop_ignored": 3,
+    "strict_clippy_both_workspaces": "passed",
+    "fmt": "passed"
+  },
+  "native_keyboard": {
+    "fixture": "runtime-active via scripts/desktop-fixture.py",
+    "platform": "Linux Wayland/Hyprland",
+    "window": "360x560 logical pixels, German/dark",
+    "observed": [
+      "editing Provider skips immutable ID and Tab reveals URL",
+      "Shift+Tab returns to Name and reveals it",
+      "Tab traverses four protocol controls then reveals empty secret input",
+      "Tab reaches environment and model fields below viewport"
+    ],
+    "screenshot_directory": "/home/lightjunction/.cache/magpie-rs-build/smoke-20261102/native-evidence",
+    "automated_test": "keyboard_reaches_fields_below_the_editor_viewport verifies focus under actual Kit Root; synthetic TestWindow lacks platform frame delivery, so scrolling was checked in native window"
+  },
+  "issue_f02": {
+    "reported_http200_success_miscount": "not reproduced in Rust",
+    "fixtures": "32 protocol-pair/error-prefix cases plus 12 unfinished/reset/cancellation cases",
+    "observed": "single upstream request; error failed once; no success terminal or replay; caller cancel classified separately",
+    "actual_fix": "upstream_timeout now normalizes to Timeout/504 on converted responses",
+    "limits": "native passthrough reports transport failure without code/status/stage diagnostics; Usage and plugin accounting still not implemented"
+  },
+  "limitations": [
+    "not a full keyboard/IME/screen reader acceptance",
+    "current visual direction still awaits user approval",
+    "baseline 80 rendered scenes correspond to 0b9f02a; this keyboard increment was reviewed in native window",
+    "no package release, system installation or other OS validation"
+  ]
+}
