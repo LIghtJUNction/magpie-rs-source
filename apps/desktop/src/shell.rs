@@ -782,7 +782,7 @@ impl MagpieWindow {
     }
     fn settings(&self, palette: Palette, cx: &Context<Self>) -> Stateful<Div> {
         let editable = self.preferences_ready && self.preferences_task.is_none();
-        let section = |title, hint| {
+        let section = |title: &'static str, hint: &'static str| {
             div()
                 .flex()
                 .flex_col()

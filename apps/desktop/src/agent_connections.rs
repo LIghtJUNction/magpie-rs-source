@@ -1797,6 +1797,7 @@ impl Render for AgentConnections {
                     )
                     .child(
                         div()
+                            .id("agent-config-container")
                             .anchor_scroll(Some(config_anchor))
                             .child(self.config.clone()),
                     ),
