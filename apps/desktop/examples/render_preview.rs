@@ -405,14 +405,8 @@ fn render(options: &Options) -> Result<()> {
                 // Drain asset loads and draw actual production elements, including text and SVGs.
                 for _ in 0..4 {
                     cx.advance_clock(std::time::Duration::from_millis(250));
-                    for _ in 0..3 {
-                        cx.advance_clock(std::time::Duration::from_millis(250));
-                        cx.run_until_parked();
-                        cx.update_window(handle.into(), |_, window, cx| {
-                            window.refresh();
-                            window.draw(cx).clear(cx)
-                        })?;
-                    }
+                    cx.run_until_parked();
+                    cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))?;
                 }
                 if matches!(scene, Scene::ProviderCredentials) {
                     handle.update(&mut cx, |view, window, cx| {
@@ -423,8 +417,14 @@ fn render(options: &Options) -> Result<()> {
                             .update(cx, |view, cx| view.preview_reveal_credentials(window, cx));
                         window.refresh();
                     })?;
-                    cx.run_until_parked();
-                    cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))?;
+                    for _ in 0..3 {
+                        cx.advance_clock(std::time::Duration::from_millis(250));
+                        cx.run_until_parked();
+                        cx.update_window(handle.into(), |_, window, cx| {
+                            window.refresh();
+                            window.draw(cx).clear(cx)
+                        })?;
+                    }
                 }
                 let mut image = cx.capture_screenshot(handle.into())?;
                 let (native_width, native_height) = image.dimensions();
