@@ -596,6 +596,7 @@ impl Render for UsagePage {
             .when(self.error, |body| {
                 body.child(
                     div()
+                        .id("usage-read-error")
                         .p(px(12.0))
                         .rounded(px(8.0))
                         .role(Role::Alert)
