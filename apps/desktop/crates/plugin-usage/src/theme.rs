@@ -24,18 +24,8 @@ impl Palette {
             UiAppearance::Light => false,
             UiAppearance::Dark => true,
         };
-        use gpui_kit_material::color::{
-            ColorRole as C,
-            themes::{Contrast, ThemeId, ThemeMode},
-        };
-        let scheme = ThemeId::Neutral.scheme(
-            if dark {
-                ThemeMode::Dark
-            } else {
-                ThemeMode::Light
-            },
-            Contrast::Standard,
-        );
+        use gpui_kit_material::color::ColorRole as C;
+        let scheme = magpie_ui_widgets::workspace_scheme(dark);
         let color = |role| scheme.get(role).to_argb() & 0xffffff;
         Self {
             surface: color(C::SURFACE_CONTAINER_LOW),

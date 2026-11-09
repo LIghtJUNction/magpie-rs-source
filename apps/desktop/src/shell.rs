@@ -18,7 +18,7 @@ use gpui::{
 use gpui_kit_material::{
     components::{
         ButtonSize, ButtonTone, ButtonVariant, IconButton, IconButtonVariant, MaterialButton,
-        NavIcon, NavItem, NavigationRail, material_button,
+        material_button,
     },
     icons::Symbol,
 };
@@ -60,9 +60,73 @@ enum Label {
     Retry,
     Reload,
     RegistryUnavailable,
+    Workspace,
+    AgentsIntro,
+    ProvidersIntro,
+    GatewayIntro,
+    PluginsIntro,
+    SettingsIntro,
+    AppearanceHint,
+    LanguageHint,
 }
 fn label(locale: Locale, key: Label) -> &'static str {
     let labels = match key {
+        Label::Workspace => [
+            "Local workspace",
+            "本地工作区",
+            "本機工作區",
+            "ローカルワークスペース",
+            "Lokaler Arbeitsbereich",
+        ],
+        Label::AgentsIntro => [
+            "Your tools. Your choice of model.",
+            "为你的工具，选择合适的模型。",
+            "為你的工具，選擇合適的模型。",
+            "いつものツールに、使いたいモデルを。",
+            "Deine Werkzeuge. Deine Modellwahl.",
+        ],
+        Label::ProvidersIntro => [
+            "Manage the model services your Agents use.",
+            "管理 Agent 使用的模型服务。",
+            "管理 Agent 使用的模型服務。",
+            "Agent が使うモデルサービスを管理します。",
+            "Modelldienste für deine Agents verwalten.",
+        ],
+        Label::GatewayIntro => [
+            "One local endpoint for your model services.",
+            "一个本地地址，连接你的模型服务。",
+            "一個本機位址，連接你的模型服務。",
+            "モデルサービスをひとつのローカル接続先に。",
+            "Ein lokaler Zugang zu deinen Modelldiensten.",
+        ],
+        Label::PluginsIntro => [
+            "Choose the capabilities in your workspace.",
+            "按需启用工作区的功能。",
+            "依需要啟用工作區的功能。",
+            "ワークスペースに必要な機能を選びます。",
+            "Funktionen für deinen Arbeitsbereich auswählen.",
+        ],
+        Label::SettingsIntro => [
+            "Make this workspace feel like yours.",
+            "让工作区符合你的使用习惯。",
+            "讓工作區符合你的使用習慣。",
+            "使い慣れたワークスペースに整えます。",
+            "Den Arbeitsbereich nach deinen Wünschen einrichten.",
+        ],
+        Label::AppearanceHint => [
+            "Follow your device, or choose a light or dark theme.",
+            "跟随系统，或选择喜欢的明暗主题。",
+            "跟隨系統，或選擇喜歡的明暗主題。",
+            "システム設定に合わせるか、明暗を選べます。",
+            "Systemeinstellung übernehmen oder Hell/Dunkel wählen.",
+        ],
+        Label::LanguageHint => [
+            "Change the interface language at any time.",
+            "随时切换界面语言。",
+            "隨時切換介面語言。",
+            "表示言語はいつでも変更できます。",
+            "Die Sprache der Oberfläche jederzeit ändern.",
+        ],
         Label::Providers => ["Providers", "供应商", "供應商", "プロバイダー", "Anbieter"],
         Label::Gateway => ["Gateway", "网关", "閘道", "ゲートウェイ", "Gateway"],
         Label::Plugins => ["Plugins", "插件", "外掛程式", "プラグイン", "Plugins"],
@@ -630,12 +694,32 @@ impl MagpieWindow {
         cx: &Context<Self>,
     ) -> MaterialButton {
         let label = label.into();
-        let button = material_button(id.into(), ButtonVariant::Text)
-            .button_size(ButtonSize::Small)
-            .disabled(!enabled || self.close_requested)
-            .accessibility_label(label.clone())
-            .on_click(cx.listener(move |view, _, window, cx| view.act(action, window, cx)))
-            .child(text!(label));
+        let selected = match action {
+            Action::Language(locale) => self.locale == locale,
+            Action::Appearance(appearance) => self.appearance == appearance,
+            Action::Page(page) => self.page == page,
+            _ => false,
+        };
+        let button = material_button(
+            id.into(),
+            if selected {
+                ButtonVariant::Tonal
+            } else {
+                ButtonVariant::Text
+            },
+        )
+        .button_size(ButtonSize::Small)
+        .rounded(px(8.0))
+        .font(theme::ui_font(cx, self.locale))
+        .toggle(matches!(
+            action,
+            Action::Language(_) | Action::Appearance(_) | Action::Page(_)
+        ))
+        .selected(selected)
+        .disabled(!enabled || self.close_requested)
+        .accessibility_label(label.clone())
+        .on_click(cx.listener(move |view, _, window, cx| view.act(action, window, cx)))
+        .child(text!(label));
         if let Action::Page(Page::Extension(id)) = action
             && let Some(page) = self.extensions.get(id)
         {
@@ -698,22 +782,45 @@ impl MagpieWindow {
     }
     fn settings(&self, palette: Palette, cx: &Context<Self>) -> Stateful<Div> {
         let editable = self.preferences_ready && self.preferences_task.is_none();
+        let section = |title, hint| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(7.0))
+                .child(
+                    div()
+                        .text_size(px(15.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(text!(title)),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(rgb(palette.muted))
+                        .whitespace_normal()
+                        .child(text!(hint)),
+                )
+        };
         div()
             .id("settings-scroll")
             .size_full()
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.settings_scroll)
-            .p(px(20.0))
+            .pb(px(32.0))
             .flex()
             .flex_col()
-            .gap(px(24.0))
+            .gap(px(32.0))
             .child(
                 div()
+                    .max_w(px(760.0))
                     .flex()
                     .flex_col()
-                    .gap(px(10.0))
-                    .child(text!(self.locale.text(Text::Appearance)))
+                    .gap(px(18.0))
+                    .child(section(
+                        self.locale.text(Text::Appearance),
+                        label(self.locale, Label::AppearanceHint),
+                    ))
                     .child(
                         div().flex().flex_wrap().gap(px(8.0)).children(
                             [
@@ -729,16 +836,33 @@ impl MagpieWindow {
                                     editable,
                                     cx,
                                 )
+                                .icon(
+                                    Symbol::named(match appearance {
+                                        Appearance::System => "desktop_windows",
+                                        Appearance::Light => "light_mode",
+                                        Appearance::Dark => "dark_mode",
+                                    })
+                                    .expect("theme icon is embedded"),
+                                )
+                                .min_w(px(112.0))
+                                .h(px(48.0))
                             }),
                         ),
                     ),
             )
             .child(
                 div()
+                    .max_w(px(760.0))
+                    .border_t_1()
+                    .border_color(rgb(palette.border))
+                    .pt(px(28.0))
                     .flex()
                     .flex_col()
-                    .gap(px(10.0))
-                    .child(text!(self.locale.text(Text::Language)))
+                    .gap(px(18.0))
+                    .child(section(
+                        self.locale.text(Text::Language),
+                        label(self.locale, Label::LanguageHint),
+                    ))
                     .child(
                         div()
                             .flex()
@@ -859,23 +983,45 @@ impl Render for MagpieWindow {
             self.focus_after_navigation = false;
             self.focus(window, cx);
         }
-        let wide = window.viewport_size().width >= px(1040.0);
+        let width = window.viewport_size().width;
+        let wide = width >= px(1040.0);
+        let compact = width < px(600.0);
+        let gutter = if wide {
+            32.0
+        } else if compact {
+            16.0
+        } else {
+            24.0
+        };
         let pages = self.navigation();
         let brand = || {
             div()
                 .flex()
                 .items_center()
-                .gap(px(8.0))
+                .gap(px(10.0))
                 .child(
                     svg()
                         .path("icons/magpie.svg")
-                        .size(px(23.0))
+                        .size(px(28.0))
                         .text_color(rgb(palette.text)),
                 )
                 .child(
                     div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(text!("Magpie")),
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .text_size(px(19.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(text!("Magpie")),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(rgb(palette.muted))
+                                .child(text!(label(self.locale, Label::Workspace))),
+                        ),
                 )
         };
         let mut root = div()
@@ -891,83 +1037,104 @@ impl Render for MagpieWindow {
             .text_color(rgb(palette.text))
             .bg(rgb(palette.background));
         if wide {
-            let selected = pages
-                .iter()
-                .find(|p| p.0 == self.page)
-                .map(|p| p.1.clone())
-                .unwrap_or_else(|| "agents-page".into());
-            let items = pages
-                .iter()
-                .map(|(_, id, icon, title)| {
-                    NavItem::new(
-                        id.clone(),
-                        title.clone(),
-                        NavIcon::symbol(Symbol::named(icon).expect("navigation icon is embedded")),
-                    )
-                    .disabled(self.close_requested)
-                })
-                .collect::<Vec<_>>();
-            let navigation = pages.clone();
+            let nav = |page, id: SharedString, icon, title: SharedString| {
+                let active = self.page == page;
+                self.button(id, title, Action::Page(page), true, cx)
+                    .button_size(ButtonSize::Medium)
+                    .icon(Symbol::named(icon).expect("navigation icon is embedded"))
+                    .w_full()
+                    .h(px(42.0))
+                    .px(px(12.0))
+                    .rounded(px(8.0))
+                    .justify_start()
+                    .text_size(px(13.0))
+                    .font_weight(if active {
+                        FontWeight::SEMIBOLD
+                    } else {
+                        FontWeight::NORMAL
+                    })
+                    .text_color(rgb(if active {
+                        palette.accent
+                    } else {
+                        palette.muted
+                    }))
+            };
             root = root.child(
                 div()
-                    .w(px(232.0))
+                    .id("workspace-navigation")
+                    .role(Role::Navigation)
+                    .aria_label(label(self.locale, Label::Navigation))
+                    .w(px(216.0))
                     .h_full()
                     .flex_none()
-                    .p(px(12.0))
+                    .bg(rgb(palette.surface))
+                    .border_r_1()
+                    .border_color(rgb(palette.border))
+                    .px(px(16.0))
+                    .py(px(28.0))
                     .flex()
                     .flex_col()
-                    .gap(px(20.0))
+                    .gap(px(32.0))
+                    .child(div().px(px(8.0)).child(brand()))
                     .child(
                         div()
-                            .h(px(48.0))
+                            .id("navigation-items")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
                             .flex()
-                            .items_center()
-                            .px(px(12.0))
-                            .child(brand()),
+                            .flex_col()
+                            .gap(px(5.0))
+                            .children(pages.iter().filter(|p| p.0 != Page::Settings).map(
+                                |(page, id, icon, title)| {
+                                    nav(*page, id.clone(), *icon, title.clone())
+                                },
+                            )),
                     )
                     .child(
-                        NavigationRail::new(
-                            "material-navigation",
-                            label(self.locale, Label::Navigation),
-                        )
-                        .expanded(true)
-                        .expanded_width(208.0)
-                        .items(items)
-                        .selected(selected)
-                        .on_change(cx.listener(
-                            move |view, value: &SharedString, window, cx| {
-                                if let Some(page) = navigation.iter().find(|p| p.1 == *value) {
-                                    view.act(Action::Page(page.0), window, cx);
-                                }
-                            },
-                        )),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(14.0))
+                            .child(nav(
+                                Page::Settings,
+                                "settings-page".into(),
+                                "settings",
+                                self.title(Page::Settings),
+                            ))
+                            .child(
+                                div()
+                                    .px(px(12.0))
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(palette.muted))
+                                    .child(text!(format!("Magpie  {}", env!("CARGO_PKG_VERSION")))),
+                            ),
                     ),
             );
-        } else {
+        } else if !compact {
             root = root.child(
                 div()
                     .id("collapsed-navigation")
                     .role(Role::Navigation)
-                    .w(px(68.0))
+                    .aria_label(label(self.locale, Label::Navigation))
+                    .w(px(64.0))
                     .h_full()
                     .flex_none()
-                    .p(px(4.0))
+                    .bg(rgb(palette.surface))
+                    .border_r_1()
+                    .border_color(rgb(palette.border))
+                    .px(px(6.0))
+                    .py(px(24.0))
                     .flex()
                     .flex_col()
-                    .gap(px(8.0))
+                    .gap(px(26.0))
                     .child(
-                        div()
-                            .h(px(48.0))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                svg()
-                                    .path("icons/magpie.svg")
-                                    .size(px(23.0))
-                                    .text_color(rgb(palette.text)),
-                            ),
+                        div().flex_none().flex().justify_center().child(
+                            svg()
+                                .path("icons/magpie.svg")
+                                .size(px(27.0))
+                                .text_color(rgb(palette.text)),
+                        ),
                     )
                     .child(
                         div()
@@ -977,84 +1144,73 @@ impl Render for MagpieWindow {
                             .overflow_y_scroll()
                             .flex()
                             .flex_col()
-                            .gap(px(6.0))
+                            .gap(px(8.0))
                             .children(pages.iter().map(|(page, id, icon, title)| {
                                 self.rail_icon(*page, id.clone(), icon, title.clone(), palette, cx)
                             })),
                     ),
             );
+        } else {
+            root = root.flex_col();
         }
-        let mut header = div()
-            .min_h(px(if wide { 56.0 } else { 48.0 }))
-            .px(px(if wide { 16.0 } else { 8.0 }))
-            .py(px(if wide { 8.0 } else { 6.0 }))
+        let intro: SharedString = match self.page {
+            Page::Agents => label(self.locale, Label::AgentsIntro).into(),
+            Page::Providers => label(self.locale, Label::ProvidersIntro).into(),
+            Page::Gateway => label(self.locale, Label::GatewayIntro).into(),
+            Page::Plugins => label(self.locale, Label::PluginsIntro).into(),
+            Page::Settings => label(self.locale, Label::SettingsIntro).into(),
+            Page::Extension(id) => self
+                .extensions
+                .get(id)
+                .map(|page| (page.intro)(self.locale).into())
+                .unwrap_or_default(),
+        };
+        let header = div()
+            .px(px(gutter))
+            .pt(px(if compact { 24.0 } else { 36.0 }))
+            .pb(px(24.0))
             .flex_none()
             .flex()
-            .items_center()
+            .items_start()
             .justify_between()
-            .gap(px(8.0));
-        if !wide {
-            header = header.child(
+            .gap(px(12.0))
+            .child(
                 div()
                     .min_w_0()
                     .flex_1()
-                    .overflow_hidden()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(text!(self.title(self.page))),
-            );
-        } else {
-            header = header.child(
-                div()
                     .flex()
                     .flex_col()
-                    .gap(px(2.0))
+                    .gap(px(8.0))
                     .child(
                         div()
+                            .text_size(px(if compact { 24.0 } else { 28.0 }))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(text!(self.title(self.page))),
                     )
-                    .when_some(
-                        match self.page {
-                            Page::Extension(id) => self.extensions.get(id),
-                            _ => None,
-                        },
-                        |header, page| {
-                            header.child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .text_color(rgb(palette.muted))
-                                    .child(text!((page.intro)(self.locale))),
-                            )
-                        },
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(rgb(palette.muted))
+                            .whitespace_normal()
+                            .child(text!(intro)),
                     ),
-            );
-        }
-        if wide {
-            header = header.child(self.button(
-                "refresh",
-                self.locale.text(Text::Refresh),
-                Action::Refresh,
-                self.normal_runtime,
-                cx,
-            ));
-        } else {
-            header = header.child(
+            )
+            .child(
                 IconButton::new(
                     "refresh",
                     Symbol::named("refresh").expect("refresh icon is embedded"),
                     self.locale.text(Text::Refresh),
                 )
-                .button_size(ButtonSize::ExtraSmall)
-                .size(px(36.0))
+                .button_size(ButtonSize::Small)
+                .size(px(40.0))
                 .tone(ButtonTone::Neutral)
                 .disabled(!self.normal_runtime || self.close_requested)
                 .on_click(cx.listener(|view, _, window, cx| view.act(Action::Refresh, window, cx))),
             );
-        }
         let mut column = div()
             .flex_1()
             .min_w_0()
-            .h_full()
+            .min_h_0()
             .flex()
             .flex_col()
             .child(header);
@@ -1080,7 +1236,15 @@ impl Render for MagpieWindow {
                     }),
             }
         };
-        column = column.child(div().flex_1().min_h_0().min_w_0().child(body));
+        column = column.child(
+            div()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .px(px(gutter))
+                .pt(px(8.0))
+                .child(body),
+        );
         if self.plugins.read(cx).catalog().is_none() && self.normal_runtime {
             column = column.child(
                 div()
@@ -1093,7 +1257,33 @@ impl Render for MagpieWindow {
                     .child(text!(label(self.locale, Label::RegistryUnavailable))),
             );
         }
-        root.child(column)
+        root = root.child(column);
+        if compact {
+            root = root.child(
+                div()
+                    .id("compact-navigation")
+                    .role(Role::Navigation)
+                    .aria_label(label(self.locale, Label::Navigation))
+                    .flex_none()
+                    .w_full()
+                    .min_h(px(60.0))
+                    .bg(rgb(palette.surface))
+                    .border_t_1()
+                    .border_color(rgb(palette.border))
+                    .px(px(6.0))
+                    .py(px(8.0))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(2.0))
+                    .children(pages.iter().map(|(page, id, icon, title)| {
+                        self.rail_icon(*page, id.clone(), icon, title.clone(), palette, cx)
+                            .flex_1()
+                            .min_w_0()
+                    })),
+            );
+        }
+        root
     }
 }
 

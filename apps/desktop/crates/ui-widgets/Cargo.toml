@@ -11,6 +11,7 @@ visual-test = ["gpui/test-support"]
 
 [dependencies]
 gpui.workspace = true
+gpui-kit-material.workspace = true
 accesskit.workspace = true
 unicode-segmentation.workspace = true
 

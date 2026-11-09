@@ -4076,6 +4076,7 @@ version = "0.2.0"
 dependencies = [
  "accesskit",
  "gpui-kit",
+ "gpui-kit-material",
  "unicode-segmentation",
 ]
 

@@ -39,18 +39,8 @@ impl Palette {
             Appearance::Light => false,
             Appearance::Dark => true,
         };
-        use gpui_kit_material::color::{
-            ColorRole as C,
-            themes::{Contrast, ThemeId, ThemeMode},
-        };
-        let scheme = ThemeId::Neutral.scheme(
-            if dark {
-                ThemeMode::Dark
-            } else {
-                ThemeMode::Light
-            },
-            Contrast::Standard,
-        );
+        use gpui_kit_material::color::ColorRole as C;
+        let scheme = magpie_ui_widgets::workspace_scheme(dark);
         let color = |role| scheme.get(role).to_argb() & 0xffffff;
         Self {
             background: color(C::SURFACE),
@@ -190,10 +180,7 @@ pub fn font_for_families(families: &[String], locale: Locale) -> Font {
 
 /// Initialize Material and Kit colors before their first root is rendered.
 pub fn init_material_theme(window: Option<&Window>, cx: &mut App) {
-    use gpui_kit_material::{
-        color::themes::{Contrast, ThemeId, ThemeMode},
-        theme,
-    };
+    use gpui_kit_material::theme;
     let dark = window.map_or_else(
         || theme::system_dark(cx),
         |window| {
@@ -203,19 +190,11 @@ pub fn init_material_theme(window: Option<&Window>, cx: &mut App) {
             )
         },
     );
-    let mode = if dark {
-        ThemeMode::Dark
-    } else {
-        ThemeMode::Light
-    };
-    theme::init_component_theme(ThemeId::Neutral.scheme(mode, Contrast::Standard), 1.0, cx);
+    theme::init_component_theme(magpie_ui_widgets::workspace_scheme(dark), 1.0, cx);
 }
 
 pub(crate) fn apply_material_theme(appearance: Appearance, window: &mut Window, cx: &mut App) {
-    use gpui_kit_material::{
-        color::themes::{Contrast, ThemeId, ThemeMode},
-        theme,
-    };
+    use gpui_kit_material::theme;
     let dark = match appearance {
         Appearance::System => matches!(
             window.appearance(),
@@ -231,14 +210,7 @@ pub(crate) fn apply_material_theme(appearance: Appearance, window: &mut Window, 
         return;
     }
     cx.set_global(AppliedMaterialMode(dark));
-    let scheme = ThemeId::Neutral.scheme(
-        if dark {
-            ThemeMode::Dark
-        } else {
-            ThemeMode::Light
-        },
-        Contrast::Standard,
-    );
+    let scheme = magpie_ui_widgets::workspace_scheme(dark);
     theme::init_component_theme(scheme, 1.0, cx);
     window.refresh();
 }
