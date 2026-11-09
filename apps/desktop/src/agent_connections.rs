@@ -1897,6 +1897,7 @@ impl Render for AgentConnections {
                     )
                     .child(
                         div()
+                            .debug_selector(|| format!("agent-target-model:{model}"))
                             .text_size(px(13.0))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(palette.accent))
@@ -2118,6 +2119,7 @@ impl Render for AgentConnections {
         });
         div()
             .id("agent-connections")
+            .debug_selector(|| "agent-connections-viewport".into())
             .size_full()
             .min_h_0()
             .min_w_0()
@@ -2835,8 +2837,7 @@ mod visual_tests {
                 view.active = busy;
                 cx.notify();
             });
-            visual.update(|window, cx| {
-                // Text snapshots record paints, not cached display-list reuse.
+            let viewport = visual.update(|window, cx| {
                 window.refresh();
                 window.draw(cx).clear(cx);
                 let view = page.read(cx);
@@ -2847,14 +2848,22 @@ mod visual_tests {
                 assert!(!view.focus.contains_key("agent-model:fixture/model-b"));
                 assert!(view.focus.get("agent-preview-model") == Some(&preview_focus));
                 assert!(preview_focus.is_focused(window));
-                let texts = gpui::base::test_support::texts(window);
-                assert!(
-                    texts
-                        .iter()
-                        .any(|text| text.visible() && text.text() == "fixture/model-b"),
-                    "the target must stay visible when search hides its model row: {texts:?}"
-                );
+                gpui::Bounds::new(gpui::point(px(0.0), px(0.0)), window.viewport_size())
             });
+            // The summary uses GPUI's raw text!, which Base's text snapshots
+            // do not record. Observe the actual summary element and its clip.
+            let target = visual
+                .debug_bounds("agent-target-model:fixture/model-b")
+                .expect("selected target summary is painted");
+            let scroll_viewport = visual
+                .debug_bounds("agent-connections-viewport")
+                .expect("Agent scroll viewport is painted");
+            assert!(target.size.width > px(0.0) && target.size.height > px(0.0));
+            assert_eq!(
+                target.intersect(&scroll_viewport).intersect(&viewport),
+                target,
+                "the target summary must stay fully visible when search hides its model row"
+            );
         }
     }
 

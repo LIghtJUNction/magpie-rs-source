@@ -433,6 +433,21 @@ impl ProvidersPage {
         if self.editor.is_some() {
             if let Some(anchor) = self.anchors.get("provider-key") {
                 anchor.scroll_to(window, cx);
+                if window.viewport_size().height < px(480.0) {
+                    // A very short viewport needs one further page of scroll
+                    // to include the masked field and its explanatory text.
+                    let scroll = self.editor_scroll.clone();
+                    window.on_next_frame(move |window, _| {
+                        window.on_next_frame(move |window, _| {
+                            let offset = scroll.offset();
+                            scroll.set_offset(point(
+                                offset.x,
+                                offset.y - scroll.bounds().size.height,
+                            ));
+                            window.refresh();
+                        });
+                    });
+                }
             }
         }
     }
