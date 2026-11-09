@@ -1,0 +1,129 @@
+name: Desktop visual checks
+
+on:
+  push:
+    branches: [ui/quiet-workspace]
+    paths:
+      - apps/desktop/**
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/desktop-visual.yml
+  pull_request:
+    paths:
+      - apps/desktop/**
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/desktop-visual.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-visual-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop:
+    name: GPUI tests and software-rendered screenshots
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUSTUP_TOOLCHAIN: 1.99.1
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      WGPU_BACKEND: vulkan
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      BASELINE_SHA: e81e07e69acc4ea71318a1e327db11cdb28e2db7
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prepare paths and Linux rendering dependencies
+        run: |
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/magpie-visual-target" >> "$GITHUB_ENV"
+          echo "MAGPIE_VISUAL_OUT=$RUNNER_TEMP/magpie-visual-evidence" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/magpie-visual-evidence"
+          git rev-parse HEAD > "$RUNNER_TEMP/magpie-visual-evidence/source-sha.txt"
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            pkg-config libdbus-1-dev libssl-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev \
+            libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev \
+            mesa-vulkan-drivers vulkan-tools \
+            fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji
+          magpie_icd_path="$(dpkg -L mesa-vulkan-drivers | awk '/\/lvp_icd.*\.json$/ && !found { print; found = 1 }')"
+          test -n "$magpie_icd_path" && test -f "$magpie_icd_path"
+          echo "VK_ICD_FILENAMES=$magpie_icd_path" >> "$GITHUB_ENV"
+          echo "VK_DRIVER_FILES=$magpie_icd_path" >> "$GITHUB_ENV"
+          fc-cache -f
+
+      - name: Select pinned Rust and record renderer environment
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal --no-self-update
+          rustc -Vv | tee "$MAGPIE_VISUAL_OUT/rust-version.txt"
+          cargo -V | tee -a "$MAGPIE_VISUAL_OUT/rust-version.txt"
+          vulkaninfo --summary 2>&1 | tee "$MAGPIE_VISUAL_OUT/vulkan.txt"
+          fc-match "Noto Sans CJK SC" | tee "$MAGPIE_VISUAL_OUT/font.txt"
+          df -h "$RUNNER_TEMP" | tee "$MAGPIE_VISUAL_OUT/disk-before.txt"
+
+      - name: Render the fixed baseline for this redesign
+        if: github.event_name != 'pull_request'
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASELINE_SHA"
+          git worktree add --detach "$RUNNER_TEMP/magpie-visual-baseline" "$BASELINE_SHA"
+          echo "$BASELINE_SHA" > "$MAGPIE_VISUAL_OUT/baseline-sha.txt"
+          cargo build --locked \
+            --manifest-path "$RUNNER_TEMP/magpie-visual-baseline/apps/desktop/Cargo.toml" \
+            --features visual-test --example render_preview \
+            2>&1 | tee "$MAGPIE_VISUAL_OUT/baseline-build.log"
+          "$CARGO_TARGET_DIR/debug/examples/render_preview" \
+            --output "$MAGPIE_VISUAL_OUT/before-zh-CN-1280x720" \
+            --all --size 1280x720 --locale zh-CN \
+            2>&1 | tee "$MAGPIE_VISUAL_OUT/baseline-render.log"
+
+      - name: Build the current production renderer
+        id: renderer
+        if: ${{ !cancelled() }}
+        run: |
+          cargo build --locked --manifest-path apps/desktop/Cargo.toml \
+            --features visual-test --example render_preview \
+            2>&1 | tee "$MAGPIE_VISUAL_OUT/renderer-build.log"
+
+      - name: Test desktop state and keyboard flows
+        if: ${{ !cancelled() && steps.renderer.outcome == 'success' }}
+        run: |
+          cargo test --locked --manifest-path apps/desktop/Cargo.toml \
+            --features visual-test --lib -- --test-threads=1 \
+            2>&1 | tee "$MAGPIE_VISUAL_OUT/desktop-tests.log"
+
+      - name: Capture wide, narrow and minimum-size windows
+        if: ${{ !cancelled() && steps.renderer.outcome == 'success' }}
+        run: |
+          for magpie_case in zh-CN:1280x720 zh-CN:900x560 zh-CN:360x560 de:360x560 zh-CN:360x360; do
+            magpie_locale="${magpie_case%%:*}"
+            magpie_size="${magpie_case#*:}"
+            "$CARGO_TARGET_DIR/debug/examples/render_preview" \
+              --output "$MAGPIE_VISUAL_OUT/after-$magpie_locale-$magpie_size" \
+              --all --size "$magpie_size" --locale "$magpie_locale" \
+              2>&1 | tee "$MAGPIE_VISUAL_OUT/render-$magpie_locale-$magpie_size.log"
+          done
+          df -h "$RUNNER_TEMP" | tee "$MAGPIE_VISUAL_OUT/disk-after.txt"
+
+      - name: Upload screenshots, manifests and test logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: desktop-visual-${{ github.sha }}
+          path: ${{ runner.temp }}/magpie-visual-evidence/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
