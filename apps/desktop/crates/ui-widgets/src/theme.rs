@@ -39,8 +39,9 @@ pub fn workspace_scheme(dark: bool) -> Scheme {
         (C::ON_PRIMARY, on_accent),
         (C::PRIMARY_CONTAINER, selected),
         (C::ON_PRIMARY_CONTAINER, accent),
-        (C::SECONDARY, muted),
-        (C::ON_SECONDARY, background),
+        // Material tonal toggles use SECONDARY for their selected state.
+        (C::SECONDARY, selected),
+        (C::ON_SECONDARY, accent),
         (C::SECONDARY_CONTAINER, selected),
         (C::ON_SECONDARY_CONTAINER, accent),
         (C::SELECTION, selected),

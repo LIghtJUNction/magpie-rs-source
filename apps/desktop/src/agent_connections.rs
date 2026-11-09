@@ -545,6 +545,9 @@ impl AgentConnections {
             Action::Select(key) => {
                 if self.selected.as_ref() == Some(&key) {
                     self.editor_open = !self.editor_open;
+                    if self.editor_open && self.observation().is_none() {
+                        self.start(WorkKind::Refresh, None, cx);
+                    }
                     cx.notify();
                     return;
                 }
@@ -2068,14 +2071,14 @@ impl Render for AgentConnections {
                     .observation()
                     .is_none_or(|o| o.status != Ownership::Unmanaged);
             ids.insert("agent-disconnect".into());
-            body = body.child(self.button(
+            body = body.child(div().flex().child(self.button(
                 "agent-disconnect".into(),
                 copy(locale, Text::Disconnect),
                 Action::AskDisconnect,
                 enabled,
                 false,
                 cx,
-            ));
+            )));
         }
         let body = div()
             .flex()
@@ -2693,6 +2696,7 @@ mod visual_tests {
         cx.run_until_parked();
         let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
         let (stamp, revision, trigger) = visual.update(|window, cx| {
+            window.refresh();
             window.draw(cx).clear(cx);
             let view = page.read(cx);
             assert!(!view.details_open);
@@ -2702,12 +2706,25 @@ mod visual_tests {
                 view.focus["agent-details"].clone(),
             );
             expected.2.focus(window, cx);
+            window.refresh();
+            window.draw(cx).clear(cx);
             expected
         });
         for expanded in [true, false, true, false] {
-            visual.simulate_keystrokes("enter");
+            // Native button activation happens on key release; the keystroke
+            // helper only dispatches KeyDown and therefore cannot click it.
+            let keystroke = visual.update(|_, cx| {
+                gpui::Keystroke::parse_with_os("enter", cx.platform_info().os).unwrap()
+            });
+            visual.simulate_event(gpui::KeyDownEvent {
+                keystroke: keystroke.clone(),
+                is_held: false,
+                prefer_character_input: false,
+            });
+            visual.simulate_event(gpui::KeyUpEvent { keystroke });
             visual.run_until_parked();
             visual.update(|window, cx| {
+                window.refresh();
                 window.draw(cx).clear(cx);
                 let view = page.read(cx);
                 assert_eq!(view.details_open, expanded);
@@ -2729,6 +2746,7 @@ mod visual_tests {
         }
         visual.simulate_keystrokes("tab");
         visual.update(|window, cx| {
+            window.refresh();
             window.draw(cx).clear(cx);
             assert!(page.read(cx).focus["agent-read"].is_focused(window));
             assert!(
@@ -2789,6 +2807,7 @@ mod visual_tests {
         cx.run_until_parked();
         let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
         let preview_focus = visual.update(|window, cx| {
+            window.refresh();
             window.draw(cx).clear(cx);
             let focus = page.read(cx).focus["agent-preview-model"].clone();
             focus.focus(window, cx);
@@ -2801,16 +2820,23 @@ mod visual_tests {
                 cx.notify();
             });
             visual.update(|window, cx| {
+                // Text snapshots record paints, not cached display-list reuse.
+                window.refresh();
                 window.draw(cx).clear(cx);
                 let view = page.read(cx);
+                assert_eq!(
+                    view.stamp().expect("retained target").model.as_deref(),
+                    Some("fixture/model-b")
+                );
                 assert!(!view.focus.contains_key("agent-model:fixture/model-b"));
                 assert!(view.focus.get("agent-preview-model") == Some(&preview_focus));
                 assert!(preview_focus.is_focused(window));
+                let texts = gpui::base::test_support::texts(window);
                 assert!(
-                    gpui::base::test_support::texts(window)
+                    texts
                         .iter()
                         .any(|text| text.visible() && text.text() == "fixture/model-b"),
-                    "the target must stay visible when search hides its model row"
+                    "the target must stay visible when search hides its model row: {texts:?}"
                 );
             });
         }

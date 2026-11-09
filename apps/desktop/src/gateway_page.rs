@@ -625,6 +625,27 @@ impl Render for GatewayPage {
                             )),
                     ),
             )
+            .when_some(
+                match &*self.state {
+                    GatewayState::Failed(error) => Some(*error),
+                    _ => None,
+                },
+                |card, error| {
+                    card.child(
+                        div()
+                            .id("gateway-error")
+                            .p(px(12.0))
+                            .rounded(px(8.0))
+                            .bg(rgb(palette.danger_bg))
+                            .text_color(rgb(palette.danger))
+                            .text_size(px(12.0))
+                            .line_height(px(18.0))
+                            .whitespace_normal()
+                            .role(Role::Alert)
+                            .child(text!(self.failure_text(error))),
+                    )
+                },
+            )
             .child(
                 div()
                     .py(px(6.0))
@@ -662,27 +683,6 @@ impl Render for GatewayPage {
                     ),
             )
             .child(self.caption(description, palette))
-            .when_some(
-                match &*self.state {
-                    GatewayState::Failed(error) => Some(*error),
-                    _ => None,
-                },
-                |card, error| {
-                    card.child(
-                        div()
-                            .id("gateway-error")
-                            .p(px(12.0))
-                            .rounded(px(8.0))
-                            .bg(rgb(palette.danger_bg))
-                            .text_color(rgb(palette.danger))
-                            .text_size(px(12.0))
-                            .line_height(px(18.0))
-                            .whitespace_normal()
-                            .role(Role::Alert)
-                            .child(text!(self.failure_text(error))),
-                    )
-                },
-            )
             .child(
                 div()
                     .py(px(20.0))

@@ -1292,14 +1292,20 @@ impl ProvidersPage {
             })
     }
 
-    fn editor(&self, palette: Palette, cx: &mut Context<Self>) -> Div {
+    fn editor(&self, palette: Palette, dense: bool, cx: &mut Context<Self>) -> Div {
         let editor = self
             .editor
             .as_ref()
             .expect("editor exists only in editor view");
         let section = |key, first| {
             div()
-                .pt(px(if first { 0.0 } else { 16.0 }))
+                .pt(px(if first {
+                    0.0
+                } else if dense {
+                    10.0
+                } else {
+                    16.0
+                }))
                 .pb(px(2.0))
                 .text_size(px(14.0))
                 .font_weight(FontWeight::SEMIBOLD)
@@ -1310,7 +1316,7 @@ impl ProvidersPage {
             .max_w(px(720.0))
             .flex()
             .flex_col()
-            .gap(px(18.0));
+            .gap(px(if dense { 12.0 } else { 18.0 }));
         for (id, label, _) in FIELDS {
             match id {
                 "provider-name" => form = form.child(section(P::IdentitySection, true)),
@@ -1409,6 +1415,14 @@ impl ProvidersPage {
             palette,
             cx,
         ));
+        form = form.child(
+            div()
+                .text_size(px(11.0))
+                .line_height(px(16.0))
+                .text_color(rgb(palette.muted))
+                .whitespace_normal()
+                .child(text!(self.locale.provider_text(P::Restart))),
+        );
         div()
             .flex_1()
             .min_h_0()
@@ -1424,13 +1438,13 @@ impl ProvidersPage {
                     .track_scroll(&self.editor_scroll)
                     .px(px(2.0))
                     .pt(px(4.0))
-                    .pb(px(28.0))
+                    .pb(px(if dense { 12.0 } else { 28.0 }))
                     .child(form),
             )
             .child(
                 div()
                     .flex_none()
-                    .py(px(16.0))
+                    .py(px(if dense { 8.0 } else { 16.0 }))
                     .border_t_1()
                     .border_color(rgb(palette.border))
                     .flex()
@@ -1494,6 +1508,7 @@ impl Render for ProvidersPage {
         let palette = Palette::for_window(window, self.appearance);
         let wide = f32::from(window.viewport_size().width) >= 1100.0;
         let compact = f32::from(window.viewport_size().width) < 600.0;
+        let dense = f32::from(window.viewport_size().height) < 600.0;
         let busy = self.busy();
         for (id, label, placeholder) in FIELDS {
             let immutable_id =
@@ -1579,19 +1594,20 @@ impl Render for ProvidersPage {
             );
         let header = div()
             .flex_none()
-            .pb(px(20.0))
+            .pb(px(if dense { 8.0 } else { 20.0 }))
             .flex()
             .items_center()
             .justify_between()
             .gap(px(12.0))
-            .when(compact, |header| header.flex_col().items_stretch())
+            .when(compact && self.editor.is_none(), |header| {
+                header.flex_col().items_stretch()
+            })
             .when(self.editor.is_some(), |header| {
                 header.child(
                     div()
                         .min_w_0()
                         .flex_1()
-                        .when(compact, |title| title.flex_none())
-                        .text_size(px(18.0))
+                        .text_size(px(if compact { 16.0 } else { 18.0 }))
                         .font_weight(FontWeight::MEDIUM)
                         .whitespace_normal()
                         .child(text!(title)),
@@ -1761,7 +1777,7 @@ impl Render for ProvidersPage {
                     ),
             )
         } else if self.editor.is_some() {
-            self.editor(palette, cx)
+            self.editor(palette, dense, cx)
         } else {
             let providers = self
                 .store
@@ -1900,18 +1916,6 @@ impl Render for ProvidersPage {
                 )
             })
             .child(body)
-            .when(self.editor.is_some(), |page| {
-                page.child(
-                    div()
-                        .flex_none()
-                        .pb(px(12.0))
-                        .text_size(px(11.0))
-                        .line_height(px(16.0))
-                        .text_color(rgb(palette.muted))
-                        .whitespace_normal()
-                        .child(text!(self.locale.provider_text(P::Restart))),
-                )
-            })
     }
 }
 
