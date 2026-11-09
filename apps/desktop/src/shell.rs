@@ -986,6 +986,7 @@ impl Render for MagpieWindow {
         let width = window.viewport_size().width;
         let wide = width >= px(1040.0);
         let compact = width < px(600.0);
+        let short = window.viewport_size().height < px(480.0);
         let gutter = if wide {
             32.0
         } else if compact {
@@ -1167,8 +1168,14 @@ impl Render for MagpieWindow {
         };
         let header = div()
             .px(px(gutter))
-            .pt(px(if compact { 24.0 } else { 36.0 }))
-            .pb(px(24.0))
+            .pt(px(if short {
+                14.0
+            } else if compact {
+                24.0
+            } else {
+                36.0
+            }))
+            .pb(px(if short { 12.0 } else { 24.0 }))
             .flex_none()
             .flex()
             .items_start()
@@ -1187,13 +1194,15 @@ impl Render for MagpieWindow {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(text!(self.title(self.page))),
                     )
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .text_color(rgb(palette.muted))
-                            .whitespace_normal()
-                            .child(text!(intro)),
-                    ),
+                    .when(!short, |header| {
+                        header.child(
+                            div()
+                                .text_size(px(13.0))
+                                .text_color(rgb(palette.muted))
+                                .whitespace_normal()
+                                .child(text!(intro)),
+                        )
+                    }),
             )
             .child(
                 IconButton::new(

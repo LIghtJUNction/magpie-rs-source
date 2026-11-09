@@ -22,6 +22,8 @@ pub(crate) enum PluginText {
     Refresh,
     Error,
     Hint,
+    Empty,
+    NoMatches,
 }
 
 impl Locale {
@@ -98,6 +100,20 @@ impl Locale {
                 "Plugin-Status wird gelesen…",
             ],
             PluginText::Refresh => ["Refresh", "刷新", "重新整理", "更新", "Aktualisieren"],
+            PluginText::Empty => [
+                "No plugins are registered.",
+                "还没有已注册的插件。",
+                "尚無已註冊的外掛程式。",
+                "登録されたプラグインはありません。",
+                "Es sind keine Plugins registriert.",
+            ],
+            PluginText::NoMatches => [
+                "No plugins match your search.",
+                "没有符合搜索条件的插件。",
+                "沒有符合搜尋條件的外掛程式。",
+                "検索条件に一致するプラグインはありません。",
+                "Keine Plugins entsprechen dieser Suche.",
+            ],
             PluginText::Error => [
                 "Plugin state could not be read or changed. Refresh to retry. Connected Agents must be disconnected before disabling their adapter.",
                 "插件状态读取或修改失败，请刷新后重试。已接入的 Agent 需要先断开，才能停用其适配插件。",
@@ -142,6 +158,8 @@ mod tests {
             PluginText::Refresh,
             PluginText::Error,
             PluginText::Hint,
+            PluginText::Empty,
+            PluginText::NoMatches,
         ];
         for locale in Locale::ALL {
             for key in keys {

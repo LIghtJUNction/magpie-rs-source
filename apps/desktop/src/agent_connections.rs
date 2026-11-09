@@ -6,7 +6,7 @@ use crate::{
     localization::Locale,
     plugin_catalog::OwnedAgent,
     text_input::{InputEvent, TextInput},
-    theme::{Appearance, Palette},
+    theme::{self, Appearance, Palette},
 };
 use gpui::{
     Context, Entity, FocusHandle, FontWeight, IntoElement, Render, ScrollAnchor, ScrollHandle,
@@ -124,6 +124,7 @@ struct Catalog {
 #[derive(Clone)]
 enum Action {
     Select(Key),
+    Details,
     Model(String),
     Refresh,
     Preview(Mode),
@@ -186,6 +187,8 @@ pub(crate) struct AgentConnections {
     config: Entity<TextInput>,
     search: Entity<TextInput>,
     query: String,
+    details_open: bool,
+    editor_open: bool,
     pending: Arc<AtomicBool>,
     cancellation: Option<Cancellation>,
     active: bool,
@@ -270,6 +273,8 @@ impl AgentConnections {
             config,
             search,
             query: String::new(),
+            details_open: false,
+            editor_open: false,
             pending: Arc::new(AtomicBool::new(false)),
             cancellation: None,
             active: false,
@@ -398,6 +403,7 @@ impl AgentConnections {
             .collect();
         self.set_adapters(adapters, cx);
         self.fixture_mode = true;
+        self.editor_open = scene != "agents";
         let address = SocketAddr::from(([127, 0, 0, 1], 8787));
         self.configure(address, cx);
         self.catalog = Some(Catalog {
@@ -535,10 +541,18 @@ impl AgentConnections {
             return;
         }
         match action {
+            Action::Details => self.details_open = !self.details_open,
             Action::Select(key) => {
+                if self.selected.as_ref() == Some(&key) {
+                    self.editor_open = !self.editor_open;
+                    cx.notify();
+                    return;
+                }
                 if self.drafts.contains_key(&key) {
                     self.invalidate();
                     self.selected = Some(key);
+                    self.details_open = false;
+                    self.editor_open = true;
                     self.notice = None;
                     self.load_config(cx);
                     self.start(WorkKind::Refresh, None, cx);
@@ -1141,6 +1155,8 @@ fn public_model(model: &str) -> bool {
 enum Text {
     Title,
     FileState,
+    Details,
+    HideDetails,
     Hint,
     Path,
     DefaultPath,
@@ -1152,8 +1168,8 @@ enum Text {
     Unseen,
     Unknown,
     Current,
-    Missing,
     Selected,
+    Missing,
     NoModels,
     NoMatches,
     Limit,
@@ -1176,7 +1192,27 @@ enum Text {
 }
 fn copy(locale: Locale, key: Text) -> &'static str {
     let strings = match key {
-        Text::FileState => ["File", "文件", "檔案", "ファイル", "Datei"],
+        Text::FileState => [
+            "Configuration",
+            "配置状态",
+            "設定狀態",
+            "設定の状態",
+            "Konfiguration",
+        ],
+        Text::Details => [
+            "Connection settings",
+            "连接设置",
+            "連線設定",
+            "接続設定",
+            "Verbindungseinstellungen",
+        ],
+        Text::HideDetails => [
+            "Hide settings",
+            "收起设置",
+            "收起設定",
+            "設定を閉じる",
+            "Einstellungen schließen",
+        ],
         Text::Title => [
             "Agent connections",
             "Agent 接入",
@@ -1257,11 +1293,11 @@ fn copy(locale: Locale, key: Text) -> &'static str {
         ],
         Text::Missing => ["Not set", "未设置", "未設定", "未設定", "Nicht gesetzt"],
         Text::Selected => [
-            "Selected model",
-            "选中模型",
-            "選取的模型",
-            "選択したモデル",
-            "Ausgewähltes Modell",
+            "Target model",
+            "目标模型",
+            "目標模型",
+            "変更先のモデル",
+            "Zielmodell",
         ],
         Text::NoModels => [
             "No models loaded from the gateway. Read again after checking the gateway.",
@@ -1409,7 +1445,7 @@ fn ownership_label(locale: Locale, status: Ownership) -> &'static str {
     })
 }
 impl AgentConnections {
-    fn button(
+    fn control(
         &mut self,
         id: String,
         label: &str,
@@ -1443,11 +1479,29 @@ impl AgentConnections {
             .clone();
         material_button(SharedString::from(id), variant)
             .button_size(ButtonSize::Small)
+            .rounded(px(8.0))
+            .font(theme::ui_font(cx, self.locale))
+            .toggle(matches!(
+                action,
+                Action::Select(_) | Action::Model(_) | Action::Details
+            ))
+            .selected(selected)
             .disabled(!enabled)
             .track_focus(&focus)
             .anchor_scroll(Some(anchor))
             .accessibility_label(label.to_owned())
             .on_click(cx.listener(move |view, _, _, cx| view.act(action.clone(), cx)))
+    }
+    fn button(
+        &mut self,
+        id: String,
+        label: &str,
+        action: Action,
+        enabled: bool,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) -> MaterialButton {
+        self.control(id, label, action, enabled, selected, cx)
             .child(
                 div()
                     .min_w_0()
@@ -1499,33 +1553,43 @@ impl Render for AgentConnections {
                 cx,
             )
         });
+        let narrow = window.viewport_size().width < px(600.0);
         let mut ids = BTreeSet::new();
         let mut body = div()
             .flex()
             .flex_col()
-            .gap(px(10.0))
+            .gap(px(12.0))
             .min_w_0()
-            .p(px(16.0))
-            .child(
-                div()
-                    .text_size(px(18.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child(text!(copy(locale, Text::Title))),
-            )
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(rgb(palette.muted))
-                    .whitespace_normal()
-                    .child(text!(copy(locale, Text::Hint))),
-            );
+            .pl(px(if narrow { 12.0 } else { 60.0 }))
+            .pr(px(12.0))
+            .pt(px(8.0))
+            .pb(px(24.0))
+            .bg(rgb(palette.surface));
         if self.adapters.is_empty() {
             return div()
                 .id("agent-connections")
                 .size_full()
                 .min_h_0()
                 .text_color(rgb(palette.text))
-                .child(body.child(text!(copy(locale, Text::NoAdapters))));
+                .child(
+                    div()
+                        .py(px(40.0))
+                        .flex()
+                        .flex_col()
+                        .gap(px(12.0))
+                        .child(
+                            div()
+                                .text_size(px(16.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(text!(copy(locale, Text::Title))),
+                        )
+                        .child(
+                            div()
+                                .text_color(rgb(palette.muted))
+                                .whitespace_normal()
+                                .child(text!(copy(locale, Text::NoAdapters))),
+                        ),
+                );
         }
         let rows: Vec<_> = self
             .adapters
@@ -1536,98 +1600,234 @@ impl Render for AgentConnections {
                 let status = observed
                     .map(|o| ownership_label(locale, o.status))
                     .unwrap_or(copy(locale, Text::Unseen));
+                let model = observed
+                    .map(|o| o.model_label(locale))
+                    .unwrap_or(copy(locale, Text::Unseen));
                 (
                     key,
-                    format!(
-                        "{} · {}: {status}",
-                        adapter.name,
-                        copy(locale, Text::FileState)
-                    ),
+                    adapter.name.clone(),
+                    status.to_owned(),
+                    model.to_owned(),
                 )
             })
             .collect();
-        let mut rows_view = div().flex().flex_col().gap(px(2.0));
-        for (key, label) in rows {
+        let mut leading_rows = div().flex().flex_col();
+        let mut trailing_rows = div().flex().flex_col();
+        let mut after_selected = false;
+        for (key, name, status, model) in rows {
             let id = format!("agent-adapter:{}:{}", key.owner, key.id);
             ids.insert(id.clone());
             let selected = self.selected.as_ref() == Some(&key);
-            rows_view = rows_view.child(
-                self.button(id, &label, Action::Select(key), !busy, selected, cx)
-                    .w_full(),
+            let label = format!(
+                "{name} · {}: {status} · {}: {model}",
+                copy(locale, Text::FileState),
+                copy(locale, Text::Current)
             );
+            let initial = name
+                .chars()
+                .next()
+                .unwrap_or('A')
+                .to_uppercase()
+                .to_string();
+            let identity = div()
+                .flex()
+                .items_center()
+                .gap(px(12.0))
+                .min_w_0()
+                .flex_1()
+                .child(
+                    div()
+                        .size(px(36.0))
+                        .flex_none()
+                        .rounded(px(9.0))
+                        .bg(rgb(palette.inset))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(15.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(palette.text))
+                        .child(text!(initial)),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .gap(px(5.0))
+                        .child(
+                            div()
+                                .text_size(px(14.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .whitespace_normal()
+                                .child(text!(name)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(rgb(palette.muted))
+                                .whitespace_normal()
+                                .child(text!(status)),
+                        ),
+                );
+            let content = div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(16.0))
+                .when(narrow, |row| row.flex_col().items_start().gap(px(8.0)))
+                .child(identity)
+                .child(
+                    div()
+                        .min_w_0()
+                        .when(!narrow, |item| item.w(px(240.0)))
+                        .when(narrow, |item| item.pl(px(48.0)))
+                        .flex()
+                        .flex_col()
+                        .gap(px(4.0))
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(rgb(palette.muted))
+                                .child(text!(copy(locale, Text::Current))),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .whitespace_normal()
+                                .child(text!(model)),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(rgb(if selected {
+                            palette.accent
+                        } else {
+                            palette.muted
+                        }))
+                        .child(text!(if selected && self.editor_open {
+                            "−"
+                        } else {
+                            "+"
+                        })),
+                );
+            let row = self
+                .control(id, &label, Action::Select(key), !busy, selected, cx)
+                .button_size(ButtonSize::Medium)
+                .w_full()
+                .h_auto()
+                .min_h(px(76.0))
+                .px(px(12.0))
+                .py(px(14.0))
+                .rounded(px(8.0))
+                .justify_start()
+                .text_color(rgb(palette.text))
+                .when(selected, |row| row.bg(rgb(palette.surface)))
+                .child(content);
+            if after_selected {
+                trailing_rows = trailing_rows.child(row);
+            } else {
+                leading_rows = leading_rows.child(row);
+            }
+            if selected {
+                after_selected = true;
+            }
         }
-        body = body.child(rows_view);
         let gateway = self
             .address
             .map(|a| format!("{}: http://{a}", copy(locale, Text::Gateway)))
             .unwrap_or_else(|| copy(locale, Text::NoGateway).to_owned());
-        body = body
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .text_color(rgb(palette.muted))
-                    .whitespace_normal()
-                    .child(text!(gateway)),
-            )
-            .child(
-                div()
-                    .text_size(px(12.0))
-                    .child(text!(copy(locale, Text::Path))),
-            )
-            .child(self.config.clone());
-        let observation = self.observation();
-        let ownership = observation
-            .map(|o| ownership_label(locale, o.status))
-            .unwrap_or(copy(locale, Text::Unseen));
-        let current = observation
-            .map(|o| o.model_label(locale))
-            .unwrap_or(copy(locale, Text::Unseen));
-        body = body.child(
-            div()
-                .text_size(px(13.0))
-                .whitespace_normal()
-                .child(text!(format!(
-                    "{ownership} · {}: {current}",
-                    copy(locale, Text::Current)
-                ))),
-        );
-        if let Some(observation) = observation {
-            for field in &observation.public_fields {
-                body = body.child(div().text_size(px(13.0)).whitespace_normal().child(text!(
-                    format!(
-                            "{}: {}",
-                            field.label(locale),
-                            field
-                                .value
-                                .as_deref()
-                                .unwrap_or(copy(locale, Text::Missing))
-                        )
-                )));
-            }
-        }
-        let selected = self
-            .selected
-            .as_ref()
-            .and_then(|k| self.drafts.get(k))
-            .and_then(|d| d.model.clone());
-        if let Some(model) = selected.as_ref() {
-            body = body.child(
-                div()
-                    .text_size(px(13.0))
-                    .whitespace_normal()
-                    .child(text!(format!("{}: {model}", copy(locale, Text::Selected)))),
-            );
-        }
-        let id = "agent-read".to_owned();
-        ids.insert(id.clone());
-        body = body.child(self.button(
-            id,
+        let details_id = "agent-details".to_owned();
+        ids.insert(details_id.clone());
+        let mut tools = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(8.0))
+            .child(self.button(
+                details_id,
+                copy(
+                    locale,
+                    if self.details_open {
+                        Text::HideDetails
+                    } else {
+                        Text::Details
+                    },
+                ),
+                Action::Details,
+                !busy,
+                self.details_open,
+                cx,
+            ));
+        ids.insert("agent-read".into());
+        tools = tools.child(self.button(
+            "agent-read".into(),
             copy(locale, Text::Refresh),
             Action::Refresh,
             !busy,
             false,
             cx,
         ));
+        body = body.child(tools);
+        if self.details_open {
+            let config_anchor = self
+                .anchors
+                .entry("agent-config-anchor".into())
+                .or_insert_with(|| ScrollAnchor::for_handle(self.scroll.clone()))
+                .clone();
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.0))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(palette.muted))
+                            .whitespace_normal()
+                            .child(text!(gateway)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .child(text!(copy(locale, Text::Path))),
+                    )
+                    .child(
+                        div()
+                            .anchor_scroll(Some(config_anchor))
+                            .child(self.config.clone()),
+                    ),
+            );
+            if let Some(observation) = self.observation() {
+                for field in &observation.public_fields {
+                    body = body.child(div().text_size(px(12.0)).whitespace_normal().child(text!(
+                        format!(
+                                "{}: {}",
+                                field.label(locale),
+                                field
+                                    .value
+                                    .as_deref()
+                                    .unwrap_or(copy(locale, Text::Missing))
+                            )
+                    )));
+                }
+            }
+            body = body.child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(rgb(palette.muted))
+                    .whitespace_normal()
+                    .child(text!(copy(locale, Text::Session))),
+            );
+        }
+        let selected = self
+            .selected
+            .as_ref()
+            .and_then(|k| self.drafts.get(k))
+            .and_then(|d| d.model.clone());
         if busy {
             let id = "agent-cancel".to_owned();
             ids.insert(id.clone());
@@ -1662,6 +1862,30 @@ impl Render for AgentConnections {
             );
         }
         body = body.child(self.search.clone());
+        if let Some(model) = selected.as_ref() {
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_baseline()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(palette.muted))
+                            .child(text!(copy(locale, Text::Selected))),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(rgb(palette.accent))
+                            .whitespace_normal()
+                            .child(text!(model.clone())),
+                    ),
+            );
+        }
+
         let (models, matched) = self
             .catalog
             .as_ref()
@@ -1721,15 +1945,21 @@ impl Render for AgentConnections {
                     is_selected,
                     cx,
                 )
-                .w_full(),
+                .button_size(ButtonSize::Medium)
+                .w_full()
+                .h_auto()
+                .min_h(px(40.0))
+                .px(px(12.0))
+                .py(px(8.0))
+                .justify_start(),
             );
         }
         body = body.child(model_rows);
         let available = !busy && self.model_available();
-        let can_model = available
-            && self
-                .observation()
-                .is_some_and(|o| o.status == Ownership::Connected);
+        let model_workflow = self
+            .observation()
+            .is_some_and(|o| o.status == Ownership::Connected);
+        let can_model = available && model_workflow;
         let can_connect = available
             && self
                 .observation()
@@ -1749,6 +1979,11 @@ impl Render for AgentConnections {
                 can_model,
             ),
         ] {
+            if (matches!(action, Action::Preview(Mode::Model)) && !model_workflow)
+                || (matches!(action, Action::Preview(Mode::Connect)) && model_workflow)
+            {
+                continue;
+            }
             ids.insert(id.to_owned());
             actions = actions.child(self.button(
                 id.to_owned(),
@@ -1841,16 +2076,26 @@ impl Render for AgentConnections {
                 cx,
             ));
         }
-        body = body.child(
-            div()
-                .text_size(px(12.0))
-                .text_color(rgb(palette.muted))
-                .whitespace_normal()
-                .child(text!(copy(locale, Text::Session))),
-        );
+        let body = div()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .pb(px(28.0))
+            .child(leading_rows)
+            .when(self.editor_open, |container| container.child(body))
+            .child(trailing_rows)
+            .child(
+                div()
+                    .pt(px(20.0))
+                    .text_size(px(12.0))
+                    .text_color(rgb(palette.muted))
+                    .whitespace_normal()
+                    .child(text!(copy(locale, Text::Hint))),
+            );
         self.focus.retain(|id, _| ids.contains(id));
-        self.anchors
-            .retain(|id, _| ids.contains(id) || id == "model-container");
+        self.anchors.retain(|id, _| {
+            ids.contains(id) || id == "model-container" || id == "agent-config-anchor"
+        });
         div()
             .id("agent-connections")
             .size_full()
@@ -1865,6 +2110,12 @@ impl Render for AgentConnections {
                         window.focus_prev(cx);
                     } else {
                         window.focus_next(cx);
+                    }
+                    if view.details_open
+                        && view.config.read(cx).focus_handle().is_focused(window)
+                        && let Some(anchor) = view.anchors.get("agent-config-anchor")
+                    {
+                        anchor.scroll_to(window, cx);
                     }
                     for (id, focus) in &view.focus {
                         if focus.is_focused(window) {
@@ -2112,6 +2363,7 @@ mod visual_tests {
     }
     fn fixture(view: &mut AgentConnections, cx: &mut Context<AgentConnections>) {
         view.set_adapters(vec![adapter()], cx);
+        view.editor_open = true;
         let address = "127.0.0.1:43197".parse().expect("synthetic loopback");
         view.configure(address, cx);
         view.catalog = Some(Catalog {
@@ -2421,6 +2673,148 @@ mod visual_tests {
         });
         cx.run_until_parked();
     }
+    #[gpui::test]
+    fn connection_settings_disclosure_preserves_draft_preview_and_keyboard_focus(
+        cx: &mut TestAppContext,
+    ) {
+        struct Host(Entity<AgentConnections>);
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().flex().flex_col().child(self.0.clone())
+            }
+        }
+        init(cx);
+        let page = cx.new(AgentConnections::new);
+        page.update(cx, |view, cx| view.preview_fixture("codex-update", cx));
+        let window = cx.open_window(gpui::size(px(360.0), px(560.0)), |window, cx| {
+            gpui::base::Root::new(cx.new(|_| Host(page.clone())), window, cx)
+        });
+        cx.run_until_parked();
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        let (stamp, revision, trigger) = visual.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            let view = page.read(cx);
+            assert!(!view.details_open);
+            let expected = (
+                view.stamp().expect("preview target"),
+                view.ticket.as_ref().expect("preview").revision.clone(),
+                view.focus["agent-details"].clone(),
+            );
+            expected.2.focus(window, cx);
+            expected
+        });
+        for expanded in [true, false, true, false] {
+            visual.simulate_keystrokes("enter");
+            visual.run_until_parked();
+            visual.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                let view = page.read(cx);
+                assert_eq!(view.details_open, expanded);
+                assert!(view.stamp().as_ref() == Some(&stamp));
+                assert_eq!(view.config.read(cx).text(), "/synthetic/agent-config");
+                assert_eq!(
+                    view.ticket.as_ref().expect("retained preview").revision,
+                    revision
+                );
+                assert!(
+                    view.can_apply(),
+                    "opening settings must not revoke a valid preview"
+                );
+                assert!(
+                    trigger.is_focused(window),
+                    "disclosure retains its keyboard focus"
+                );
+            });
+        }
+        visual.simulate_keystrokes("tab");
+        visual.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            assert!(page.read(cx).focus["agent-read"].is_focused(window));
+            assert!(
+                !page
+                    .read(cx)
+                    .config
+                    .read(cx)
+                    .focus_handle()
+                    .is_focused(window)
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn collapsing_an_agent_keeps_its_pending_model_and_preview(cx: &mut TestAppContext) {
+        init(cx);
+        let page = cx.new(AgentConnections::new);
+        page.update(cx, |view, cx| {
+            view.preview_fixture("codex-update", cx);
+            let key = view.selected.clone().expect("selected adapter");
+            let stamp = view.stamp().expect("preview target");
+            let revision = view.ticket.as_ref().expect("preview").revision.clone();
+            for open in [false, true, false, true] {
+                view.act(Action::Select(key.clone()), cx);
+                assert_eq!(view.editor_open, open);
+                assert!(view.stamp().as_ref() == Some(&stamp));
+                assert_eq!(
+                    view.ticket.as_ref().expect("preserved preview").revision,
+                    revision
+                );
+                assert!(view.can_apply());
+                assert!(!view.busy());
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn filtered_target_and_model_preview_control_survive_busy_render(cx: &mut TestAppContext) {
+        struct Host(Entity<AgentConnections>);
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().flex().flex_col().child(self.0.clone())
+            }
+        }
+        init(cx);
+        let page = cx.new(AgentConnections::new);
+        page.update(cx, |view, cx| {
+            fixture(view, cx);
+            view.act(Action::Model("fixture/model-b".into()), cx);
+            view.search.update(cx, |input, cx| {
+                input.set_text("model-a", cx);
+            });
+        });
+        cx.run_until_parked();
+        let window = cx.open_window(gpui::size(px(360.0), px(560.0)), |window, cx| {
+            gpui::base::Root::new(cx.new(|_| Host(page.clone())), window, cx)
+        });
+        cx.run_until_parked();
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        let preview_focus = visual.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            let focus = page.read(cx).focus["agent-preview-model"].clone();
+            focus.focus(window, cx);
+            focus
+        });
+        for busy in [false, true, false] {
+            page.update(&mut visual, |view, cx| {
+                // A model preview retains the inspected ownership while its worker runs.
+                view.active = busy;
+                cx.notify();
+            });
+            visual.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                let view = page.read(cx);
+                assert!(!view.focus.contains_key("agent-model:fixture/model-b"));
+                assert!(view.focus.get("agent-preview-model") == Some(&preview_focus));
+                assert!(preview_focus.is_focused(window));
+                assert!(
+                    gpui::base::test_support::texts(window)
+                        .iter()
+                        .any(|text| text.visible() && text.text() == "fixture/model-b"),
+                    "the target must stay visible when search hides its model row"
+                );
+            });
+        }
+    }
+
     #[gpui::test]
     fn compact_window_renders_dynamic_adapters_and_keeps_apply_guarded(cx: &mut TestAppContext) {
         struct Host(Entity<AgentConnections>);

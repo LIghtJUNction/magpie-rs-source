@@ -27,7 +27,7 @@ use crate::{
     plugin_catalog::OwnedProvider,
     provider_text::ProviderText as P,
     text_input::{InputEvent, TextInput},
-    theme::{Appearance, Palette},
+    theme::{self, Appearance, Palette},
 };
 
 gpui::actions!(magpie_provider, [NextControl, PreviousControl]);
@@ -1034,10 +1034,10 @@ impl ProvidersPage {
     ) -> MaterialButton {
         let enabled = !(self.busy() && !matches!(action, Action::CancelRefresh))
             && (self.discard.is_none() || matches!(action, Action::KeepEditing | Action::Discard));
-        let variant = if selected {
-            ButtonVariant::Tonal
-        } else if matches!(action, Action::Save | Action::Add) {
+        let variant = if matches!(action, Action::Save | Action::Add) {
             ButtonVariant::Filled
+        } else if selected {
+            ButtonVariant::Tonal
         } else {
             ButtonVariant::Text
         };
@@ -1049,6 +1049,8 @@ impl ProvidersPage {
         let _ = palette;
         button = button
             .button_size(ButtonSize::Small)
+            .rounded(px(8.0))
+            .font(theme::ui_font(cx, self.locale))
             .disabled(!enabled)
             .accessibility_label(label.to_owned());
         button
@@ -1079,49 +1081,94 @@ impl ProvidersPage {
             } else {
                 P::NoKey
             });
-        let summary = format!(
-            "{host} · {} {} · {credential}",
-            provider.models.len(),
-            self.locale.provider_text(P::ModelsCount)
-        );
+        let summary = format!("{host} · {credential}");
+        let monogram = provider
+            .name
+            .chars()
+            .next()
+            .map(|letter| letter.to_uppercase().to_string())
+            .unwrap_or_else(|| "·".into());
         let identity = div()
             .flex_1()
             .min_w_0()
             .flex()
-            .flex_col()
-            .gap(px(3.0))
-            .line_height(px(17.0))
+            .items_center()
+            .gap(px(12.0))
             .child(
                 div()
+                    .size(px(36.0))
+                    .flex_none()
+                    .rounded(px(8.0))
+                    .bg(rgb(palette.inset))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(14.0))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .truncate()
-                    .child(text!(provider.name.clone())),
+                    .child(text!(monogram)),
             )
             .child(
                 div()
-                    .text_size(px(11.0))
-                    .text_color(rgb(palette.muted))
-                    .truncate()
-                    .child(text!(summary)),
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(5.0))
+                    .line_height(px(18.0))
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .truncate()
+                            .child(text!(provider.name.clone())),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(palette.muted))
+                            .truncate()
+                            .child(text!(summary)),
+                    ),
             );
         let state = div()
             .text_size(px(11.0))
             .flex_none()
-            .text_color(rgb(if provider.enabled {
-                palette.accent
-            } else {
-                palette.muted
-            }))
-            .child(text!(self.locale.provider_text(if provider.enabled {
-                P::Enabled
-            } else {
-                P::Disabled
-            })));
+            .flex()
+            .flex_col()
+            .items_end()
+            .gap(px(5.0))
+            .text_color(rgb(palette.muted))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .size(px(5.0))
+                            .rounded(px(5.0))
+                            .bg(rgb(if provider.enabled {
+                                palette.accent
+                            } else {
+                                palette.muted
+                            })),
+                    )
+                    .child(text!(self.locale.provider_text(if provider.enabled {
+                        P::Enabled
+                    } else {
+                        P::Disabled
+                    }))),
+            )
+            .child(text!(format!(
+                "{} {}",
+                provider.models.len(),
+                self.locale.provider_text(P::ModelsCount)
+            )));
         let controls = div()
             .flex()
             .flex_wrap()
             .items_center()
-            .gap(px(4.0))
+            .gap(px(2.0))
             .child(self.button(
                 format!("provider-row:{}:models", provider.id),
                 self.locale.provider_text(P::RefreshModels),
@@ -1178,7 +1225,7 @@ impl ProvidersPage {
             div()
                 .flex()
                 .flex_col()
-                .gap(px(6.0))
+                .gap(px(12.0))
                 .child(
                     div()
                         .flex()
@@ -1193,11 +1240,11 @@ impl ProvidersPage {
             .w_full()
             .min_w_0()
             .flex_none()
-            .px(px(16.0))
-            .py(px(12.0))
+            .py(px(20.0))
             .flex()
             .flex_col()
             .gap(px(10.0))
+            .border_b_1()
             .border_color(rgb(palette.border))
             .child(content)
             .when(self.refresh_failures.contains(&provider.id), |row| {
@@ -1250,15 +1297,39 @@ impl ProvidersPage {
             .editor
             .as_ref()
             .expect("editor exists only in editor view");
-        let mut form = div().flex().flex_col().gap(px(16.0));
+        let section = |key, first| {
+            div()
+                .pt(px(if first { 0.0 } else { 16.0 }))
+                .pb(px(2.0))
+                .text_size(px(14.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(text!(self.locale.provider_text(key)))
+        };
+        let mut form = div()
+            .w_full()
+            .max_w(px(720.0))
+            .flex()
+            .flex_col()
+            .gap(px(18.0));
         for (id, label, _) in FIELDS {
+            match id {
+                "provider-name" => form = form.child(section(P::IdentitySection, true)),
+                "provider-url" => form = form.child(section(P::ConnectionSection, false)),
+                "provider-models" => form = form.child(section(P::CatalogSection, false)),
+                _ => {}
+            }
             if id == "provider-key" {
                 form = form.child(
                     div()
                         .flex()
                         .flex_col()
                         .gap(px(6.0))
-                        .child(text!(self.locale.provider_text(P::Protocol)))
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(text!(self.locale.provider_text(P::Protocol))),
+                        )
                         .child(div().flex().flex_wrap().gap(px(4.0)).children(
                             ProviderProtocol::ALL.map(|protocol| {
                                 self.button(
@@ -1272,6 +1343,7 @@ impl ProvidersPage {
                             }),
                         )),
                 );
+                form = form.child(section(P::CredentialsSection, false));
             }
             let hint = match id {
                 "provider-key" => Some(P::KeyHint),
@@ -1297,8 +1369,8 @@ impl ProvidersPage {
                     .when_some(hint, |field, hint| {
                         field.child(
                             div()
-                                .text_size(px(11.0))
-                                .line_height(px(16.0))
+                                .text_size(px(12.0))
+                                .line_height(px(18.0))
                                 .text_color(rgb(palette.muted))
                                 .whitespace_normal()
                                 .child(text!(self.locale.provider_text(hint))),
@@ -1350,17 +1422,20 @@ impl ProvidersPage {
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.editor_scroll)
-                    .p(px(20.0))
+                    .px(px(2.0))
+                    .pt(px(4.0))
+                    .pb(px(28.0))
                     .child(form),
             )
             .child(
                 div()
                     .flex_none()
-                    .px(px(20.0))
-                    .py(px(12.0))
+                    .py(px(16.0))
+                    .border_t_1()
                     .border_color(rgb(palette.border))
                     .flex()
                     .flex_wrap()
+                    .justify_end()
                     .gap(px(6.0))
                     .child(
                         self.button(
@@ -1417,7 +1492,8 @@ impl Render for ProvidersPage {
             });
         }
         let palette = Palette::for_window(window, self.appearance);
-        let wide = f32::from(window.viewport_size().width) >= 800.0;
+        let wide = f32::from(window.viewport_size().width) >= 1100.0;
+        let compact = f32::from(window.viewport_size().width) < 600.0;
         let busy = self.busy();
         for (id, label, placeholder) in FIELDS {
             let immutable_id =
@@ -1456,24 +1532,11 @@ impl Render for ProvidersPage {
                 P::AddTitle
             },
         );
-        let header = div()
-            .flex_none()
-            .p(px(16.0))
+        let actions = div()
             .flex()
             .flex_wrap()
             .items_center()
-            .gap(px(8.0))
-            .when(self.editor.is_some(), |row| {
-                row.child(
-                    div()
-                        .flex_1()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(text!(title)),
-                )
-            })
-            .when(self.editor.is_none(), |row| {
-                row.child(div().flex_1().min_w(px(150.0)).child(self.search.clone()))
-            })
+            .gap(px(6.0))
             .child(self.button(
                 "provider-refresh".into(),
                 self.locale.provider_text(P::Refresh),
@@ -1485,7 +1548,9 @@ impl Render for ProvidersPage {
             .when(self.cancellation.is_some(), |row| {
                 row.child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(px(12.0))
+                        .text_color(rgb(palette.muted))
+                        .whitespace_normal()
                         .child(text!(self.locale.provider_text(P::RefreshingModels))),
                 )
             })
@@ -1512,6 +1577,38 @@ impl Render for ProvidersPage {
                     ))
                 },
             );
+        let header = div()
+            .flex_none()
+            .pb(px(20.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(12.0))
+            .when(compact, |header| header.flex_col().items_stretch())
+            .when(self.editor.is_some(), |header| {
+                header.child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .when(compact, |title| title.flex_none())
+                        .text_size(px(18.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .whitespace_normal()
+                        .child(text!(title)),
+                )
+            })
+            .when(self.editor.is_none(), |header| {
+                header.child(
+                    div()
+                        .w_full()
+                        .max_w(px(360.0))
+                        .min_w_0()
+                        .flex_1()
+                        .when(compact, |search| search.flex_none())
+                        .child(self.search.clone()),
+                )
+            })
+            .child(actions);
         for id in ["provider-keep-editing", "provider-discard"] {
             self.ensure_button(id.to_owned(), cx);
         }
@@ -1521,7 +1618,8 @@ impl Render for ProvidersPage {
                     .id("provider-discard-dialog")
                     .flex_1()
                     .min_h_0()
-                    .p(px(20.0))
+                    .py(px(24.0))
+                    .max_w(px(600.0))
                     .flex()
                     .flex_col()
                     .gap(px(16.0))
@@ -1529,6 +1627,7 @@ impl Render for ProvidersPage {
                     .aria_label(self.locale.provider_text(P::DiscardTitle))
                     .child(
                         div()
+                            .text_size(px(18.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(text!(self.locale.provider_text(P::DiscardTitle))),
                     )
@@ -1569,7 +1668,7 @@ impl Render for ProvidersPage {
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
-                    .px(px(16.))
+                    .pb(px(24.0))
                     .flex()
                     .flex_col()
                     .gap(px(4.))
@@ -1579,10 +1678,11 @@ impl Render for ProvidersPage {
                             .flex_wrap()
                             .items_center()
                             .gap(px(8.))
-                            .py(px(8.))
+                            .pb(px(12.))
                             .child(
                                 div()
                                     .flex_1()
+                                    .text_size(px(18.0))
                                     .font_weight(FontWeight::MEDIUM)
                                     .child(text!(self.locale.provider_text(P::Choose))),
                             )
@@ -1613,7 +1713,9 @@ impl Render for ProvidersPage {
                             })
                             .map(|preset| {
                                 div()
-                                    .py(px(9.))
+                                    .py(px(16.0))
+                                    .border_b_1()
+                                    .border_color(rgb(palette.border))
                                     .flex()
                                     .flex_wrap()
                                     .items_center()
@@ -1632,7 +1734,7 @@ impl Render for ProvidersPage {
                                             )
                                             .child(
                                                 div()
-                                                    .text_size(px(11.))
+                                                    .text_size(px(12.))
                                                     .text_color(rgb(palette.muted))
                                                     .whitespace_normal()
                                                     .child(text!(preset.preset.base_url.clone())),
@@ -1651,7 +1753,8 @@ impl Render for ProvidersPage {
                     .child(
                         div()
                             .py(px(12.))
-                            .text_size(px(11.))
+                            .text_size(px(12.))
+                            .line_height(px(18.0))
                             .text_color(rgb(palette.muted))
                             .whitespace_normal()
                             .child(text!(self.locale.provider_text(P::PresetHint))),
@@ -1681,18 +1784,20 @@ impl Render for ProvidersPage {
                 div()
                     .id("providers-scroll")
                     .size_full()
+                    .pb(px(24.0))
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
                     .when(matched.is_empty(), |body| {
                         body.child(
                             div()
-                                .p(px(24.0))
+                                .py(px(32.0))
                                 .flex()
                                 .flex_col()
                                 .gap(px(12.0))
                                 .child(
                                     div()
-                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_size(px(20.0))
+                                        .font_weight(FontWeight::MEDIUM)
                                         .child(text!(self.locale.provider_text(empty_text))),
                                 )
                                 .when(providers.is_empty() && self.store.is_some(), |body| {
@@ -1713,7 +1818,7 @@ impl Render for ProvidersPage {
                     )
                     .when(disabled_count > 0, |body| {
                         body.child(
-                            div().px(px(6.0)).py(px(6.0)).child(
+                            div().py(px(16.0)).child(
                                 self.button(
                                     "provider-disabled-toggle".into(),
                                     &format!(
@@ -1776,10 +1881,9 @@ impl Render for ProvidersPage {
                         .id("provider-notice")
                         .role(Role::Status)
                         .flex_none()
-                        .mx(px(16.0))
-                        .mb(px(8.0))
-                        .p(px(10.0))
-                        .rounded(px(5.0))
+                        .mb(px(16.0))
+                        .p(px(12.0))
+                        .rounded(px(6.0))
                         .bg(rgb(if *error {
                             palette.warning_bg
                         } else {
@@ -1796,18 +1900,18 @@ impl Render for ProvidersPage {
                 )
             })
             .child(body)
-            .child(
-                div()
-                    .flex_none()
-                    .px(px(16.0))
-                    .py(px(10.0))
-                    .border_color(rgb(palette.border))
-                    .text_size(px(11.0))
-                    .line_height(px(16.0))
-                    .text_color(rgb(palette.muted))
-                    .whitespace_normal()
-                    .child(text!(self.locale.provider_text(P::Restart))),
-            )
+            .when(self.editor.is_some(), |page| {
+                page.child(
+                    div()
+                        .flex_none()
+                        .pb(px(12.0))
+                        .text_size(px(11.0))
+                        .line_height(px(16.0))
+                        .text_color(rgb(palette.muted))
+                        .whitespace_normal()
+                        .child(text!(self.locale.provider_text(P::Restart))),
+                )
+            })
     }
 }
 

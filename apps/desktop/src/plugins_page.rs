@@ -8,7 +8,7 @@ use crate::{
     localization::Locale,
     plugin_catalog::{Catalog, PluginSource},
     text_input::{InputEvent, TextInput},
-    theme::{Appearance, Palette},
+    theme::{self, Appearance, Palette},
 };
 use gpui::{
     Context, Entity, EventEmitter, FontWeight, Render, Role, ScrollHandle, Subscription, Window,
@@ -209,6 +209,7 @@ impl Drop for PluginsPage {
 impl Render for PluginsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::for_window(window, self.appearance);
+        let compact = window.viewport_size().width < px(620.0);
         let search_label = self.locale.plugin_text(T::Search);
         self.search.update(cx, |input, cx| {
             input.set_presentation(search_label, search_label, palette, false, cx)
@@ -239,61 +240,63 @@ impl Render for PluginsPage {
                     "unsupported" => self.locale.plugin_text(T::Unsupported),
                     _ => self.locale.plugin_text(T::Unknown),
                 };
+                let status_color = match record.status.as_str() {
+                    "active" => palette.accent,
+                    "failed" => palette.danger,
+                    "pending" | "unsupported" => palette.warning,
+                    _ => palette.muted,
+                };
+                let action_label =
+                    self.locale
+                        .plugin_text(if enabled { T::Enable } else { T::Disable });
                 div()
                     .id(gpui::SharedString::from(format!(
                         "plugin-row:{}",
                         record.id
                     )))
-                    .py(px(14.))
+                    .role(Role::ListItem)
+                    .py(px(18.))
+                    .border_b_1()
+                    .border_color(rgb(palette.border))
                     .flex()
-                    .flex_wrap()
                     .items_center()
-                    .gap(px(12.))
+                    .gap(px(18.))
+                    .when(compact, |row| row.flex_col().items_stretch().gap(px(12.)))
                     .child(
                         div()
                             .flex_1()
-                            .min_w(px(160.))
+                            .min_w_0()
                             .flex()
                             .flex_col()
-                            .gap(px(4.))
+                            .gap(px(6.))
                             .child(
                                 div()
+                                    .text_size(px(14.))
                                     .font_weight(FontWeight::MEDIUM)
+                                    .whitespace_normal()
                                     .child(text!(record.name.clone())),
                             )
                             .child(
                                 div()
                                     .text_size(px(11.))
                                     .text_color(rgb(palette.muted))
+                                    .truncate()
                                     .child(text!(format!(
                                         "{} · {} · {}",
                                         record.id, record.version, record.kind
                                     ))),
                             )
                             .child(
-                                div()
-                                    .flex()
-                                    .flex_wrap()
-                                    .items_center()
-                                    .gap(px(8.))
-                                    .child(
-                                        div()
-                                            .text_size(px(10.))
-                                            .px(px(6.))
-                                            .py(px(2.))
-                                            .rounded(px(4.))
-                                            .bg(rgb(palette.selected))
-                                            .child(text!(source_badge(
-                                                self.locale,
-                                                &record.source
-                                            ))),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(12.))
-                                            .text_color(rgb(palette.muted))
-                                            .child(text!(state)),
-                                    ),
+                                div().flex().flex_wrap().items_center().gap(px(8.)).child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .px(px(6.))
+                                        .py(px(2.))
+                                        .rounded(px(4.))
+                                        .bg(rgb(palette.inset))
+                                        .text_color(rgb(palette.muted))
+                                        .child(text!(source_badge(self.locale, &record.source))),
+                                ),
                             )
                             .when_some(source_details(&record.source), |row, source| {
                                 row.child(
@@ -306,20 +309,53 @@ impl Render for PluginsPage {
                             }),
                     )
                     .child(
-                        material_button(
-                            gpui::SharedString::from(format!("plugin-toggle:{}", record.id)),
-                            ButtonVariant::Text,
-                        )
-                        .button_size(ButtonSize::Small)
-                        .disabled(busy)
-                        .on_click(cx.listener(move |view, _, _, cx| {
-                            view.start(Some((id.clone(), enabled, revision)), cx)
-                        }))
-                        .child(text!(if enabled {
-                            self.locale.plugin_text(T::Enable)
-                        } else {
-                            self.locale.plugin_text(T::Disable)
-                        })),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(20.))
+                            .when(compact, |row| row.w_full())
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(7.))
+                                    .w(px(170.))
+                                    .when(compact, |status| status.flex_1().min_w_0())
+                                    .child(
+                                        div()
+                                            .size(px(6.))
+                                            .flex_none()
+                                            .rounded(px(3.))
+                                            .bg(rgb(status_color)),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .text_size(px(12.))
+                                            .line_height(px(18.))
+                                            .text_color(rgb(status_color))
+                                            .whitespace_normal()
+                                            .child(text!(state)),
+                                    ),
+                            )
+                            .child(
+                                material_button(
+                                    gpui::SharedString::from(format!(
+                                        "plugin-toggle:{}",
+                                        record.id
+                                    )),
+                                    ButtonVariant::Text,
+                                )
+                                .button_size(ButtonSize::Small)
+                                .rounded(px(8.0))
+                                .font(theme::ui_font(cx, self.locale))
+                                .accessibility_label(format!("{action_label} {}", record.name))
+                                .disabled(busy)
+                                .on_click(cx.listener(move |view, _, _, cx| {
+                                    view.start(Some((id.clone(), enabled, revision)), cx)
+                                }))
+                                .child(text!(action_label)),
+                            ),
                     )
             })
             .collect::<Vec<_>>();
@@ -399,22 +435,26 @@ impl Render for PluginsPage {
                     )
                     .children(diagnostic_rows)
             });
+        let empty = rows.is_empty() && self.catalog.is_some() && !busy;
         div()
             .size_full()
             .min_w_0()
             .flex()
             .flex_col()
-            .gap(px(14.))
+            .gap(px(16.))
+            .text_color(rgb(palette.text))
             .child(
                 div()
                     .flex()
                     .flex_wrap()
                     .items_center()
-                    .gap(px(12.))
+                    .gap(px(8.))
                     .child(div().flex_1().min_w(px(150.)).child(self.search.clone()))
                     .child(
                         material_button("plugins-refresh", ButtonVariant::Text)
                             .button_size(ButtonSize::Small)
+                            .rounded(px(8.0))
+                            .font(theme::ui_font(cx, self.locale))
                             .disabled(busy)
                             .on_click(cx.listener(|view, _, _, cx| view.refresh(cx)))
                             .child(text!(self.locale.plugin_text(T::Refresh))),
@@ -425,6 +465,7 @@ impl Render for PluginsPage {
                     div()
                         .id("plugin-read-status")
                         .role(Role::Status)
+                        .text_size(px(12.))
                         .text_color(rgb(palette.muted))
                         .child(text!(self.locale.plugin_text(T::Loading))),
                 )
@@ -433,7 +474,12 @@ impl Render for PluginsPage {
                 root.child(
                     div()
                         .id("plugin-error-status")
-                        .role(Role::Status)
+                        .role(Role::Alert)
+                        .p(px(12.))
+                        .rounded(px(8.))
+                        .bg(rgb(palette.warning_bg))
+                        .text_size(px(12.))
+                        .line_height(px(18.))
                         .text_color(rgb(palette.warning))
                         .whitespace_normal()
                         .child(text!(self.locale.plugin_text(T::Error))),
@@ -442,20 +488,37 @@ impl Render for PluginsPage {
             .child(
                 div()
                     .id("plugin-list")
+                    .role(Role::List)
                     .flex_1()
                     .min_h_0()
                     .min_w_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
                     .child(diagnostic_section)
-                    .children(rows),
-            )
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(rgb(palette.muted))
-                    .whitespace_normal()
-                    .child(text!(self.locale.plugin_text(T::Hint))),
+                    .children(rows)
+                    .when(empty, |list| {
+                        list.child(
+                            div()
+                                .py(px(40.))
+                                .text_size(px(13.))
+                                .text_color(rgb(palette.muted))
+                                .whitespace_normal()
+                                .child(text!(self.locale.plugin_text(if self.query.is_empty() {
+                                    T::Empty
+                                } else {
+                                    T::NoMatches
+                                }))),
+                        )
+                    })
+                    .child(
+                        div()
+                            .py(px(20.))
+                            .text_size(px(11.))
+                            .line_height(px(18.))
+                            .text_color(rgb(palette.muted))
+                            .whitespace_normal()
+                            .child(text!(self.locale.plugin_text(T::Hint))),
+                    ),
             )
     }
 }

@@ -200,8 +200,8 @@ impl UsagePage {
 
     fn caption(&self, key: U, palette: Palette) -> Div {
         div()
-            .text_size(px(11.0))
-            .line_height(px(16.0))
+            .text_size(px(12.0))
+            .line_height(px(18.0))
             .text_color(rgb(palette.muted))
             .whitespace_normal()
             .child(text!(self.locale.usage_text(key)))
@@ -215,22 +215,24 @@ impl UsagePage {
         palette: Palette,
     ) -> Div {
         div()
-            .min_w(px(105.0))
-            .py(px(4.0))
+            .min_w(px(120.0))
+            .min_h(px(84.0))
+            .flex_1()
             .flex()
             .flex_col()
-            .gap(px(4.0))
+            .gap(px(6.0))
             .child(self.caption(key, palette))
             .child(
                 div()
-                    .text_size(px(19.0))
+                    .text_size(px(28.0))
+                    .line_height(px(34.0))
                     .font_weight(FontWeight::MEDIUM)
                     .child(text!(format_number(value, self.locale))),
             )
             .when_some(coverage, |card, (known, total)| {
                 card.child(
                     div()
-                        .text_size(px(10.0))
+                        .text_size(px(11.0))
                         .text_color(rgb(palette.muted))
                         .child(text!(format!(
                             "{} {known}/{total}",
@@ -240,7 +242,7 @@ impl UsagePage {
             })
     }
 
-    fn row(&self, record: &Record, palette: Palette) -> gpui::Stateful<Div> {
+    fn row(&self, record: &Record, palette: Palette, compact: bool) -> gpui::Stateful<Div> {
         let outcome = match record.outcome.as_str() {
             "completed" => U::Completed,
             "failed" => U::Failed,
@@ -264,9 +266,47 @@ impl UsagePage {
                     .to_string()
             })
             .unwrap_or_else(|| "—".into());
-        let tokens = |field: fn(&Tokens) -> Option<u64>| {
-            format_number(record.usage.as_ref().and_then(field), self.locale)
-        };
+        let metrics = div()
+            .flex()
+            .gap(px(16.0))
+            .when(compact, |row| row.w_full())
+            .when(!compact, |row| row.w(px(296.0)).flex_none())
+            .children(
+                [
+                    (
+                        U::Input,
+                        (|t: &Tokens| t.input_tokens) as fn(&Tokens) -> Option<u64>,
+                    ),
+                    (U::Output, |t| t.output_tokens),
+                    (U::Total, |t| t.total_tokens),
+                ]
+                .map(|(key, field)| {
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(5.0))
+                        .text_right()
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .line_height(px(16.0))
+                                .text_color(rgb(palette.muted))
+                                .whitespace_normal()
+                                .child(text!(self.locale.usage_text(key))),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(16.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(text!(format_number(
+                                    record.usage.as_ref().and_then(field),
+                                    self.locale,
+                                ))),
+                        )
+                }),
+            );
         div()
             .id(gpui::SharedString::from(format!(
                 "usage-record:{}",
@@ -275,83 +315,82 @@ impl UsagePage {
             .role(Role::ListItem)
             .w_full()
             .min_w_0()
-            .px(px(16.0))
-            .py(px(12.0))
+            .py(px(18.0))
+            .border_b_1()
+            .border_color(rgb(palette.border))
             .flex()
-            .flex_col()
-            .gap(px(7.0))
+            .items_center()
+            .gap(px(24.0))
+            .when(compact, |row| row.flex_col().items_stretch().gap(px(14.0)))
             .child(
                 div()
+                    .flex_1()
+                    .min_w_0()
                     .flex()
-                    .items_start()
-                    .gap(px(12.0))
+                    .flex_col()
+                    .gap(px(6.0))
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .font_weight(FontWeight::MEDIUM)
-                            .whitespace_normal()
-                            .child(text!(record.model.clone())),
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(10.0))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .text_size(px(14.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .whitespace_normal()
+                                    .child(text!(record.model.clone())),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(color))
+                                    .child(text!(self.locale.usage_text(outcome))),
+                            ),
                     )
                     .child(
                         div()
-                            .flex_none()
                             .text_size(px(11.0))
-                            .text_color(rgb(color))
-                            .child(text!(self.locale.usage_text(outcome))),
+                            .line_height(px(17.0))
+                            .text_color(rgb(palette.muted))
+                            .whitespace_normal()
+                            .child(text!(format!(
+                                "{}: {} · {} · {}",
+                                self.locale.usage_text(U::Provider),
+                                record.provider_id,
+                                record.protocol,
+                                self.locale.usage_text(if record.stream {
+                                    U::Stream
+                                } else {
+                                    U::Json
+                                })
+                            ))),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap(px(12.0))
+                            .text_size(px(11.0))
+                            .text_color(rgb(palette.muted))
+                            .child(text!(time))
+                            .child(text!(format!(
+                                "{} {} ms",
+                                self.locale.usage_text(U::Duration),
+                                record.duration_ms
+                            ))),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(rgb(palette.muted))
+                            .truncate()
+                            .child(text!(record.id.clone())),
                     ),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(12.0))
-                    .text_size(px(11.0))
-                    .text_color(rgb(palette.muted))
-                    .child(text!(format!(
-                        "{}: {} · {} · {}",
-                        self.locale.usage_text(U::Provider),
-                        record.provider_id,
-                        record.protocol,
-                        self.locale
-                            .usage_text(if record.stream { U::Stream } else { U::Json })
-                    )))
-                    .child(text!(format!(
-                        "{} {} ms",
-                        self.locale.usage_text(U::Duration),
-                        record.duration_ms
-                    )))
-                    .child(text!(time)),
-            )
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap(px(16.0))
-                    .text_size(px(11.0))
-                    .child(text!(format!(
-                        "{} {}",
-                        self.locale.usage_text(U::Input),
-                        tokens(|t| t.input_tokens)
-                    )))
-                    .child(text!(format!(
-                        "{} {}",
-                        self.locale.usage_text(U::Output),
-                        tokens(|t| t.output_tokens)
-                    )))
-                    .child(text!(format!(
-                        "{} {}",
-                        self.locale.usage_text(U::Total),
-                        tokens(|t| t.total_tokens)
-                    ))),
-            )
-            .child(
-                div()
-                    .text_size(px(10.0))
-                    .text_color(rgb(palette.muted))
-                    .truncate()
-                    .child(text!(record.id.clone())),
-            )
+            .child(metrics)
     }
 }
 
@@ -396,6 +435,7 @@ impl Drop for UsagePage {
 impl Render for UsagePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::for_window(window, self.appearance);
+        let compact = window.viewport_size().width < px(720.0);
         self.search.update(cx, |input, cx| {
             input.set_presentation(
                 self.locale.usage_text(U::Search),
@@ -443,10 +483,10 @@ impl Render for UsagePage {
             .filter(|r| self.status.is_none_or(|status| r.outcome == status))
             .collect();
         let summary = div()
-            .p(px(16.0))
+            .py(px(24.0))
             .flex()
             .flex_wrap()
-            .gap(px(28.0))
+            .gap(px(20.0))
             .child(self.statistic(
                 U::Requests,
                 self.report.as_ref().map(|_| visible.len() as u64),
@@ -475,25 +515,22 @@ impl Render for UsagePage {
         let mut content = div()
             .id("usage-history-scroll")
             .flex_1()
+            .min_w_0()
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
             .child(summary)
             .child(
                 div()
-                    .px(px(16.0))
-                    .pb(px(12.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.0))
-                    .child(self.caption(U::Privacy, palette))
-                    .child(self.caption(U::CostUnknown, palette))
-                    .child(self.caption(U::LocalTime, palette)),
+                    .pb(px(20.0))
+                    .border_b_1()
+                    .border_color(rgb(palette.border))
+                    .child(self.caption(U::CostUnknown, palette)),
             );
         if self.report.is_some() && visible.is_empty() {
             content = content.child(
                 div()
-                    .p(px(24.0))
+                    .py(px(36.0))
                     .flex()
                     .flex_col()
                     .gap(px(10.0))
@@ -504,12 +541,22 @@ impl Render for UsagePage {
             );
         } else if self.report.is_some() {
             content = content.child(
-                div()
-                    .id("usage-records")
-                    .role(Role::List)
-                    .children(visible.into_iter().map(|record| self.row(record, palette))),
+                div().id("usage-records").role(Role::List).children(
+                    visible
+                        .into_iter()
+                        .map(|record| self.row(record, palette, compact)),
+                ),
             );
         }
+        content = content.child(
+            div()
+                .py(px(20.0))
+                .flex()
+                .flex_col()
+                .gap(px(6.0))
+                .child(self.caption(U::Privacy, palette))
+                .child(self.caption(U::LocalTime, palette)),
+        );
         div()
             .id("usage-page")
             .track_focus(&self.focus)
@@ -518,19 +565,21 @@ impl Render for UsagePage {
             .flex()
             .flex_col()
             .overflow_hidden()
+            .text_color(rgb(palette.text))
             .child(
                 div()
                     .flex_none()
-                    .p(px(16.0))
+                    .pb(px(16.0))
                     .flex()
                     .flex_col()
                     .gap(px(10.0))
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .gap(px(8.0))
-                            .child(div().flex_1().min_w(px(100.0)).child(self.search.clone()))
+                            .child(div().flex_1().min_w(px(180.0)).child(self.search.clone()))
                             .child(
                                 self.button(
                                     "usage-refresh",
@@ -542,14 +591,14 @@ impl Render for UsagePage {
                                 ),
                             ),
                     )
-                    .child(self.caption(U::Intro, palette))
                     .child(chips),
             )
             .when(self.error, |body| {
                 body.child(
                     div()
-                        .px(px(16.0))
-                        .py(px(10.0))
+                        .p(px(12.0))
+                        .rounded(px(8.0))
+                        .role(Role::Alert)
                         .bg(rgb(palette.warning_bg))
                         .text_color(rgb(palette.warning))
                         .whitespace_normal()
@@ -569,7 +618,6 @@ impl Render for UsagePage {
                 |body, report| {
                     body.child(
                         div()
-                            .px(px(16.0))
                             .py(px(8.0))
                             .text_color(rgb(palette.warning))
                             .child(text!(format!(

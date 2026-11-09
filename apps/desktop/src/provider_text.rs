@@ -32,6 +32,10 @@ pub(crate) enum ProviderText {
     EmptyHint,
     Name,
     Id,
+    IdentitySection,
+    ConnectionSection,
+    CredentialsSection,
+    CatalogSection,
     Url,
     Protocol,
     Models,
@@ -69,6 +73,28 @@ impl Locale {
     pub(crate) fn provider_text(self, key: ProviderText) -> &'static str {
         use ProviderText::*;
         let values = match key {
+            IdentitySection => [
+                "Provider details",
+                "基本信息",
+                "基本資訊",
+                "基本情報",
+                "Anbieterdetails",
+            ],
+            ConnectionSection => ["Connection", "连接方式", "連線方式", "接続", "Verbindung"],
+            CredentialsSection => [
+                "Credentials",
+                "访问凭据",
+                "存取憑證",
+                "認証情報",
+                "Zugangsdaten",
+            ],
+            CatalogSection => [
+                "Available models",
+                "可用模型",
+                "可用模型",
+                "利用可能なモデル",
+                "Verfügbare Modelle",
+            ],
             Choose => [
                 "Choose a provider",
                 "选择供应商",
