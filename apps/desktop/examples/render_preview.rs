@@ -406,7 +406,10 @@ fn render(options: &Options) -> Result<()> {
                 for _ in 0..4 {
                     cx.advance_clock(std::time::Duration::from_millis(250));
                     cx.run_until_parked();
-                    cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))?;
+                    cx.update_window(handle.into(), |_, window, cx| {
+                        window.simulate_next_frame(cx);
+                        window.draw(cx).clear(cx)
+                    })?;
                 }
                 if matches!(scene, Scene::ProviderCredentials) {
                     handle.update(&mut cx, |view, window, cx| {
@@ -417,13 +420,21 @@ fn render(options: &Options) -> Result<()> {
                             .update(cx, |view, cx| view.preview_reveal_credentials(window, cx));
                         window.refresh();
                     })?;
+                    let mut layout_callbacks = 0;
                     for _ in 0..3 {
                         cx.advance_clock(std::time::Duration::from_millis(250));
                         cx.run_until_parked();
-                        cx.update_window(handle.into(), |_, window, cx| {
+                        layout_callbacks += cx.update_window(handle.into(), |_, window, cx| {
+                            // Headless drawing does not emit a display-link event.
+                            // Flush the actual scroll/focus callbacks explicitly.
+                            let count = window.simulate_next_frame(cx);
                             window.refresh();
-                            window.draw(cx).clear(cx)
+                            window.draw(cx).clear(cx);
+                            count
                         })?;
+                    }
+                    if layout_callbacks == 0 {
+                        return Err(invalid("credential layout callback was not dispatched").into());
                     }
                 }
                 let mut image = cx.capture_screenshot(handle.into())?;
