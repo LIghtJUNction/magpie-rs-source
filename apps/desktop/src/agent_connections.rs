@@ -1674,49 +1674,65 @@ impl Render for AgentConnections {
                                 .child(text!(status)),
                         ),
                 );
-            let content = div()
-                .w_full()
+            let model_info = div()
                 .min_w_0()
                 .flex()
-                .items_center()
-                .gap(px(16.0))
-                .when(narrow, |row| row.flex_col().items_start().gap(px(8.0)))
-                .child(identity)
+                .when(!narrow, |item| item.w(px(240.0)).flex_col().gap(px(4.0)))
+                .when(narrow, |item| {
+                    item.pl(px(48.0)).flex_wrap().items_baseline().gap(px(8.0))
+                })
                 .child(
                     div()
-                        .min_w_0()
-                        .when(!narrow, |item| item.w(px(240.0)))
-                        .when(narrow, |item| item.pl(px(48.0)))
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.0))
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(rgb(palette.muted))
-                                .child(text!(copy(locale, Text::Current))),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .whitespace_normal()
-                                .child(text!(model)),
-                        ),
+                        .text_size(px(11.0))
+                        .text_color(rgb(palette.muted))
+                        .child(text!(copy(locale, Text::Current))),
                 )
                 .child(
                     div()
-                        .flex_none()
-                        .text_color(rgb(if selected {
-                            palette.accent
-                        } else {
-                            palette.muted
-                        }))
-                        .child(text!(if selected && self.editor_open {
-                            "−"
-                        } else {
-                            "+"
-                        })),
+                        .text_size(px(13.0))
+                        .whitespace_normal()
+                        .child(text!(model)),
                 );
+            let disclosure = div()
+                .flex_none()
+                .text_color(rgb(if selected {
+                    palette.accent
+                } else {
+                    palette.muted
+                }))
+                .child(text!(if selected && self.editor_open {
+                    "−"
+                } else {
+                    "+"
+                }));
+            let content = if narrow {
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap(px(12.0))
+                            .child(identity)
+                            .child(disclosure),
+                    )
+                    .child(model_info)
+            } else {
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(16.0))
+                    .child(identity)
+                    .child(model_info)
+                    .child(disclosure)
+            };
             let row = self
                 .control(id, &label, Action::Select(key), !busy, selected, cx)
                 .button_size(ButtonSize::Medium)
