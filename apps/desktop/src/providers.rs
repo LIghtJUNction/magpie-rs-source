@@ -426,6 +426,17 @@ impl ProvidersPage {
         cx.notify();
     }
 
+    #[cfg(feature = "visual-test")]
+    pub fn preview_reveal_credentials(&self, window: &mut Window, cx: &mut Context<Self>) {
+        // Use the laid-out field anchor so every viewport captures the actual
+        // masked credential, instead of relying on a fixed pixel scroll offset.
+        if self.editor.is_some() {
+            if let Some(anchor) = self.anchors.get("provider-key") {
+                anchor.scroll_to(window, cx);
+            }
+        }
+    }
+
     fn ensure_button(&mut self, id: String, cx: &mut Context<Self>) {
         let scroll = if id.starts_with("provider-row:")
             || id.starts_with("provider-preset:")

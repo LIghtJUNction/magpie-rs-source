@@ -1298,6 +1298,13 @@ impl Render for MagpieWindow {
 
 #[cfg(feature = "visual-test")]
 impl MagpieWindow {
+    pub fn preview_reveal_credentials(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.normal_runtime && self.page == Page::Providers {
+            self.providers
+                .update(cx, |page, cx| page.preview_reveal_credentials(window, cx));
+        }
+    }
+
     /// Installs deterministic scene data only from the caller's isolated fixture root.
     pub fn preview_fixture(
         &mut self,

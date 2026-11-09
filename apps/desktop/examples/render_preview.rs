@@ -115,8 +115,8 @@ fn options() -> Result<Option<Options>> {
                 println!(
                     "render_preview --output ABS_NEW_DIRECTORY [--locale en|zh-CN|zh-TW|ja|de] [--all]\n\
                      Default: Agents, light theme, 900x560; one 1x PNG, native texture and manifest.json.\n\
-                     --all: 80 scenes across Agents/Codex/model update/Providers/Provider form/credentials/Gateway states/Settings, both themes and four viewports.\n\
-                     --size: render one custom viewport; combine with --all for 20 scene/theme pairs.\n\
+                     --all: 104 captures across 13 scenes, both themes and four viewports.\n\
+                     --size: render one custom viewport; combine with --all for 26 scene/theme pairs.\n\
                      Uses an isolated child, real GPUI scene rendering and system fonts."
                 );
                 return Ok(None);
@@ -405,6 +405,24 @@ fn render(options: &Options) -> Result<()> {
                 // Drain asset loads and draw actual production elements, including text and SVGs.
                 for _ in 0..4 {
                     cx.advance_clock(std::time::Duration::from_millis(250));
+                    for _ in 0..3 {
+                        cx.advance_clock(std::time::Duration::from_millis(250));
+                        cx.run_until_parked();
+                        cx.update_window(handle.into(), |_, window, cx| {
+                            window.refresh();
+                            window.draw(cx).clear(cx)
+                        })?;
+                    }
+                }
+                if matches!(scene, Scene::ProviderCredentials) {
+                    handle.update(&mut cx, |view, window, cx| {
+                        view.view()
+                            .clone()
+                            .downcast::<MagpieWindow>()
+                            .expect("preview root contains MagpieWindow")
+                            .update(cx, |view, cx| view.preview_reveal_credentials(window, cx));
+                        window.refresh();
+                    })?;
                     cx.run_until_parked();
                     cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx))?;
                 }
