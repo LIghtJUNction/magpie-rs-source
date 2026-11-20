@@ -6,8 +6,8 @@
 )))]
 compile_error!("the GPUI desktop app has no backend for this target; use the magpie CLI");
 
+use gpui::platform::application;
 use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
-use gpui_platform::application;
 use magpie_desktop::{Assets, MagpieWindow};
 use std::{env, process::ExitCode};
 
@@ -54,16 +54,20 @@ fn main() -> ExitCode {
             }
         })
         .detach();
-        let bounds = Bounds::centered(None, size(px(900.0), px(560.0)), cx);
-        let window = cx.open_window(
+        gpui::init(cx);
+        gpui_kit_material::init(cx);
+        let bounds = Bounds::centered(None, size(px(1120.0), px(760.0)), cx);
+        let window = gpui::open_window(
             WindowOptions {
                 app_id: Some("magpie-rs".to_owned()),
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(px(360.0), px(360.0))),
                 ..Default::default()
             },
+            cx,
             |window, cx| {
                 window.set_window_title("Magpie");
+                magpie_desktop::init_material_theme(Some(window), cx);
                 cx.new(|cx| {
                     let view = MagpieWindow::new(cx);
                     view.focus(window, cx);

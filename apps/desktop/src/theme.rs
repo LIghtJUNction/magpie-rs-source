@@ -12,7 +12,7 @@ pub enum Appearance {
     Dark,
 }
 
-/// Opaque color tokens: no blur, gradients, animation, or extra GPU effects.
+/// Application surfaces use the same Material semantic scheme as the controls.
 #[derive(Clone, Copy)]
 pub struct Palette {
     pub background: u32,
@@ -39,36 +39,22 @@ impl Palette {
             Appearance::Light => false,
             Appearance::Dark => true,
         };
-        if dark {
-            Self {
-                background: 0x1a1a1e,
-                surface: 0x232327,
-                inset: 0x2d2d32,
-                border: 0x35353b,
-                text: 0xededf1,
-                muted: 0xacacb5,
-                accent: 0xa5b4fc,
-                selected: 0x2d3550,
-                warning: 0xf2c47d,
-                warning_bg: 0x382e21,
-                danger: 0xffaaa5,
-                danger_bg: 0x3d282b,
-            }
-        } else {
-            Self {
-                background: 0xf4f4f6,
-                surface: 0xffffff,
-                inset: 0xededf1,
-                border: 0xe3e3e7,
-                text: 0x1c1c21,
-                muted: 0x65666d,
-                accent: 0x4f46e5,
-                selected: 0xeef2ff,
-                warning: 0x865818,
-                warning_bg: 0xfff5e5,
-                danger: 0xad393e,
-                danger_bg: 0xffeeee,
-            }
+        use gpui_kit_material::color::ColorRole as C;
+        let scheme = magpie_ui_widgets::workspace_scheme(dark);
+        let color = |role| scheme.get(role).to_argb() & 0xffffff;
+        Self {
+            background: color(C::SURFACE),
+            surface: color(C::SURFACE_CONTAINER_LOW),
+            inset: color(C::SURFACE_CONTAINER_HIGH),
+            border: color(C::OUTLINE_VARIANT),
+            text: color(C::ON_SURFACE),
+            muted: color(C::ON_SURFACE_VARIANT),
+            accent: color(C::PRIMARY),
+            selected: color(C::SECONDARY_CONTAINER),
+            warning: color(C::WARNING),
+            warning_bg: color(C::WARNING_BG),
+            danger: color(C::ERROR),
+            danger_bg: color(C::ERROR_CONTAINER),
         }
     }
 }
@@ -190,4 +176,58 @@ pub fn font_for_families(families: &[String], locale: Locale) -> Font {
         result.fallbacks = Some(FontFallbacks::from_fonts(fallbacks));
     }
     result
+}
+
+/// Initialize Material and Kit colors before their first root is rendered.
+pub fn init_material_theme(window: Option<&Window>, cx: &mut App) {
+    use gpui_kit_material::theme;
+    let dark = window.map_or_else(
+        || theme::system_dark(cx),
+        |window| {
+            matches!(
+                window.appearance(),
+                WindowAppearance::Dark | WindowAppearance::VibrantDark
+            )
+        },
+    );
+    theme::init_component_theme(magpie_ui_widgets::workspace_scheme(dark), 1.0, cx);
+}
+
+pub(crate) fn apply_material_theme(appearance: Appearance, window: &mut Window, cx: &mut App) {
+    use gpui_kit_material::theme;
+    let dark = match appearance {
+        Appearance::System => matches!(
+            window.appearance(),
+            WindowAppearance::Dark | WindowAppearance::VibrantDark
+        ),
+        Appearance::Dark => true,
+        Appearance::Light => false,
+    };
+    if cx
+        .try_global::<AppliedMaterialMode>()
+        .is_some_and(|mode| mode.0 == dark)
+    {
+        return;
+    }
+    cx.set_global(AppliedMaterialMode(dark));
+    let scheme = magpie_ui_widgets::workspace_scheme(dark);
+    theme::init_component_theme(scheme, 1.0, cx);
+    window.refresh();
+}
+
+struct AppliedMaterialMode(bool);
+impl gpui::Global for AppliedMaterialMode {}
+
+impl From<Palette> for magpie_ui_widgets::InputTheme {
+    fn from(palette: Palette) -> Self {
+        Self {
+            surface: palette.surface,
+            inset: palette.inset,
+            border: palette.border,
+            text: palette.text,
+            muted: palette.muted,
+            accent: palette.accent,
+            selected: palette.selected,
+        }
+    }
 }

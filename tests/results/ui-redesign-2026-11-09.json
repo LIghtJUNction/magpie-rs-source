@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-09",
+  "task": "desktop-ui-redesign",
+  "validated_source_sha": "7698e1f7d47cebffdc5e27349457f6f4dc992b36",
+  "baseline_source_sha": "e81e07e69acc4ea71318a1e327db11cdb28e2db7",
+  "workflow_run": "https://github.com/LIghtJUNction/magpie-rs-source/actions/runs/42645409251",
+  "artifact_id": 13687034504,
+  "desktop_tests": {
+    "passed": 49,
+    "failed": 0,
+    "ignored": 1,
+    "ignored_reason": "real_cli_gateway_owner_stop_and_external_readonly requires MAGPIE_TEST_CLI pointing to a CLI built from the checkout"
+  },
+  "screenshots": {
+    "render_path": "HeadlessAppContext + native platform text system + current_headless_renderer",
+    "data": "isolated synthetic fixtures; production MagpieWindow components",
+    "after_captures": 130,
+    "baseline_captures": 26,
+    "native_textures_retained": true,
+    "matrix": [
+      {
+        "directory": "after-de-360x560",
+        "locale": "de",
+        "logical_size": [
+          360,
+          560
+        ],
+        "scenes": 13,
+        "themes": 2,
+        "captures": 26
+      },
+      {
+        "directory": "after-zh-CN-1280x720",
+        "locale": "zh-CN",
+        "logical_size": [
+          1280,
+          720
+        ],
+        "scenes": 13,
+        "themes": 2,
+        "captures": 26
+      },
+      {
+        "directory": "after-zh-CN-360x360",
+        "locale": "zh-CN",
+        "logical_size": [
+          360,
+          360
+        ],
+        "scenes": 13,
+        "themes": 2,
+        "captures": 26
+      },
+      {
+        "directory": "after-zh-CN-360x560",
+        "locale": "zh-CN",
+        "logical_size": [
+          360,
+          560
+        ],
+        "scenes": 13,
+        "themes": 2,
+        "captures": 26
+      },
+      {
+        "directory": "after-zh-CN-900x560",
+        "locale": "zh-CN",
+        "logical_size": [
+          900,
+          560
+        ],
+        "scenes": 13,
+        "themes": 2,
+        "captures": 26
+      }
+    ]
+  },
+  "visual_review": {
+    "method": "All five contact sheets; full-size inspection of key wide and compact pages; targeted recheck after fixes",
+    "findings_fixed": [
+      "unified tonal selection colors",
+      "compact secondary action width",
+      "short Provider editor viewport",
+      "Gateway failure reason priority",
+      "compact Agent summary height",
+      "minimum-height credential capture dispatches real layout callbacks; masked field and hint confirmed"
+    ],
+    "scope": "GPUI offscreen pixels and component interaction tests",
+    "not_verified": [
+      "OS window input and IME",
+      "platform screen reader workflows",
+      "user visual acceptance"
+    ]
+  },
+  "materials_url": "https://drive.google.com/drive/folders/19Rirf6X-BwARXQzCD4aaNgAXQLq0Mzdo",
+  "artifact_sha256": "268c85ad816de690953193fd4bd08d83867d12487b0fdc65d90480654a1c8b8e"
+}

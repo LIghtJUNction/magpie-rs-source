@@ -1,0 +1,18 @@
+# Official API documentation checked 2026-11-02; no account verification.
+format = "magpie-plugin/1"
+id = "provider.fireworks"
+name = "Fireworks AI"
+version = "0.1.0"
+api_version = 1
+kind = "provider-preset"
+enabled_by_default = true
+requires = []
+provides = ["provider-preset"]
+
+[[contributions.providers]]
+id = "fireworks"
+name = "Fireworks AI"
+base_url = "https://api.fireworks.ai/inference/v1"
+protocol = "openai_chat"
+requires_key = true
+source = "https://docs.fireworks.ai/api-reference/post-chatcompletions"

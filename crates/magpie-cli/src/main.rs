@@ -1,14 +1,18 @@
+mod agent_plugins;
 mod codex_update;
 mod legacy_agent_display;
+mod plugins;
 mod providers;
+mod usage;
 
 use std::env;
 use std::process::ExitCode;
 
-use magpie_core::agents::{self, CodexDiscovery};
-use magpie_core::codex_config::{self, CodexConnectPreview, FieldChange};
-use magpie_core::codex_transaction;
 use magpie_core::paths;
+use magpie_plugin_agent_codex::agents::{self, CodexDiscovery};
+use magpie_plugin_agent_codex::codex_config::{self, CodexConnectPreview, FieldChange};
+use magpie_plugin_agent_codex::codex_transaction;
+use magpie_plugin_agent_discovery::agents as discovery_agents;
 
 fn main() -> ExitCode {
     let json_errors = env::args().any(|argument| argument == "--json");
@@ -70,7 +74,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
         "ls" => {
             reject_extra_args(args)?;
             if !render_original_agent_text(legacy_agent_display::TextCommand::Ls)?
-                && !print_discovered_agents()
+                && !print_discovered_agents()?
             {
                 return Err("agent_discovery_incomplete: agent identity is uncertain".to_owned());
             }
@@ -79,6 +83,8 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
         "config" => config_command(args),
         "models" => models_command(args),
         "providers" => providers::run(args),
+        "usage" => usage::run(args),
+        "plugins" => plugins::run(args),
         "gateway" => gateway_command(args),
         "gui" => gui_command(args),
         "serve" => serve_command(args),
@@ -87,11 +93,35 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
     }
 }
 
-fn agents_command(mut args: impl Iterator<Item = String>) -> Result<(), String> {
+fn agents_command(args: impl Iterator<Item = String>) -> Result<(), String> {
+    let arguments: Vec<_> = args.collect();
+    let app = plugins::load()?;
+    let operation = arguments.first().map(String::as_str);
+    if matches!(operation, Some("connect" | "set-model" | "status")) && !app.active("agent.codex") {
+        return Err(
+            "plugin_not_active: Codex adapter is disabled; explicit disconnect remains available"
+                .into(),
+        );
+    }
+    if matches!(operation, None | Some("--json")) && !app.active("feature.agent-discovery") {
+        return Err("plugin_not_active: Agent discovery plugin is disabled".into());
+    }
+    if matches!(operation, Some("connect" | "set-model"))
+        && arguments.iter().any(|a| a == "--apply")
+    {
+        if let Some(path) = arguments
+            .windows(2)
+            .find(|pair| pair[0] == "--config")
+            .map(|pair| std::path::Path::new(&pair[1]))
+        {
+            magpie_app_plugins::pin_native_target("agent.codex", path)?;
+        }
+    }
+    let mut args = arguments.into_iter();
     match args.next().as_deref() {
         None => {
             if !render_original_agent_text(legacy_agent_display::TextCommand::Agents)?
-                && !print_discovered_agents()
+                && !print_discovered_agents()?
             {
                 println!("No supported agents found on PATH");
             }
@@ -99,7 +129,7 @@ fn agents_command(mut args: impl Iterator<Item = String>) -> Result<(), String> 
         }
         Some("--json") => {
             reject_extra_args(args)?;
-            let items = agents::discover_installed_agents().iter().map(|agent| {
+            let items = discovery_agents::discover_installed_agents().iter().filter(|agent| agent.id != "codex" || app.active("agent.codex")).map(|agent| {
                 if agent.id == "codex" {
                     agent_json(&agents::discover_codex())
                 } else {
@@ -148,9 +178,16 @@ fn agents_command(mut args: impl Iterator<Item = String>) -> Result<(), String> 
 }
 
 fn render_original_agent_text(command: legacy_agent_display::TextCommand) -> Result<bool, String> {
+    let app = plugins::load()?;
+    if !app.active("feature.agent-discovery") {
+        return Err("plugin_not_active: Agent discovery plugin is disabled".into());
+    }
+    if !app.active("agent.codex") {
+        return Ok(false);
+    }
     use legacy_agent_display::{CodexDirectory, DisplayError};
 
-    let discovery = agents::discover_installed_agents_report()
+    let discovery = discovery_agents::discover_installed_agents_report()
         .map_err(|_| "agent_discovery_incomplete: PATH cannot be inspected".to_owned())?;
     let config_path = agents::codex_config_path();
     let directory = config_path
@@ -226,8 +263,15 @@ fn observed_candidate_environment() -> bool {
         })
 }
 
-fn print_discovered_agents() -> bool {
-    let installed = agents::discover_installed_agents();
+fn print_discovered_agents() -> Result<bool, String> {
+    let app = plugins::load()?;
+    if !app.active("feature.agent-discovery") {
+        return Err("plugin_not_active: Agent discovery plugin is disabled".into());
+    }
+    let installed: Vec<_> = discovery_agents::discover_installed_agents()
+        .into_iter()
+        .filter(|agent| agent.id != "codex" || app.active("agent.codex"))
+        .collect();
     let found = !installed.is_empty();
     for agent in installed {
         if agent.id == "codex" {
@@ -240,7 +284,7 @@ fn print_discovered_agents() -> bool {
             );
         }
     }
-    found
+    Ok(found)
 }
 
 fn connect_command(mut args: impl Iterator<Item = String>) -> Result<(), String> {
@@ -681,8 +725,13 @@ fn serve_command(mut args: impl Iterator<Item = String>) -> Result<(), String> {
         }
         let config = magpie_service::forward::ForwardConfig::load(std::path::Path::new(&path))
             .map_err(|error| format!("forward_config_error: {error}"))?;
+        let metadata_store = magpie_core::provider_store::ProviderStore::default_path()
+            .map_err(|_| "plugin_config_unavailable: metadata store path is unavailable")?;
         let server = magpie_service::forward::ForwardServer::bind(address, config)
-            .map_err(|error| format!("gateway_bind_failed: {error}"))?;
+            .map_err(|error| format!("gateway_bind_failed: {error}"))?
+            .with_metadata_subscriber(std::sync::Arc::new(plugins::metadata_dispatcher(
+                &metadata_store,
+            )));
         // This is bind information; /health is the actual readiness check.
         println!(
             "Forward candidate bound at {} (readiness: GET /health)",
@@ -697,14 +746,15 @@ fn serve_command(mut args: impl Iterator<Item = String>) -> Result<(), String> {
             .map(std::path::PathBuf::from)
             .map_or_else(magpie_core::provider_store::ProviderStore::default_path, Ok)
             .map_err(|error| format!("provider_error: {error}"))?;
-        let server =
-            magpie_service::forward::ForwardServer::bind_store(address, path).map_err(|error| {
+        let server = magpie_service::forward::ForwardServer::bind_store(address, path.clone())
+            .map_err(|error| {
                 if error.kind() == std::io::ErrorKind::AddrInUse {
                     "gateway_address_in_use: requested Gateway address is already in use".to_owned()
                 } else {
                     format!("gateway_bind_failed: {error}")
                 }
-            })?;
+            })?
+            .with_metadata_subscriber(std::sync::Arc::new(plugins::metadata_dispatcher(&path)));
         if supervised {
             return server
                 .run_supervised(std::io::stdin(), |identity| {
@@ -870,7 +920,7 @@ fn json_escape(value: &str) -> String {
 
 fn print_help() {
     println!(
-        "magpie {}\n\nUsage:\n  magpie <command> [options]\n\nCommands:\n  agents [--json]       Discover Codex and inspect its config path\n  agents status codex   Show Codex discovery status\n  agents connect codex --model ID --dry-run   Legacy read-only preview\n  agents connect codex --model ID --config PATH --gateway ADDR <--dry-run|--apply> [--json]\n  agents set-model codex --model ID --config PATH <--dry-run|--apply> [--if-revision TOKEN] [--json]\n  agents disconnect codex --config PATH [--json]\n  agents connection-status codex --config PATH [--json]\n  config path [--json]  Show the configuration directory\n  providers [list|add|edit|enable|disable|remove|refresh]  Manage Providers (see --help)\n  models [--providers PATH | --catalog PATH] [--json]  List enabled models\n  gateway inspect [--listen ADDR] --json  Inspect the running Gateway catalog\n  serve [--listen ADDR] [--providers PATH | --catalog PATH | --forward PATH]  Run the loopback Gateway\n  serve --supervised --json [--listen ADDR]  Run while the owning desktop pipe is open\n  gui [agents]          Open the GPUI desktop application\n  status [--json]       Show version and target platform\n  --help                Show this help\n  --version             Show version",
+        "magpie {}\n\nUsage:\n  magpie <command> [options]\n\nCommands:\n  agents [--json]       Discover Codex and inspect its config path\n  agents status codex   Show Codex discovery status\n  agents connect codex --model ID --dry-run   Legacy read-only preview\n  agents connect codex --model ID --config PATH --gateway ADDR <--dry-run|--apply> [--json]\n  agents set-model codex --model ID --config PATH <--dry-run|--apply> [--if-revision TOKEN] [--json]\n  agents disconnect codex --config PATH [--json]\n  agents connection-status codex --config PATH [--json]\n  config path [--json]  Show the configuration directory\n  providers [list|add|edit|enable|disable|remove|refresh]  Manage Providers (see --help)\n  models [--providers PATH | --catalog PATH] [--json]  List enabled models\n  plugins list --json  List plugin state and registered contributions\n  plugins <enable|disable> ID [--if-revision N] --json\n  plugins call ID OPERATION [OPTIONS]\n  usage --json [--limit 100] [--store ABS_PATH]  Read recent request metadata\n  gateway inspect [--listen ADDR] --json  Inspect the running Gateway catalog\n  serve [--listen ADDR] [--providers PATH | --catalog PATH | --forward PATH]  Run the loopback Gateway\n  serve --supervised --json [--listen ADDR]  Run while the owning desktop pipe is open\n  gui [agents]          Open the GPUI desktop application\n  status [--json]       Show version and target platform\n  --help                Show this help\n  --version             Show version",
         magpie_core::VERSION
     );
 }

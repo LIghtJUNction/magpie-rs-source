@@ -1,0 +1,22 @@
+[package]
+name = "magpie-plugin-usage-ui"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT"
+
+[features]
+default = []
+visual-test = ["gpui/test-support", "magpie-ui-widgets/visual-test"]
+
+[dependencies]
+magpie-ui-widgets = { path = "../ui-widgets" }
+magpie-core = { path = "../../../../crates/magpie-core" }
+gpui.workspace = true
+gpui-kit-material.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"

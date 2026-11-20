@@ -52,6 +52,17 @@ impl Locale {
         }
     }
 
+    /// Language tags cross plugin boundaries; preference/control IDs stay stable.
+    pub const fn language_tag(self) -> &'static str {
+        match self {
+            Self::English => "en",
+            Self::SimplifiedChinese => "zh-CN",
+            Self::TraditionalChinese => "zh-TW",
+            Self::Japanese => "ja",
+            Self::German => "de",
+        }
+    }
+
     pub const fn name(self) -> &'static str {
         match self {
             Self::English => "English",

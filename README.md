@@ -6,14 +6,41 @@ desktop application. Version 0.2.0 remains a development preview of the complete
 99-requirement Magpie contract, including the six additions identified in the
 original Magpie 0.1.2185 changelog.
 
-Shared Provider management, system-keyring API keys, live multi-Provider
-forwarding, model discovery and the native Providers page remain the foundation.
-The latest iteration adds desktop-owned Gateway lifecycle management, model
-updates for an already connected Codex, and bounded Chat token-parameter
-compatibility. See [the latest verification and full feature audit](docs/changelog-parity-2026-10-30.md)
-and [the previous Provider/UI record](docs/provider-ui-parity-2026-10-30.md)
-for exact scope. These are incremental implementations; complete original
-feature parity, all-platform validation and user visual acceptance remain open.
+The core provides protocol forwarding, shared configuration and credentials,
+basic routing, configuration transactions and the plugin host. Optional packages
+provide Agent adapters, supplier presets, request history and discovery. The
+desktop shell uses Material components and reads its available actions and pages
+from registered contributions.
+
+The current adapters configure Codex, Claude Code and OpenCode. Two explicitly
+versioned legacy adapters are available but disabled by default. The provider
+picker offers 21 presets from 20 supplier packages, plus custom compatible APIs.
+These counts describe implemented configuration templates, not installed Agents,
+verified accounts or complete support for the original 68-Agent requirement.
+
+Usage records recent forwarded-request metadata in a separate plugin. Disable
+withdraws its page, command and recording subscription while preserving history;
+an in-flight model response can still finish normally. Token fields remain
+unknown when the upstream does not report them. Pricing, account quotas and the
+complete original Usage/session features are still pending.
+
+See [plugin contracts](plugins/README.md), [application composition](crates/magpie-app-plugins/README.md)
+and [provider sources and limits](docs/provider-presets.md). Node/npm execution,
+OAuth/community subscription migration, all-platform validation and complete
+original feature parity remain unfinished. The user rejected the previous visual
+direction; local rendering and native tests do not constitute visual acceptance.
+
+```sh
+magpie plugins list --json
+magpie plugins disable feature.usage --json
+magpie plugins enable feature.usage --json
+magpie plugins call feature.usage report --json --limit 100
+```
+
+Agent configuration changes require a read-only preview and its revision before
+apply. Connected adapters retain private recovery data and cannot be normally
+disabled until disconnected. Removing a package does not erase its retained
+definition or prevent explicit restoration of its recorded targets.
 
 ## Install
 
@@ -41,6 +68,20 @@ time (`libdbus-1-dev` on Debian/Ubuntu) and an unlocked Secret Service such as
 GNOME Keyring or KWallet at runtime. A headless installation can explicitly use
 an environment reference. The application never falls back to a plaintext key
 in its public configuration.
+
+The desktop uses the pinned `gpui-kit-material` revision
+`47895b92558883d24e19d54fdeb876ed551d9394` with real Material buttons, navigation,
+and shared semantic colors. Its independent toolchain requires Rust 1.99.1:
+
+```sh
+CARGO_TARGET_DIR=/tmp/magpie-material-target cargo +1.99.1 build --locked --manifest-path apps/desktop/Cargo.toml
+```
+
+The current development branch integrates the shared Provider store, system
+keyring, persistent preferences, supervised Gateway and Codex model updates from
+`9ff5477` with the Material frontend. Native visual acceptance and full feature
+parity remain open; the earlier draft was rejected by the user. Provider drafts
+now require explicit discard when cancelling or closing the window.
 
 ## Providers and the shared Gateway
 
@@ -235,7 +276,7 @@ The two ignored test-worker entry points are executed explicitly by their parent
 cases; the desktop adds one ignored worker explicitly run twice by its Python
 coordinator. These are not separate completed product requirements. Actual native
 window interactions, IME, screen readers, other Agent clients, real external accounts and
-the full 93 requirements remain open.
+the full 99 requirements remain open.
 
 ### Reproduce the new Provider checks
 

@@ -1,0 +1,18 @@
+# Official API documentation checked 2026-11-02; no account verification.
+format = "magpie-plugin/1"
+id = "provider.openai"
+name = "OpenAI"
+version = "0.1.0"
+api_version = 1
+kind = "provider-preset"
+enabled_by_default = true
+requires = []
+provides = ["provider-preset"]
+
+[[contributions.providers]]
+id = "openai"
+name = "OpenAI"
+base_url = "https://api.openai.com/v1"
+protocol = "openai_responses"
+requires_key = true
+source = "https://developers.openai.com/api/reference/overview"

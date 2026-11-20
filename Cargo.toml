@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/magpie-core", "crates/magpie-service", "crates/magpie-cli"]
+members = ["crates/magpie-core", "crates/magpie-service", "crates/magpie-cli", "crates/magpie-plugin-usage", "crates/magpie-app-plugins", "crates/magpie-plugin-agent-codex", "crates/magpie-plugin-agent-discovery"]
 default-members = ["crates/magpie-cli"]
 exclude = ["apps/desktop"]
 resolver = "3"
@@ -17,8 +17,12 @@ unsafe_code = "forbid"
 all = "warn"
 
 [workspace.dependencies]
+magpie-plugin-agent-codex = { path = "crates/magpie-plugin-agent-codex" }
+magpie-plugin-agent-discovery = { path = "crates/magpie-plugin-agent-discovery" }
+magpie-app-plugins = { path = "crates/magpie-app-plugins" }
 magpie-core = { path = "crates/magpie-core" }
 magpie-service = { path = "crates/magpie-service" }
+magpie-plugin-usage = { path = "crates/magpie-plugin-usage" }
 toml_edit = { version = "0.25.17", default-features = false, features = ["parse", "display"] }
 
 [profile.release]

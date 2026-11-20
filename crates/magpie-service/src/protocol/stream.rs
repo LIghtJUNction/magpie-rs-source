@@ -72,6 +72,7 @@ pub struct SseConverter {
     pending_tools: BTreeMap<u64, (String, String)>,
     raw_usage: Value,
     usage: Option<Usage>,
+    metadata_usage: Option<Usage>,
     finish_reason: Option<FinishReason>,
     retained_bytes: usize,
     sequence: u64,
@@ -141,6 +142,7 @@ impl SseConverter {
             pending_tools: BTreeMap::new(),
             raw_usage: json!({}),
             usage: None,
+            metadata_usage: None,
             finish_reason: None,
             retained_bytes: 0,
             sequence: 0,
@@ -328,6 +330,10 @@ impl SseConverter {
         result.map(|()| batch)
     }
 
+    pub(crate) fn usage_snapshot(&self) -> Option<Usage> {
+        self.metadata_usage.clone()
+    }
+
     fn release(&mut self) {
         self.blocks = BTreeMap::new();
         self.items = BTreeMap::new();
@@ -348,6 +354,7 @@ impl SseConverter {
         }
         let value = parse_json(data, "stream.event.json")?;
         object(&value, "stream.event")?;
+        super::metadata::observe(self.source, &value, &mut self.metadata_usage);
         if self.source == Protocol::OpenAiResponses {
             let sequence = required(&value, "sequence_number", "stream.sequence_number")?
                 .as_u64()

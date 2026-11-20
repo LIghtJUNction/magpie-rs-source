@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "id": "openmanus",
+  "name": "OpenManus source 3309bf4",
+  "config_paths": [],
+  "format": "toml",
+  "selection": {
+    "path": [
+      "llm",
+      "model"
+    ]
+  },
+  "reject_existing": [],
+  "fields": [
+    {
+      "path": [
+        "llm",
+        "model"
+      ],
+      "value": "${model}"
+    },
+    {
+      "path": [
+        "llm",
+        "base_url"
+      ],
+      "value": "${gateway}/v1"
+    },
+    {
+      "path": [
+        "llm",
+        "api_key"
+      ],
+      "value": "magpie-local"
+    },
+    {
+      "path": [
+        "llm",
+        "api_type"
+      ],
+      "value": ""
+    },
+    {
+      "path": [
+        "llm",
+        "vision",
+        "model"
+      ],
+      "value": "${model}"
+    },
+    {
+      "path": [
+        "llm",
+        "vision",
+        "base_url"
+      ],
+      "value": "${gateway}/v1"
+    },
+    {
+      "path": [
+        "llm",
+        "vision",
+        "api_key"
+      ],
+      "value": "magpie-local"
+    },
+    {
+      "path": [
+        "llm",
+        "vision",
+        "api_type"
+      ],
+      "value": ""
+    }
+  ]
+}

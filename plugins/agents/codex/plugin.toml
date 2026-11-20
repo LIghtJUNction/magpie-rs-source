@@ -1,0 +1,14 @@
+format = "magpie-plugin/1"
+id = "agent.codex"
+name = "Codex"
+version = "0.2.0"
+api_version = 1
+kind = "agent-adapter"
+enabled_by_default = true
+requires = []
+provides = ["agent.codex"]
+
+[[contributions.agents]]
+id = "codex"
+engine = "native-codex/1"
+name = "Codex"

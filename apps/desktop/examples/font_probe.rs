@@ -24,7 +24,7 @@ impl MissingGlyphSink for Missing {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let platform = gpui_platform::current_platform(true);
+    let platform = gpui::platform::current_platform(true);
     let backend = platform.text_system();
     let families = backend.all_font_names();
     let missing = Missing::default();

@@ -25,7 +25,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use magpie_core::agent_catalog::{AgentDefinition, Detection, DiscoveryReport, NotCheckedReason};
+use magpie_plugin_agent_discovery::agent_catalog::{
+    AgentDefinition, Detection, DiscoveryReport, NotCheckedReason,
+};
 
 // Stable Rust IDs in the original's observed display order, not new identities.
 const ORIGINAL_ORDER: [&str; 68] = [

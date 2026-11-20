@@ -1,6 +1,8 @@
 //! Compact native Gateway controls. The model stores no PID and never presents
 //! a listening port as ownership. Address edits have an explicit save boundary.
 
+use gpui_kit_material::components::{ButtonSize, ButtonVariant, MaterialButton, material_button};
+
 use std::{
     collections::BTreeMap,
     net::SocketAddr,
@@ -9,9 +11,9 @@ use std::{
 };
 
 use gpui::{
-    AccessibleAction, App, ClipboardItem, Context, Div, Entity, EventEmitter, FocusHandle,
-    FontWeight, IntoElement, KeyDownEvent, Render, Role, ScrollAnchor, ScrollHandle, Stateful,
-    Subscription, Task, Window, div, prelude::*, px, rgb, text,
+    App, ClipboardItem, Context, Div, Entity, EventEmitter, FocusHandle, FontWeight, IntoElement,
+    KeyDownEvent, Render, Role, ScrollAnchor, ScrollHandle, Subscription, Task, Window, div,
+    prelude::*, px, rgb, text,
 };
 
 use crate::{
@@ -23,7 +25,7 @@ use crate::{
     gateway_text::GatewayText as G,
     localization::Locale,
     text_input::{InputEvent, TextInput},
-    theme::{Appearance, Palette},
+    theme::{self, Appearance, Palette},
 };
 
 #[derive(Clone, Copy)]
@@ -198,6 +200,19 @@ impl GatewayPage {
     pub(crate) fn begin_closing(&mut self, cx: &mut Context<Self>) {
         self.closing = true;
         self.stop();
+        cx.notify();
+    }
+
+    #[cfg(all(test, feature = "visual-test"))]
+    pub(crate) fn closing_for_preview(&self) -> bool {
+        self.closing
+    }
+
+    #[cfg(all(test, feature = "visual-test"))]
+    pub(crate) fn preview_controller(&mut self, owner: OwnedGateway, cx: &mut Context<Self>) {
+        self.state = owner.state();
+        self.controller = Some(owner);
+        self.initialized = true;
         cx.notify();
     }
 
@@ -379,49 +394,25 @@ impl GatewayPage {
         primary: bool,
         palette: Palette,
         cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
+    ) -> MaterialButton {
         let enabled = self.enabled(action, cx);
-        let weak = cx.weak_entity();
-        div()
-            .id(id)
-            .track_focus(&self.buttons[id].clone().tab_stop(enabled))
-            .anchor_scroll(self.anchors.get(id).cloned())
-            .tab_stop(enabled)
-            .tab_index(0)
-            .role(if enabled { Role::Button } else { Role::Status })
-            .aria_label(label.to_owned())
-            .h(px(34.0))
-            .px(px(10.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(5.0))
-            .border_2()
-            .border_color(gpui::rgba(0))
-            .bg(rgb(if primary {
-                palette.selected
-            } else {
-                palette.surface
-            }))
-            .text_color(rgb(if primary {
-                palette.accent
-            } else {
-                palette.text
-            }))
-            .text_size(px(13.0))
-            .whitespace_nowrap()
-            .when(!enabled, |button| button.opacity(0.5))
-            .when(enabled, |button| {
-                button
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(rgb(palette.inset)))
-                    .focus_visible(move |style| style.border_color(rgb(palette.accent)))
-                    .on_click(cx.listener(move |view, _, _, cx| view.act(action, cx)))
-                    .on_a11y_action(AccessibleAction::Click, move |_, _, cx| {
-                        let _ = weak.update(cx, |view, cx| view.act(action, cx));
-                    })
-            })
+        let variant = if primary {
+            ButtonVariant::Filled
+        } else {
+            ButtonVariant::Text
+        };
+        let mut button = material_button(id, variant)
+            .track_focus(&self.buttons[id])
+            .anchor_scroll(self.anchors.get(id).cloned());
+        let _ = palette;
+        button = button
+            .button_size(ButtonSize::Small)
+            .rounded(px(8.0))
+            .font(theme::ui_font(cx, self.locale))
+            .disabled(!enabled)
+            .accessibility_label(label.to_owned());
+        button
+            .on_click(cx.listener(move |view, _, _, cx| view.act(action, cx)))
             .child(text!(label.to_owned()))
     }
 
@@ -455,8 +446,9 @@ impl GatewayPage {
     fn caption(&self, key: G, palette: Palette) -> Div {
         div()
             .text_size(px(12.0))
-            .line_height(px(18.0))
+            .line_height(px(19.0))
             .text_color(rgb(palette.muted))
+            .whitespace_normal()
             .child(text!(self.locale.gateway_text(key)))
     }
 
@@ -557,48 +549,54 @@ impl Render for GatewayPage {
         );
         let metadata = |label: G, value: String| {
             div()
-                .min_w_0()
+                .min_w(px(140.0))
                 .flex_1()
                 .flex()
                 .flex_col()
-                .gap(px(4.0))
+                .gap(px(6.0))
                 .child(self.caption(label, palette))
-                .child(div().text_size(px(13.0)).child(text!(value)))
+                .child(
+                    div()
+                        .text_size(px(17.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(text!(value)),
+                )
         };
         let card = div()
             .w_full()
+            .min_w_0()
             .flex()
             .flex_col()
-            .rounded(px(7.0))
-            .border_1()
-            .border_color(rgb(palette.border))
-            .bg(rgb(palette.surface))
+            .gap(px(18.0))
             .child(
                 div()
-                    .p(px(16.0))
                     .flex()
                     .flex_wrap()
                     .items_center()
-                    .gap(px(10.0))
+                    .gap(px(12.0))
                     .child(
                         div()
+                            .id("gateway-state")
+                            .role(Role::Status)
                             .flex_1()
                             .min_w(px(150.0))
                             .flex()
-                            .flex_col()
-                            .gap(px(6.0))
+                            .items_center()
+                            .gap(px(8.0))
                             .child(
                                 div()
-                                    .text_size(px(14.0))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(text!(self.locale.gateway_text(G::Title))),
+                                    .size(px(7.0))
+                                    .flex_none()
+                                    .rounded(px(4.0))
+                                    .bg(rgb(status_color)),
                             )
                             .child(
                                 div()
-                                    .id("gateway-state")
-                                    .role(Role::Status)
-                                    .text_size(px(12.0))
+                                    .min_w_0()
+                                    .text_size(px(13.0))
+                                    .font_weight(FontWeight::MEDIUM)
                                     .text_color(rgb(status_color))
+                                    .whitespace_normal()
                                     .child(text!(self.locale.gateway_text(label))),
                             ),
                     )
@@ -627,12 +625,6 @@ impl Render for GatewayPage {
                             )),
                     ),
             )
-            .child(
-                div()
-                    .px(px(16.0))
-                    .pb(px(14.0))
-                    .child(self.caption(description, palette)),
-            )
             .when_some(
                 match &*self.state {
                     GatewayState::Failed(error) => Some(*error),
@@ -642,14 +634,13 @@ impl Render for GatewayPage {
                     card.child(
                         div()
                             .id("gateway-error")
-                            .mx(px(16.0))
-                            .mb(px(12.0))
-                            .p(px(10.0))
-                            .rounded(px(5.0))
+                            .p(px(12.0))
+                            .rounded(px(8.0))
                             .bg(rgb(palette.danger_bg))
                             .text_color(rgb(palette.danger))
                             .text_size(px(12.0))
                             .line_height(px(18.0))
+                            .whitespace_normal()
                             .role(Role::Alert)
                             .child(text!(self.failure_text(error))),
                     )
@@ -657,23 +648,27 @@ impl Render for GatewayPage {
             )
             .child(
                 div()
-                    .px(px(16.0))
-                    .py(px(12.0))
-                    .border_t_1()
-                    .border_color(rgb(palette.border))
+                    .py(px(6.0))
                     .flex()
                     .flex_wrap()
                     .items_center()
-                    .gap(px(8.0))
+                    .gap(px(12.0))
                     .child(
                         div()
                             .flex_1()
                             .min_w(px(180.0))
                             .flex()
                             .flex_col()
-                            .gap(px(4.0))
+                            .gap(px(8.0))
                             .child(self.caption(G::Endpoint, palette))
-                            .child(div().text_size(px(13.0)).child(text!(endpoint))),
+                            .child(
+                                div()
+                                    .text_size(px(if compact { 18.0 } else { 22.0 }))
+                                    .line_height(px(30.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .whitespace_normal()
+                                    .child(text!(endpoint)),
+                            ),
                     )
                     .child(
                         self.button(
@@ -687,13 +682,16 @@ impl Render for GatewayPage {
                         ),
                     ),
             )
+            .child(self.caption(description, palette))
             .child(
                 div()
-                    .p(px(16.0))
+                    .py(px(20.0))
                     .border_t_1()
+                    .border_b_1()
                     .border_color(rgb(palette.border))
                     .flex()
-                    .gap(px(16.0))
+                    .flex_wrap()
+                    .gap(px(20.0))
                     .child(metadata(G::ServiceVersion, version.to_owned()))
                     .child(metadata(
                         G::ConfiguredModels,
@@ -701,18 +699,13 @@ impl Render for GatewayPage {
                             .unwrap_or_else(|| "—".into()),
                     )),
             )
-            .child(
-                div()
-                    .px(px(16.0))
-                    .pb(px(14.0))
-                    .child(self.caption(G::ModelsHint, palette)),
-            );
+            .child(self.caption(G::ModelsHint, palette));
         let address = div()
             .w_full()
             .flex()
             .flex_col()
-            .gap(px(10.0))
-            .mt(px(22.0))
+            .gap(px(12.0))
+            .mt(px(32.0))
             .child(
                 div()
                     .text_size(px(13.0))
@@ -764,6 +757,7 @@ impl Render for GatewayPage {
                             .text_size(px(12.0))
                             .line_height(px(18.0))
                             .text_color(rgb(palette.danger))
+                            .whitespace_normal()
                             .child(text!(self.locale.action_text(error_text(
                                 cli_bridge::ErrorKind::InvalidAddress
                             )))),
@@ -778,6 +772,7 @@ impl Render for GatewayPage {
                         .text_size(px(12.0))
                         .line_height(px(18.0))
                         .text_color(rgb(if saved { palette.muted } else { palette.danger }))
+                        .whitespace_normal()
                         .child(text!(self.locale.gateway_text(if saved {
                             G::Saved
                         } else {
@@ -787,16 +782,16 @@ impl Render for GatewayPage {
             });
         div()
             .id("gateway-page-content")
+            .aria_label(self.locale.gateway_text(G::Title))
             .track_focus(&self.focus)
             .size_full()
             .min_h_0()
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
             .on_key_down(cx.listener(Self::key_down))
-            .px(px(if compact { 16.0 } else { 24.0 }))
-            .pb(px(16.0))
+            .pb(px(28.0))
             .text_color(rgb(palette.text))
-            .child(div().w_full().max_w(px(820.0)).child(card).child(address))
+            .child(div().w_full().max_w(px(920.0)).child(card).child(address))
     }
 }
 

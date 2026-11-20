@@ -1,0 +1,14 @@
+format = "magpie-plugin/1"
+id = "agent.kimi-cli"
+name = "Kimi CLI 1.52 (Python)"
+version = "0.1.0"
+api_version = 1
+kind = "agent-adapter"
+enabled_by_default = false
+requires = []
+provides = ["agent.kimi-cli"]
+
+[[contributions.agents]]
+id = "kimi-cli"
+engine = "declarative-config/1"
+definition = "definition.json"

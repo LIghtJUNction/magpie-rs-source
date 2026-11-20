@@ -1,4 +1,6 @@
 //! Native Provider management backed by the same store used by CLI and gateway.
+use gpui_kit_material::components::{ButtonSize, ButtonVariant, MaterialButton, material_button};
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
@@ -9,9 +11,9 @@ use std::{
 };
 
 use gpui::{
-    AccessibleAction, App, Context, Div, Entity, FocusHandle, FontWeight, IntoElement,
-    KeyDownEvent, Render, Role, ScrollAnchor, ScrollHandle, SharedString, Stateful, Subscription,
-    Task, Toggled, Window, div, point, prelude::*, px, rgb, text,
+    App, Context, Div, Entity, EventEmitter, FocusHandle, FontWeight, IntoElement, KeyDownEvent,
+    Render, Role, ScrollAnchor, ScrollHandle, SharedString, Subscription, Task, Window, div, point,
+    prelude::*, px, rgb, text,
 };
 use magpie_core::{
     credentials::{self, SaveMode, SecretChange},
@@ -22,10 +24,25 @@ use crate::{
     assets,
     cli_bridge::{self, Cancellation, Reply, Request},
     localization::Locale,
+    plugin_catalog::OwnedProvider,
     provider_text::ProviderText as P,
     text_input::{InputEvent, TextInput},
-    theme::{Appearance, Palette},
+    theme::{self, Appearance, Palette},
 };
+
+gpui::actions!(magpie_provider, [NextControl, PreviousControl]);
+struct ProviderKeys;
+impl gpui::Global for ProviderKeys {}
+
+fn init_keys(cx: &mut App) {
+    if cx.try_global::<ProviderKeys>().is_none() {
+        cx.bind_keys([
+            gpui::KeyBinding::new("tab", NextControl, Some("MagpieProviders")),
+            gpui::KeyBinding::new("shift-tab", PreviousControl, Some("MagpieProviders")),
+        ]);
+        cx.set_global(ProviderKeys);
+    }
+}
 
 const FIELDS: [(&str, P, &str); 6] = [
     ("provider-name", P::Name, "My provider"),
@@ -39,6 +56,9 @@ const FIELDS: [(&str, P, &str); 6] = [
 #[derive(Clone)]
 enum Action {
     Add,
+    Preset(String),
+    Custom,
+    CancelPicker,
     RefreshModels(String),
     CancelRefresh,
     Edit(String),
@@ -53,6 +73,27 @@ enum Action {
     Enabled,
     ClearKey,
     ToggleDisabled,
+    KeepEditing,
+    Discard,
+}
+
+#[derive(Clone, Copy)]
+enum DiscardScope {
+    Editor,
+    Window,
+}
+
+pub(crate) enum ProviderEvent {
+    KeepEditing,
+    DiscardWindow,
+}
+impl EventEmitter<ProviderEvent> for ProvidersPage {}
+
+#[derive(PartialEq, Eq)]
+struct DraftValues {
+    fields: [String; 6],
+    protocol: ProviderProtocol,
+    enabled: bool,
 }
 
 struct Editor {
@@ -61,6 +102,7 @@ struct Editor {
     protocol: ProviderProtocol,
     enabled: bool,
     clear_key: bool,
+    initial: DraftValues,
 }
 
 pub struct ProvidersPage {
@@ -68,7 +110,10 @@ pub struct ProvidersPage {
     appearance: Appearance,
     path: Result<PathBuf, StoreError>,
     store: Option<ProviderStore>,
+    presets: Vec<OwnedProvider>,
+    preset_picker: bool,
     editor: Option<Editor>,
+    discard: Option<DiscardScope>,
     delete: Option<String>,
     notice: Option<(bool, String)>,
     task: Option<Task<()>>,
@@ -94,7 +139,27 @@ impl ProvidersPage {
         Self::at_path(ProviderStore::default_path(), cx)
     }
 
+    #[cfg(feature = "visual-test")]
+    pub(crate) fn new_for_preview(cx: &mut Context<Self>) -> Self {
+        Self::at_path(Err(StoreError::ConfigDirectory), cx)
+    }
+
+    #[cfg(feature = "visual-test")]
+    pub(crate) fn preview_load(
+        &mut self,
+        store: ProviderStore,
+        presets: Vec<OwnedProvider>,
+        picker: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.task = None;
+        self.set_store(store, cx);
+        self.set_presets(presets, cx);
+        self.preset_picker = picker;
+    }
+
     fn at_path(path: Result<PathBuf, StoreError>, cx: &mut Context<Self>) -> Self {
+        init_keys(cx);
         let locale = Locale::system();
         let fields = FIELDS
             .into_iter()
@@ -151,7 +216,10 @@ impl ProvidersPage {
             appearance: Appearance::System,
             path,
             store: None,
+            presets: Vec::new(),
+            preset_picker: false,
             editor: None,
+            discard: None,
             delete: None,
             notice: None,
             task: None,
@@ -213,6 +281,66 @@ impl ProvidersPage {
 
     pub(crate) fn busy(&self) -> bool {
         self.task.is_some()
+    }
+
+    pub(crate) fn set_presets(&mut self, presets: Vec<OwnedProvider>, cx: &mut Context<Self>) {
+        self.buttons.retain(|id, _| {
+            !id.starts_with("provider-preset:")
+                || presets
+                    .iter()
+                    .any(|preset| id == &format!("provider-preset:{}", preset.preset.id))
+        });
+        for preset in &presets {
+            self.ensure_button(format!("provider-preset:{}", preset.preset.id), cx);
+        }
+        self.ensure_button("provider-custom".into(), cx);
+        self.ensure_button("provider-picker-cancel".into(), cx);
+        self.presets = presets;
+        cx.notify();
+    }
+
+    fn use_preset(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(preset) = self
+            .presets
+            .iter()
+            .find(|preset| preset.preset.id == id)
+            .map(|preset| preset.preset.preset())
+        else {
+            return;
+        };
+        self.preset_picker = false;
+        self.edit(None, cx);
+        if self.editor.is_none() {
+            return;
+        }
+        let mut id = preset.id.clone();
+        for suffix in 2..=129 {
+            if self
+                .store
+                .as_ref()
+                .is_some_and(|store| store.provider(&id).is_none())
+            {
+                break;
+            }
+            id = format!("{}-{suffix}", preset.id);
+        }
+        for (field, value) in [
+            ("provider-id", id.as_str()),
+            ("provider-name", preset.name.as_str()),
+            ("provider-url", preset.base_url.as_str()),
+        ] {
+            self.fields[field].update(cx, |input, cx| input.set_text(value, cx));
+        }
+        if let Some(editor) = &mut self.editor {
+            editor.protocol = preset.protocol;
+            editor.initial = DraftValues {
+                fields: FIELDS.map(|(id, _, _)| self.fields[id].read(cx).text().to_owned()),
+                protocol: preset.protocol,
+                enabled: editor.enabled,
+            };
+        }
+        self.pending_focus = Some(self.fields["provider-key"].read(cx).focus_handle());
+        cx.notify();
     }
 
     pub(crate) fn shutdown_pending(&self) -> Arc<AtomicBool> {
@@ -298,8 +426,21 @@ impl ProvidersPage {
         cx.notify();
     }
 
+    #[cfg(feature = "visual-test")]
+    pub fn preview_reveal_credentials(&self, window: &mut Window, cx: &mut Context<Self>) {
+        // Use the laid-out field anchor so every viewport captures the actual
+        // masked credential, instead of relying on a fixed pixel scroll offset.
+        if self.editor.is_some() {
+            if let Some(anchor) = self.anchors.get("provider-key") {
+                anchor.scroll_to(window, cx);
+            }
+        }
+    }
+
     fn ensure_button(&mut self, id: String, cx: &mut Context<Self>) {
         let scroll = if id.starts_with("provider-row:")
+            || id.starts_with("provider-preset:")
+            || matches!(id.as_str(), "provider-custom" | "provider-picker-cancel")
             || id.contains("delete")
             || id == "provider-disabled-toggle"
         {
@@ -391,6 +532,13 @@ impl ProvidersPage {
             self.notice = Some((true, self.locale.provider_text(P::Error).to_owned()));
             return;
         }
+        let initial = DraftValues {
+            fields: FIELDS.map(|(id, _, _)| self.fields[id].read(cx).text().to_owned()),
+            protocol: original
+                .as_ref()
+                .map_or(ProviderProtocol::OpenAiChat, |p| p.protocol),
+            enabled: original.as_ref().is_none_or(|p| p.enabled),
+        };
         self.editor = Some(Editor {
             revision: store.revision(),
             protocol: original
@@ -399,11 +547,33 @@ impl ProvidersPage {
             enabled: original.as_ref().is_none_or(|p| p.enabled),
             original,
             clear_key: false,
+            initial,
         });
         self.delete = None;
         self.notice = None;
         self.editor_scroll.set_offset(point(px(0.0), px(0.0)));
         self.pending_focus = Some(self.fields["provider-name"].read(cx).focus_handle());
+    }
+
+    pub(crate) fn has_unsaved_changes(&self, cx: &App) -> bool {
+        self.editor.as_ref().is_some_and(|editor| {
+            editor.clear_key
+                || editor.initial
+                    != DraftValues {
+                        fields: FIELDS.map(|(id, _, _)| self.fields[id].read(cx).text().to_owned()),
+                        protocol: editor.protocol,
+                        enabled: editor.enabled,
+                    }
+        })
+    }
+
+    pub(crate) fn request_window_discard(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.discard, Some(DiscardScope::Window)) {
+            return;
+        }
+        self.discard = Some(DiscardScope::Window);
+        self.pending_focus = self.buttons.get("provider-keep-editing").cloned();
+        cx.notify();
     }
 
     fn input(&self, id: &str, cx: &App) -> String {
@@ -658,12 +828,46 @@ impl ProvidersPage {
         }));
     }
 
+    fn finish_cancel(&mut self, cx: &mut Context<Self>) {
+        if let Some(editor) = self.editor.take() {
+            self.pending_focus = Some(
+                editor
+                    .original
+                    .as_ref()
+                    .map(|provider| self.row_focus(&provider.id, "edit", cx))
+                    .unwrap_or_else(|| self.buttons["provider-add"].clone()),
+            );
+        }
+        self.fields["provider-key"].update(cx, |input, cx| {
+            input.set_text("", cx);
+        });
+        self.notice = None;
+    }
+
     fn act(&mut self, action: Action, cx: &mut Context<Self>) {
+        if self.discard.is_some() && !matches!(action, Action::KeepEditing | Action::Discard) {
+            return;
+        }
         if self.busy() && !matches!(action, Action::CancelRefresh) {
             return;
         }
         match action {
-            Action::Add => self.edit(None, cx),
+            Action::Add => {
+                self.preset_picker = true;
+                self.query.clear();
+                self.search.update(cx, |input, cx| input.set_text("", cx));
+                self.pending_focus = Some(self.search.read(cx).focus_handle());
+                cx.notify();
+            }
+            Action::Preset(id) => self.use_preset(&id, cx),
+            Action::Custom => {
+                self.preset_picker = false;
+                self.edit(None, cx);
+            }
+            Action::CancelPicker => {
+                self.preset_picker = false;
+                cx.notify();
+            }
             Action::RefreshModels(id) => self.refresh_models(id, cx),
             Action::CancelRefresh => self.cancel(),
             Action::Edit(id) => {
@@ -688,19 +892,24 @@ impl ProvidersPage {
                 }
             }
             Action::Cancel => {
-                if let Some(editor) = self.editor.take() {
-                    self.pending_focus = Some(
-                        editor
-                            .original
-                            .as_ref()
-                            .map(|provider| self.row_focus(&provider.id, "edit", cx))
-                            .unwrap_or_else(|| self.buttons["provider-add"].clone()),
-                    );
+                if self.has_unsaved_changes(cx) {
+                    self.discard = Some(DiscardScope::Editor);
+                    self.pending_focus = self.buttons.get("provider-keep-editing").cloned();
+                } else {
+                    self.finish_cancel(cx);
                 }
-                self.fields["provider-key"].update(cx, |input, cx| {
-                    input.set_text("", cx);
-                });
-                self.notice = None;
+            }
+            Action::KeepEditing => {
+                self.discard = None;
+                self.pending_focus = Some(self.fields["provider-name"].read(cx).focus_handle());
+                cx.emit(ProviderEvent::KeepEditing);
+            }
+            Action::Discard => {
+                let close_window = matches!(self.discard.take(), Some(DiscardScope::Window));
+                self.finish_cancel(cx);
+                if close_window {
+                    cx.emit(ProviderEvent::DiscardWindow);
+                }
             }
             Action::Save => self.save(cx),
             Action::Refresh => self.refresh(cx),
@@ -727,9 +936,87 @@ impl ProvidersPage {
         cx.notify();
     }
 
+    fn traverse_editor(&self, backwards: bool, window: &mut Window, cx: &mut App) -> bool {
+        let Some(editor) = self
+            .editor
+            .as_ref()
+            .filter(|_| !self.busy() && self.discard.is_none())
+        else {
+            return false;
+        };
+        // GPUI's default traversal excludes clipped controls. The form must
+        // reach its offscreen fields before the fixed Save/Cancel footer.
+        let mut order = Vec::new();
+        for (id, _, _) in FIELDS {
+            if id == "provider-id" && editor.original.is_some() {
+                continue;
+            }
+            if id == "provider-key" {
+                for protocol in ProviderProtocol::ALL {
+                    order.push(
+                        self.buttons[&format!("provider-protocol:{}", protocol.as_str())].clone(),
+                    );
+                }
+            }
+            order.push(self.fields[id].read(cx).focus_handle());
+            if id == "provider-key"
+                && editor
+                    .original
+                    .as_ref()
+                    .is_some_and(|provider| provider.credential_ref.is_some())
+            {
+                order.push(self.buttons["provider-clear-key"].clone());
+            }
+        }
+        order.extend(
+            ["provider-enabled", "provider-save", "provider-cancel"]
+                .map(|id| self.buttons[id].clone()),
+        );
+        let Some(index) = order.iter().position(|handle| handle.is_focused(window)) else {
+            return false;
+        };
+        let Some(next) = (if backwards {
+            index.checked_sub(1)
+        } else {
+            Some(index + 1)
+        })
+        .and_then(|index| order.get(index)) else {
+            return false;
+        };
+        next.focus(window, cx);
+        true
+    }
+
+    fn move_focus(&mut self, backwards: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.traverse_editor(backwards, window, cx) {
+            if backwards {
+                window.focus_prev(cx);
+            } else {
+                window.focus_next(cx);
+            }
+        }
+        for (id, input) in &self.fields {
+            if input.read(cx).focus_handle().is_focused(window) {
+                if let Some(anchor) = self.anchors.get(*id) {
+                    anchor.scroll_to(window, cx);
+                }
+                break;
+            }
+        }
+        for (id, handle) in &self.buttons {
+            if handle.is_focused(window) {
+                if let Some(anchor) = self.anchors.get(id) {
+                    anchor.scroll_to(window, cx);
+                }
+                break;
+            }
+        }
+    }
+
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = &event.keystroke;
         match key.key.as_str() {
+            "escape" if self.discard.is_some() => self.act(Action::KeepEditing, cx),
             "escape" if self.editor.is_some() || self.delete.is_some() => self.act(
                 if self.delete.is_some() {
                     Action::CancelDelete
@@ -741,29 +1028,7 @@ impl ProvidersPage {
             "s" if key.modifiers.control || key.modifiers.platform => self.act(Action::Save, cx),
             "r" if key.modifiers.control || key.modifiers.platform => self.refresh(cx),
             "f5" => self.refresh(cx),
-            "tab" => {
-                if key.modifiers.shift {
-                    window.focus_prev(cx);
-                } else {
-                    window.focus_next(cx);
-                }
-                for (id, input) in &self.fields {
-                    if input.read(cx).focus_handle().is_focused(window) {
-                        if let Some(anchor) = self.anchors.get(*id) {
-                            anchor.scroll_to(window, cx);
-                        }
-                        break;
-                    }
-                }
-                for (id, handle) in &self.buttons {
-                    if handle.is_focused(window) {
-                        if let Some(anchor) = self.anchors.get(id) {
-                            anchor.scroll_to(window, cx);
-                        }
-                        break;
-                    }
-                }
-            }
+            "tab" => self.move_focus(key.modifiers.shift, window, cx),
             _ => return,
         }
         cx.stop_propagation();
@@ -777,69 +1042,30 @@ impl ProvidersPage {
         selected: bool,
         palette: Palette,
         cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let busy = self.busy() && !matches!(action, Action::CancelRefresh);
-        let danger = matches!(action, Action::Delete(_) | Action::ConfirmDelete(_))
-            || (matches!(action, Action::ClearKey) && selected);
-        let weak = cx.weak_entity();
-        let accessible_action = action.clone();
-        div()
-            .id(SharedString::from(id.clone()))
-            .when_some(self.buttons.get(&id), |button, focus| {
-                button.track_focus(&focus.clone().tab_stop(!busy))
+    ) -> MaterialButton {
+        let enabled = !(self.busy() && !matches!(action, Action::CancelRefresh))
+            && (self.discard.is_none() || matches!(action, Action::KeepEditing | Action::Discard));
+        let variant = if matches!(action, Action::Save | Action::Add) {
+            ButtonVariant::Filled
+        } else if selected {
+            ButtonVariant::Tonal
+        } else {
+            ButtonVariant::Text
+        };
+        let mut button = material_button(SharedString::from(id.clone()), variant)
+            .when_some(self.buttons.get(&id), |button, handle| {
+                button.track_focus(handle)
             })
-            .anchor_scroll(self.anchors.get(&id).cloned())
-            .tab_stop(!busy)
-            .tab_index(0)
-            .role(if busy { Role::Status } else { Role::Button })
-            .aria_label(label.to_owned())
-            .when(
-                matches!(
-                    action,
-                    Action::Protocol(_) | Action::Enabled | Action::ClearKey
-                ),
-                |button| {
-                    button.aria_toggled(if selected {
-                        Toggled::True
-                    } else {
-                        Toggled::False
-                    })
-                },
-            )
-            .h(px(34.0))
-            .px(px(10.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(5.0))
-            .border_2()
-            .border_color(gpui::rgba(0))
-            .bg(rgb(if selected {
-                palette.selected
-            } else {
-                palette.surface
-            }))
-            .text_color(rgb(if danger {
-                palette.danger
-            } else if selected {
-                palette.accent
-            } else {
-                palette.text
-            }))
-            .text_size(px(13.0))
-            .whitespace_nowrap()
-            .when(busy, |button| button.opacity(0.55))
-            .when(!busy, |button| {
-                button
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(rgb(palette.inset)))
-                    .focus_visible(move |style| style.border_color(rgb(palette.accent)))
-                    .on_click(cx.listener(move |view, _, _, cx| view.act(action.clone(), cx)))
-                    .on_a11y_action(AccessibleAction::Click, move |_, _, cx| {
-                        let _ = weak.update(cx, |view, cx| view.act(accessible_action.clone(), cx));
-                    })
-            })
+            .anchor_scroll(self.anchors.get(&id).cloned());
+        let _ = palette;
+        button = button
+            .button_size(ButtonSize::Small)
+            .rounded(px(8.0))
+            .font(theme::ui_font(cx, self.locale))
+            .disabled(!enabled)
+            .accessibility_label(label.to_owned());
+        button
+            .on_click(cx.listener(move |view, _, _, cx| view.act(action.clone(), cx)))
             .child(text!(label.to_owned()))
     }
 
@@ -866,49 +1092,94 @@ impl ProvidersPage {
             } else {
                 P::NoKey
             });
-        let summary = format!(
-            "{host} · {} {} · {credential}",
-            provider.models.len(),
-            self.locale.provider_text(P::ModelsCount)
-        );
+        let summary = format!("{host} · {credential}");
+        let monogram = provider
+            .name
+            .chars()
+            .next()
+            .map(|letter| letter.to_uppercase().to_string())
+            .unwrap_or_else(|| "·".into());
         let identity = div()
             .flex_1()
             .min_w_0()
             .flex()
-            .flex_col()
-            .gap(px(3.0))
-            .line_height(px(17.0))
+            .items_center()
+            .gap(px(12.0))
             .child(
                 div()
+                    .size(px(36.0))
+                    .flex_none()
+                    .rounded(px(8.0))
+                    .bg(rgb(palette.inset))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(14.0))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .truncate()
-                    .child(text!(provider.name.clone())),
+                    .child(text!(monogram)),
             )
             .child(
                 div()
-                    .text_size(px(11.0))
-                    .text_color(rgb(palette.muted))
-                    .truncate()
-                    .child(text!(summary)),
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(5.0))
+                    .line_height(px(18.0))
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .truncate()
+                            .child(text!(provider.name.clone())),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(palette.muted))
+                            .truncate()
+                            .child(text!(summary)),
+                    ),
             );
         let state = div()
             .text_size(px(11.0))
             .flex_none()
-            .text_color(rgb(if provider.enabled {
-                palette.accent
-            } else {
-                palette.muted
-            }))
-            .child(text!(self.locale.provider_text(if provider.enabled {
-                P::Enabled
-            } else {
-                P::Disabled
-            })));
+            .flex()
+            .flex_col()
+            .items_end()
+            .gap(px(5.0))
+            .text_color(rgb(palette.muted))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .size(px(5.0))
+                            .rounded(px(5.0))
+                            .bg(rgb(if provider.enabled {
+                                palette.accent
+                            } else {
+                                palette.muted
+                            })),
+                    )
+                    .child(text!(self.locale.provider_text(if provider.enabled {
+                        P::Enabled
+                    } else {
+                        P::Disabled
+                    }))),
+            )
+            .child(text!(format!(
+                "{} {}",
+                provider.models.len(),
+                self.locale.provider_text(P::ModelsCount)
+            )));
         let controls = div()
             .flex()
             .flex_wrap()
             .items_center()
-            .gap(px(4.0))
+            .gap(px(2.0))
             .child(self.button(
                 format!("provider-row:{}:models", provider.id),
                 self.locale.provider_text(P::RefreshModels),
@@ -965,7 +1236,7 @@ impl ProvidersPage {
             div()
                 .flex()
                 .flex_col()
-                .gap(px(6.0))
+                .gap(px(12.0))
                 .child(
                     div()
                         .flex()
@@ -980,8 +1251,7 @@ impl ProvidersPage {
             .w_full()
             .min_w_0()
             .flex_none()
-            .px(px(16.0))
-            .py(px(12.0))
+            .py(px(20.0))
             .flex()
             .flex_col()
             .gap(px(10.0))
@@ -1033,20 +1303,50 @@ impl ProvidersPage {
             })
     }
 
-    fn editor(&self, palette: Palette, cx: &mut Context<Self>) -> Div {
+    fn editor(&self, palette: Palette, dense: bool, cx: &mut Context<Self>) -> Div {
         let editor = self
             .editor
             .as_ref()
             .expect("editor exists only in editor view");
-        let mut form = div().flex().flex_col().gap(px(16.0));
+        let section = |key, first| {
+            div()
+                .pt(px(if first {
+                    0.0
+                } else if dense {
+                    10.0
+                } else {
+                    16.0
+                }))
+                .pb(px(2.0))
+                .text_size(px(14.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(text!(self.locale.provider_text(key)))
+        };
+        let mut form = div()
+            .w_full()
+            .max_w(px(720.0))
+            .flex()
+            .flex_col()
+            .gap(px(if dense { 12.0 } else { 18.0 }));
         for (id, label, _) in FIELDS {
+            match id {
+                "provider-name" => form = form.child(section(P::IdentitySection, true)),
+                "provider-url" => form = form.child(section(P::ConnectionSection, false)),
+                "provider-models" => form = form.child(section(P::CatalogSection, false)),
+                _ => {}
+            }
             if id == "provider-key" {
                 form = form.child(
                     div()
                         .flex()
                         .flex_col()
                         .gap(px(6.0))
-                        .child(text!(self.locale.provider_text(P::Protocol)))
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(text!(self.locale.provider_text(P::Protocol))),
+                        )
                         .child(div().flex().flex_wrap().gap(px(4.0)).children(
                             ProviderProtocol::ALL.map(|protocol| {
                                 self.button(
@@ -1060,6 +1360,7 @@ impl ProvidersPage {
                             }),
                         )),
                 );
+                form = form.child(section(P::CredentialsSection, false));
             }
             let hint = match id {
                 "provider-key" => Some(P::KeyHint),
@@ -1085,8 +1386,8 @@ impl ProvidersPage {
                     .when_some(hint, |field, hint| {
                         field.child(
                             div()
-                                .text_size(px(11.0))
-                                .line_height(px(16.0))
+                                .text_size(px(12.0))
+                                .line_height(px(18.0))
                                 .text_color(rgb(palette.muted))
                                 .whitespace_normal()
                                 .child(text!(self.locale.provider_text(hint))),
@@ -1125,6 +1426,14 @@ impl ProvidersPage {
             palette,
             cx,
         ));
+        form = form.child(
+            div()
+                .text_size(px(11.0))
+                .line_height(px(16.0))
+                .text_color(rgb(palette.muted))
+                .whitespace_normal()
+                .child(text!(self.locale.provider_text(P::Restart))),
+        );
         div()
             .flex_1()
             .min_h_0()
@@ -1138,18 +1447,20 @@ impl ProvidersPage {
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.editor_scroll)
-                    .p(px(20.0))
+                    .px(px(2.0))
+                    .pt(px(4.0))
+                    .pb(px(if dense { 12.0 } else { 28.0 }))
                     .child(form),
             )
             .child(
                 div()
                     .flex_none()
-                    .px(px(20.0))
-                    .py(px(12.0))
+                    .py(px(if dense { 8.0 } else { 16.0 }))
                     .border_t_1()
                     .border_color(rgb(palette.border))
                     .flex()
                     .flex_wrap()
+                    .justify_end()
                     .gap(px(6.0))
                     .child(
                         self.button(
@@ -1206,7 +1517,9 @@ impl Render for ProvidersPage {
             });
         }
         let palette = Palette::for_window(window, self.appearance);
-        let wide = f32::from(window.viewport_size().width) >= 800.0;
+        let wide = f32::from(window.viewport_size().width) >= 1100.0;
+        let compact = f32::from(window.viewport_size().width) < 600.0;
+        let dense = f32::from(window.viewport_size().height) < 600.0;
         let busy = self.busy();
         for (id, label, placeholder) in FIELDS {
             let immutable_id =
@@ -1223,8 +1536,16 @@ impl Render for ProvidersPage {
         }
         self.search.update(cx, |input, cx| {
             input.set_presentation(
-                self.locale.provider_text(P::Search),
-                self.locale.provider_text(P::Search),
+                self.locale.provider_text(if self.preset_picker {
+                    P::SearchPresets
+                } else {
+                    P::Search
+                }),
+                self.locale.provider_text(if self.preset_picker {
+                    P::SearchPresets
+                } else {
+                    P::Search
+                }),
                 palette,
                 false,
                 cx,
@@ -1237,24 +1558,11 @@ impl Render for ProvidersPage {
                 P::AddTitle
             },
         );
-        let header = div()
-            .flex_none()
-            .p(px(16.0))
+        let actions = div()
             .flex()
             .flex_wrap()
             .items_center()
-            .gap(px(8.0))
-            .when(self.editor.is_some(), |row| {
-                row.child(
-                    div()
-                        .flex_1()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(text!(title)),
-                )
-            })
-            .when(self.editor.is_none(), |row| {
-                row.child(div().flex_1().min_w(px(150.0)).child(self.search.clone()))
-            })
+            .gap(px(6.0))
             .child(self.button(
                 "provider-refresh".into(),
                 self.locale.provider_text(P::Refresh),
@@ -1266,7 +1574,9 @@ impl Render for ProvidersPage {
             .when(self.cancellation.is_some(), |row| {
                 row.child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(px(12.0))
+                        .text_color(rgb(palette.muted))
+                        .whitespace_normal()
                         .child(text!(self.locale.provider_text(P::RefreshingModels))),
                 )
             })
@@ -1280,18 +1590,205 @@ impl Render for ProvidersPage {
                     cx,
                 ))
             })
-            .when(self.editor.is_none() && self.store.is_some(), |row| {
-                row.child(self.button(
-                    "provider-add".into(),
-                    self.locale.provider_text(P::Add),
-                    Action::Add,
-                    true,
-                    palette,
-                    cx,
-                ))
-            });
-        let body = if self.editor.is_some() {
-            self.editor(palette, cx)
+            .when(
+                self.editor.is_none() && !self.preset_picker && self.store.is_some(),
+                |row| {
+                    row.child(self.button(
+                        "provider-add".into(),
+                        self.locale.provider_text(P::Add),
+                        Action::Add,
+                        true,
+                        palette,
+                        cx,
+                    ))
+                },
+            );
+        let header = div()
+            .flex_none()
+            .pb(px(if dense { 8.0 } else { 20.0 }))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(12.0))
+            .when(compact && self.editor.is_none(), |header| {
+                header.flex_col().items_stretch()
+            })
+            .when(self.editor.is_some(), |header| {
+                header.child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .text_size(px(if compact { 16.0 } else { 18.0 }))
+                        .font_weight(FontWeight::MEDIUM)
+                        .whitespace_normal()
+                        .child(text!(title)),
+                )
+            })
+            .when(self.editor.is_none(), |header| {
+                header.child(
+                    div()
+                        .w_full()
+                        .max_w(px(360.0))
+                        .min_w_0()
+                        .flex_1()
+                        .when(compact, |search| search.flex_none())
+                        .child(self.search.clone()),
+                )
+            })
+            .child(actions);
+        for id in ["provider-keep-editing", "provider-discard"] {
+            self.ensure_button(id.to_owned(), cx);
+        }
+        let body = if self.discard.is_some() {
+            div().flex_1().min_h_0().child(
+                div()
+                    .id("provider-discard-dialog")
+                    .flex_1()
+                    .min_h_0()
+                    .py(px(24.0))
+                    .max_w(px(600.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(16.0))
+                    .role(Role::AlertDialog)
+                    .aria_label(self.locale.provider_text(P::DiscardTitle))
+                    .child(
+                        div()
+                            .text_size(px(18.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(text!(self.locale.provider_text(P::DiscardTitle))),
+                    )
+                    .child(
+                        div()
+                            .whitespace_normal()
+                            .child(text!(self.locale.provider_text(P::DiscardBody))),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap(px(8.0))
+                            .child(self.button(
+                                "provider-keep-editing".into(),
+                                self.locale.provider_text(P::KeepEditing),
+                                Action::KeepEditing,
+                                true,
+                                palette,
+                                cx,
+                            ))
+                            .child(self.button(
+                                "provider-discard".into(),
+                                self.locale.provider_text(P::Discard),
+                                Action::Discard,
+                                false,
+                                palette,
+                                cx,
+                            )),
+                    ),
+            )
+        } else if self.preset_picker {
+            div().flex_1().min_h_0().child(
+                div()
+                    .id("provider-presets")
+                    .size_full()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .pb(px(24.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(8.))
+                            .pb(px(12.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(18.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(text!(self.locale.provider_text(P::Choose))),
+                            )
+                            .child(self.button(
+                                "provider-picker-cancel".into(),
+                                self.locale.provider_text(P::Cancel),
+                                Action::CancelPicker,
+                                false,
+                                palette,
+                                cx,
+                            )),
+                    )
+                    .child(self.button(
+                        "provider-custom".into(),
+                        self.locale.provider_text(P::Custom),
+                        Action::Custom,
+                        false,
+                        palette,
+                        cx,
+                    ))
+                    .children(
+                        self.presets
+                            .iter()
+                            .filter(|preset| {
+                                self.query.is_empty()
+                                    || preset.preset.name.to_lowercase().contains(&self.query)
+                                    || preset.preset.id.contains(&self.query)
+                            })
+                            .map(|preset| {
+                                div()
+                                    .py(px(16.0))
+                                    .border_b_1()
+                                    .border_color(rgb(palette.border))
+                                    .flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap(px(12.))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(160.))
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(3.))
+                                            .child(
+                                                div()
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .child(text!(preset.preset.name.clone())),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(12.))
+                                                    .text_color(rgb(palette.muted))
+                                                    .whitespace_normal()
+                                                    .child(text!(preset.preset.base_url.clone())),
+                                            ),
+                                    )
+                                    .child(self.button(
+                                        format!("provider-preset:{}", preset.preset.id),
+                                        self.locale.provider_text(P::ChooseAction),
+                                        Action::Preset(preset.preset.id.clone()),
+                                        false,
+                                        palette,
+                                        cx,
+                                    ))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .py(px(12.))
+                            .text_size(px(12.))
+                            .line_height(px(18.0))
+                            .text_color(rgb(palette.muted))
+                            .whitespace_normal()
+                            .child(text!(self.locale.provider_text(P::PresetHint))),
+                    ),
+            )
+        } else if self.editor.is_some() {
+            self.editor(palette, dense, cx)
         } else {
             let providers = self
                 .store
@@ -1314,18 +1811,20 @@ impl Render for ProvidersPage {
                 div()
                     .id("providers-scroll")
                     .size_full()
+                    .pb(px(24.0))
                     .overflow_y_scroll()
                     .track_scroll(&self.scroll)
                     .when(matched.is_empty(), |body| {
                         body.child(
                             div()
-                                .p(px(24.0))
+                                .py(px(32.0))
                                 .flex()
                                 .flex_col()
                                 .gap(px(12.0))
                                 .child(
                                     div()
-                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_size(px(20.0))
+                                        .font_weight(FontWeight::MEDIUM)
                                         .child(text!(self.locale.provider_text(empty_text))),
                                 )
                                 .when(providers.is_empty() && self.store.is_some(), |body| {
@@ -1346,7 +1845,7 @@ impl Render for ProvidersPage {
                     )
                     .when(disabled_count > 0, |body| {
                         body.child(
-                            div().px(px(6.0)).py(px(6.0)).child(
+                            div().py(px(16.0)).child(
                                 self.button(
                                     "provider-disabled-toggle".into(),
                                     &format!(
@@ -1389,13 +1888,18 @@ impl Render for ProvidersPage {
         div()
             .id("providers-page")
             .track_focus(&self.focus)
+            .key_context("MagpieProviders")
+            .on_action(
+                cx.listener(|view, _: &NextControl, window, cx| view.move_focus(false, window, cx)),
+            )
+            .on_action(cx.listener(|view, _: &PreviousControl, window, cx| {
+                view.move_focus(true, window, cx)
+            }))
             .on_key_down(cx.listener(Self::key_down))
             .size_full()
             .min_w_0()
             .flex()
             .flex_col()
-            .rounded(px(8.0))
-            .bg(rgb(palette.surface))
             .overflow_hidden()
             .child(header)
             .when_some(self.notice.as_ref(), |page, (error, message)| {
@@ -1404,10 +1908,9 @@ impl Render for ProvidersPage {
                         .id("provider-notice")
                         .role(Role::Status)
                         .flex_none()
-                        .mx(px(16.0))
-                        .mb(px(8.0))
-                        .p(px(10.0))
-                        .rounded(px(5.0))
+                        .mb(px(16.0))
+                        .p(px(12.0))
+                        .rounded(px(6.0))
                         .bg(rgb(if *error {
                             palette.warning_bg
                         } else {
@@ -1424,19 +1927,6 @@ impl Render for ProvidersPage {
                 )
             })
             .child(body)
-            .child(
-                div()
-                    .flex_none()
-                    .px(px(16.0))
-                    .py(px(10.0))
-                    .border_t_1()
-                    .border_color(rgb(palette.border))
-                    .text_size(px(11.0))
-                    .line_height(px(16.0))
-                    .text_color(rgb(palette.muted))
-                    .whitespace_normal()
-                    .child(text!(self.locale.provider_text(P::Restart))),
-            )
     }
 }
 
@@ -1496,12 +1986,122 @@ mod tests {
     }
 
     #[gpui::test]
+    fn keyboard_reaches_fields_below_the_editor_viewport(cx: &mut TestAppContext) {
+        struct Host(Entity<ProvidersPage>);
+        impl Render for Host {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().flex().flex_col().child(self.0.clone())
+            }
+        }
+        let fixture = Fixture::new();
+        cx.update(|cx| {
+            gpui::init(cx);
+            gpui_kit_material::init(cx);
+        });
+        let page = cx.new(|cx| ProvidersPage::at_path(Ok(fixture.path()), cx));
+        let window = cx.open_window(gpui::size(px(360.0), px(240.0)), |window, cx| {
+            gpui::base::Root::new(cx.new(|_| Host(page.clone())), window, cx)
+        });
+        cx.run_until_parked();
+        page.update(cx, |page, cx| page.act(Action::Custom, cx));
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            page.read(cx).fields["provider-name"]
+                .read(cx)
+                .focus_handle()
+                .focus(window, cx);
+        });
+        // TestWindow does not deliver platform frame callbacks. This checks
+        // keyboard focus; the native fixture separately checks scrolling.
+        for id in ["provider-id", "provider-url"] {
+            cx.simulate_keystrokes("tab");
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                assert!(
+                    page.read(cx).fields[id]
+                        .read(cx)
+                        .focus_handle()
+                        .is_focused(window),
+                    "Tab must reach {id} even below the viewport"
+                );
+            });
+        }
+        cx.simulate_keystrokes("shift-tab");
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            assert!(
+                page.read(cx).fields["provider-id"]
+                    .read(cx)
+                    .focus_handle()
+                    .is_focused(window)
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn cancelling_and_closing_a_changed_provider_requires_discard(cx: &mut TestAppContext) {
+        let fixture = Fixture::new();
+        let page = cx.new(|cx| ProvidersPage::at_path(Ok(fixture.path()), cx));
+        cx.run_until_parked();
+        page.update(cx, |page, cx| {
+            page.act(Action::Custom, cx);
+            assert!(!page.has_unsaved_changes(cx));
+            page.fields["provider-name"].update(cx, |input, cx| {
+                input.set_text("Unsaved fixture", cx);
+            });
+            page.fields["provider-key"].update(cx, |input, cx| {
+                input.set_text("fixture-secret-not-a-key", cx);
+            });
+            page.act(Action::Cancel, cx);
+            assert!(
+                page.editor.is_some(),
+                "cancel must preserve the draft until confirmed"
+            );
+            assert_eq!(
+                page.fields["provider-name"].read(cx).text(),
+                "Unsaved fixture"
+            );
+            page.act(Action::Save, cx);
+            assert!(
+                ProviderStore::load(&fixture.path())
+                    .unwrap()
+                    .providers()
+                    .is_empty()
+            );
+            page.act(Action::KeepEditing, cx);
+            assert!(page.has_unsaved_changes(cx));
+            assert_eq!(
+                page.fields["provider-key"].read(cx).text(),
+                "fixture-secret-not-a-key"
+            );
+            page.request_window_discard(cx);
+            page.request_window_discard(cx);
+            assert!(
+                page.editor.is_some(),
+                "repeated close requests retain the draft"
+            );
+            page.act(Action::Discard, cx);
+            assert!(page.editor.is_none());
+            assert!(page.fields["provider-key"].read(cx).text().is_empty());
+            assert!(!page.has_unsaved_changes(cx));
+        });
+        assert!(
+            ProviderStore::load(&fixture.path())
+                .unwrap()
+                .providers()
+                .is_empty()
+        );
+    }
+
+    #[gpui::test]
     fn form_actions_persist_create_disable_and_delete(cx: &mut TestAppContext) {
         let fixture = Fixture::new();
         let page = cx.new(|cx| ProvidersPage::at_path(Ok(fixture.path()), cx));
         cx.run_until_parked();
         page.update(cx, |view, cx| {
-            view.act(Action::Add, cx);
+            view.act(Action::Custom, cx);
             type_field(view, "provider-id", "local", cx);
             type_field(view, "provider-name", "Local fixture", cx);
             type_field(view, "provider-url", "http://127.0.0.1:8099/v1", cx);
@@ -1559,7 +2159,7 @@ mod tests {
         let page = cx.new(|cx| ProvidersPage::at_path(Ok(fixture.path()), cx));
         cx.run_until_parked();
         page.update(cx, |view, cx| {
-            view.act(Action::Add, cx);
+            view.act(Action::Custom, cx);
             type_field(view, "provider-id", "local", cx);
             type_field(view, "provider-name", "Original", cx);
             type_field(view, "provider-url", "http://127.0.0.1:8099/v1", cx);
@@ -1632,6 +2232,12 @@ mod tests {
             );
             type_field(view, "provider-key", "synthetic-secret", cx);
             view.act(Action::Cancel, cx);
+            assert!(view.editor.is_some());
+            assert_eq!(
+                view.fields["provider-key"].read(cx).text(),
+                "synthetic-secret"
+            );
+            view.act(Action::Discard, cx);
             assert_eq!(view.fields["provider-key"].read(cx).text(), "");
         });
     }

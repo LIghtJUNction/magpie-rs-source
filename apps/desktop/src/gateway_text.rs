@@ -2,7 +2,6 @@ use crate::localization::Locale;
 
 #[derive(Clone, Copy)]
 pub(crate) enum GatewayText {
-    Intro,
     Title,
     Running,
     External,
@@ -43,13 +42,6 @@ impl Locale {
     pub(crate) fn gateway_text(self, key: GatewayText) -> &'static str {
         use GatewayText::*;
         let values = match key {
-            Intro => [
-                "Your local API endpoint",
-                "本地 API 服务",
-                "本機 API 服務",
-                "ローカル API サービス",
-                "Lokaler API-Dienst",
-            ],
             Title => [
                 "Local gateway",
                 "本地网关",

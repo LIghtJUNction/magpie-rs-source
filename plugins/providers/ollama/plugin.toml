@@ -1,0 +1,18 @@
+# Official API documentation checked 2026-11-02; no account verification.
+format = "magpie-plugin/1"
+id = "provider.ollama"
+name = "Ollama (Local)"
+version = "0.1.0"
+api_version = 1
+kind = "provider-preset"
+enabled_by_default = true
+requires = []
+provides = ["provider-preset"]
+
+[[contributions.providers]]
+id = "ollama"
+name = "Ollama (Local)"
+base_url = "http://127.0.0.1:11434/v1"
+protocol = "openai_chat"
+requires_key = false
+source = "https://docs.ollama.com/api/openai-compatibility"

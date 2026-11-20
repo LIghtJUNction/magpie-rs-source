@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "id": "kimi-cli",
+  "name": "Kimi CLI 1.52 (Python)",
+  "config_paths": [
+    "${home}/.kimi/config.toml"
+  ],
+  "format": "toml",
+  "selection": {
+    "path": [
+      "models",
+      "magpie",
+      "model"
+    ]
+  },
+  "reject_existing": [
+    [
+      "providers",
+      "magpie"
+    ],
+    [
+      "models",
+      "magpie"
+    ]
+  ],
+  "fields": [
+    {
+      "path": [
+        "default_model"
+      ],
+      "value": "magpie"
+    },
+    {
+      "path": [
+        "providers",
+        "magpie",
+        "type"
+      ],
+      "value": "openai_legacy"
+    },
+    {
+      "path": [
+        "providers",
+        "magpie",
+        "base_url"
+      ],
+      "value": "${gateway}/v1"
+    },
+    {
+      "path": [
+        "providers",
+        "magpie",
+        "api_key"
+      ],
+      "value": "magpie-local"
+    },
+    {
+      "path": [
+        "models",
+        "magpie",
+        "provider"
+      ],
+      "value": "magpie"
+    },
+    {
+      "path": [
+        "models",
+        "magpie",
+        "model"
+      ],
+      "value": "${model}"
+    },
+    {
+      "path": [
+        "models",
+        "magpie",
+        "max_context_size"
+      ],
+      "value": 32768
+    },
+    {
+      "path": [
+        "loop_control",
+        "reserved_context_size"
+      ],
+      "value": 8192
+    }
+  ]
+}

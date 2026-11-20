@@ -1,0 +1,32 @@
+{
+  "date": "2026-11-02",
+  "status": "development_checkpoint_user_rejected_first_material_visual",
+  "workspace": {
+    "passed": 293,
+    "ignored": 5,
+    "scope": "same core/service/CLI files before desktop-only edits"
+  },
+  "provider_regressions": {
+    "passed": 18,
+    "failed": 0,
+    "scope": "synthetic loopback merged protocol suite"
+  },
+  "desktop": {
+    "passed": 77,
+    "ignored": 2,
+    "clippy": "passed -D warnings",
+    "all_targets_visual_test_compile": "passed"
+  },
+  "gateway_lifecycle": {
+    "passed": 1,
+    "scope": "explicit real CLI startup, occupied port, owned stop/reap and Drop cleanup"
+  },
+  "native_window": "first Material draft opened on Linux Wayland and rejected by user; subsequent theme/layout adjustments not reaccepted",
+  "not_verified": [
+    "full original parity",
+    "latest full native interaction workflow",
+    "release packages",
+    "other OS",
+    "real accounts"
+  ]
+}

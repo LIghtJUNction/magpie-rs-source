@@ -16,7 +16,6 @@ pub enum ActionText {
     ProvidersPage,
     GatewayPage,
     RoutesPage,
-    UsagePage,
     SessionsPage,
     LibraryPage,
     PluginsPage,
@@ -186,7 +185,6 @@ impl Locale {
             }
             ActionText::GatewayPage => ["Gateway", "网关", "閘道", "ゲートウェイ", "Gateway"],
             ActionText::RoutesPage => ["Routing", "路由", "路由", "ルーティング", "Routing"],
-            ActionText::UsagePage => ["Usage", "用量", "用量", "使用量", "Nutzung"],
             ActionText::SessionsPage => ["Sessions", "会话", "對話", "セッション", "Sitzungen"],
             ActionText::LibraryPage => ["Library", "资源库", "資源庫", "ライブラリ", "Bibliothek"],
             ActionText::PluginsPage => ["Plugins", "插件", "外掛", "プラグイン", "Plugins"],

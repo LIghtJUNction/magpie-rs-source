@@ -87,13 +87,6 @@ pub(crate) struct GatewayRunner {
 }
 
 impl OwnedGateway {
-    #[cfg(test)]
-    pub(crate) fn isolated_store(address: SocketAddr, path: PathBuf) -> (Self, GatewayRunner) {
-        let (handle, mut runner) = Self::begin(address, true);
-        runner.providers = Some(path);
-        (handle, runner)
-    }
-
     pub(crate) fn begin(address: SocketAddr, start_if_absent: bool) -> (Self, GatewayRunner) {
         let shared = Arc::new(Shared {
             state: Mutex::new(Arc::new(GatewayState::Checking)),

@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "author": "magpie-rs contributors",
   "license": "MIT",
-  "description": "Native Omarchy bar launcher for magpie-rs",
+  "description": "Native Omarchy launcher for the Magpie desktop window",
   "kinds": [
     "bar-widget"
   ],
@@ -13,8 +13,8 @@
     "barWidget": "Widget.qml"
   },
   "barWidget": {
-    "displayName": "magpie-rs",
-    "description": "Open the model selection panel or main window",
+    "displayName": "Magpie",
+    "description": "Open the native Magpie window",
     "category": "AI",
     "aliases": [
       "magpie-rs"
