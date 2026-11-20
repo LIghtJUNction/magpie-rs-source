@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "magpie-rs.magpie",
+  "name": "magpie-rs",
+  "version": "0.1.0",
+  "author": "magpie-rs contributors",
+  "license": "MIT",
+  "description": "Native Omarchy launcher for the Magpie desktop window",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Widget.qml"
+  },
+  "barWidget": {
+    "displayName": "Magpie",
+    "description": "Open the native Magpie window",
+    "category": "AI",
+    "aliases": [
+      "magpie-rs"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
